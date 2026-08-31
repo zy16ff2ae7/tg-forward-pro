@@ -22,6 +22,7 @@ from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
 from app.errors import FeatureUnavailable, ValidationError, _dumps
+from app.plans import STARS_DESCRIPTION, is_valid_period, periods_text, stars_amount
 from app.telegram_client.jobs import MAX_PARSER_LIMIT, ONE_SHOT_KINDS
 from app.telegram_client.manager import manager
 
@@ -654,16 +655,6 @@ async def subscription(request: web.Request) -> web.Response:
 
 # ──────────────────────────────── Оплата Stars ───────────────────────────
 
-# Верхняя граница срока в одном счёте: защищает от «оплати 9999 месяцев»
-# и от случайной гигантской суммы в звёздах.
-MAX_INVOICE_MONTHS = 12
-
-STARS_INVOICE_DESCRIPTION = (
-    "Автоматическая пересылка сообщений: безлимит правил, 24/7, "
-    "без метки «Переслано от»."
-)
-
-
 @routes.post("/api/subscription/invoice")
 @require_auth
 async def create_stars_invoice(request: web.Request) -> web.Response:
@@ -689,8 +680,10 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
         raise ValidationError("Ожидается JSON-объект с полем months")
     months = _as_int(body.get("months"), 1)
 
-    if not 1 <= months <= MAX_INVOICE_MONTHS:
-        raise ValidationError(f"Срок — от 1 до {MAX_INVOICE_MONTHS} месяцев")
+    # Срок только из каталога: «2 месяца» со стороны клиента — не повод
+    # молча округлять, иначе цена на кнопке разойдётся с ценой в счёте.
+    if not is_valid_period(months):
+        raise ValidationError(f"Срок — {periods_text()}")
 
     if _bot is None:
         raise FeatureUnavailable(
@@ -700,11 +693,11 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
         )
 
     title = "Абонемент на 1 месяц" if months == 1 else f"Абонемент на {months} мес."
-    amount = settings.price_stars * months
+    amount = stars_amount(months)
     try:
         link = await _bot.create_invoice_link(
             title=title,
-            description=STARS_INVOICE_DESCRIPTION,
+            description=STARS_DESCRIPTION,
             # Формат читает хендлер successful_payment в боте — менять нельзя.
             payload=f"sub:{user_id}:{months}",
             provider_token="",  # для Stars платёжный токен не нужен

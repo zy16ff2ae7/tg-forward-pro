@@ -209,7 +209,12 @@ journalctl -u tg-forward -f     # логи в реальном времени
 Ничего подключать не нужно, работает сразу. Цена — `PRICE_STARS`.
 Вывод средств: через [@xRocket](https://t.me/xrocket) или Fragment.
 
-Оплата идёт из кабинета, не покидая мини-апп:
+Срок выбирается из каталога — **1, 3, 6 или 12 месяцев** (`app/plans.py`).
+Он один и для бота, и для кабинета: цена считается умножением
+`PRICE_STARS × months` на сервере, поэтому кнопки не расходятся со счётом.
+Добавить срок — значит добавить его в `PERIODS`, и он появится в обоих местах.
+
+Оплата из кабинета идёт не покидая мини-апп:
 
 1. Мини-апп дёргает `POST /api/subscription/invoice` (срок — 1…12 месяцев).
 2. Бэкенд сам считает сумму (`PRICE_STARS × months`) и создаёт инвойс через
@@ -316,6 +321,7 @@ app/
   logging_setup.py        уровни, stderr + ротация файла
   timeutil.py             единственный источник UTC-времени
   security.py             шифрование Telethon-сессий
+  plans.py                каталог сроков абонемента: общий для бота и кабинета
   webapp_api.py           JSON-API и раздача мини-аппа, проверка initData
   db/
     models.py             User, TelegramAccount, Rule, Subscription, Payment,
@@ -335,7 +341,8 @@ app/
     yookassa.py, crypto.py
 webapp/                   кабинет: index.html, app.js, styles.css (без сборки)
 deploy/                   systemd-юнит, nginx-конфиг, скрипт деплоя
-tests/                    pytest: фильтры, абонемент, персистентность, конфиг, API
+tests/                    pytest: фильтры, абонемент, персистентность, конфиг,
+                          сроки абонемента, API
 scripts/
   smoke_test.py           проверки БД, триала, шифрования, фильтров, подписки
   gen_secret.py           генерация SECRET_KEY

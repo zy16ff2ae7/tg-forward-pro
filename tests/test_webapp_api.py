@@ -286,13 +286,27 @@ async def test_stars_invoice_unavailable_without_bot(client, auth_headers):
     assert body["status"] == "bot_unavailable"
 
 
-@pytest.mark.parametrize("months", [0, -1, 13, 10_000])
+@pytest.mark.parametrize("months", [0, -1, 13, 10_000, 2, 5])
 async def test_stars_invoice_rejects_bad_months(client, auth_headers, months):
-    """Срок ограничен сверху: иначе в счёт уедет гигантская сумма в звёздах."""
+    """Срок только из каталога.
+
+    И сверху ограничен (иначе в счёт уедет гигантская сумма в звёздах), и
+    «промежуточные» значения вроде 2 месяцев не проходят: цена на кнопке
+    должна совпадать с ценой в счёте, а кнопок с таким сроком нет.
+    """
     response = await client.post(
         "/api/subscription/invoice", headers=auth_headers, json={"months": months}
     )
     assert response.status == 400
+
+
+async def test_stars_invoice_error_names_available_periods(client, auth_headers):
+    """Ошибка подсказывает, какие сроки есть, — не заставляет угадывать."""
+    response = await client.post(
+        "/api/subscription/invoice", headers=auth_headers, json={"months": 2}
+    )
+    body = await response.json()
+    assert "1, 3, 6 или 12" in body["error"]
 
 
 async def test_stars_invoice_rejects_non_object_body(client, auth_headers):

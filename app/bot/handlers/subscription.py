@@ -20,10 +20,19 @@ from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
 from app.payments import crypto, yookassa
+from app.plans import (
+    DEFAULT_MONTHS,
+    STARS_DESCRIPTION,
+    months_from_callback,
+    periods_text,
+    stars_amount,
+)
 
 router = Router(name="subscription")
 
-MONTHS = 1
+# Срок по умолчанию для способов оплаты без выбора срока
+# (карта, USDT, ручная выдача) — звёзды предлагают срок отдельным шагом.
+MONTHS = DEFAULT_MONTHS
 
 
 async def _status_text(user_id: int) -> str:
@@ -150,18 +159,50 @@ async def show_subscription(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "pay:stars")
 async def pay_stars(callback: CallbackQuery) -> None:
+    """Шаг 1: выбрать срок. Счёт высылается следующим шагом."""
     await callback.answer()
     assert callback.from_user is not None
-    payload = f"sub:{callback.from_user.id}:{MONTHS}"
-    prices = [LabeledPrice(label=f"Абонемент на {MONTHS} мес.", amount=settings.price_stars)]
+
+    text = (
+        "⭐ <b>Оплата звёздами</b>\n\n"
+        f"Абонемент: <b>{settings.price_stars} ⭐</b> за месяц.\n"
+        "Выберите срок — чем больше срок, тем меньше хлопот с продлением.\n\n"
+        f"Доступные сроки: {periods_text()}."
+    )
+    if callback.message is not None:
+        await smart_edit(callback.message, text, reply_markup=kb.stars_periods())
+
+
+@router.callback_query(F.data.startswith("pay:stars:"))
+async def pay_stars_period(callback: CallbackQuery) -> None:
+    """Шаг 2: выставить счёт на выбранный срок."""
+    await callback.answer()
+    assert callback.from_user is not None and callback.data is not None
+
+    months = months_from_callback(callback.data)
+    if months is None:
+        # Левый срок в callback_data: молча брать месяц нельзя — иначе
+        # пользователь заплатит не за то, что выбирал.
+        logger.warning("Stars: непонятный срок в {}", callback.data)
+        if callback.message is not None:
+            await smart_edit(
+                callback.message,
+                "Не удалось разобрать срок. Выберите его заново.",
+                reply_markup=kb.stars_periods(),
+            )
+        return
+
+    amount = stars_amount(months)
+    title = f"Абонемент на {months} мес."
     await callback.bot.send_invoice(
         chat_id=callback.from_user.id,
-        title="Абонемент на 1 месяц",
-        description="Автоматическая пересылка сообщений: безлимит правил, 24/7, без метки «Переслано от».",
-        payload=payload,
+        title=title,
+        description=STARS_DESCRIPTION,
+        # Формат читает хендлер successful_payment — менять нельзя.
+        payload=f"sub:{callback.from_user.id}:{months}",
         provider_token="",  # для Stars токен не нужен
         currency="XTR",
-        prices=prices,
+        prices=[LabeledPrice(label=title, amount=amount)],
     )
 
 

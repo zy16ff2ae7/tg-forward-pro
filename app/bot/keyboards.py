@@ -8,6 +8,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.config import settings
 from app.db.models import Rule, TelegramAccount
+from app.plans import PERIODS, stars_amount
 
 
 def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
@@ -216,6 +217,24 @@ def payment_menu() -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text="🪙 USDT (TRC-20)", callback_data="pay:usdt"))
     builder.row(InlineKeyboardButton(text="👤 Через администратора", callback_data="pay:manual"))
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main"))
+    return builder.as_markup()
+
+
+def stars_periods() -> InlineKeyboardMarkup:
+    """Выбор срока оплаты звёздами: на кнопке сразу итоговая сумма.
+
+    Сроки берём из каталога, а цену считаем на месте — если тариф поменяли,
+    кнопки не расходятся с тем, что реально уедет в инвойс.
+    """
+    builder = InlineKeyboardBuilder()
+    for months in PERIODS:
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{months} мес. — {stars_amount(months)} ⭐",
+                callback_data=f"pay:stars:{months}",
+            )
+        )
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="menu:sub"))
     return builder.as_markup()
 
 
