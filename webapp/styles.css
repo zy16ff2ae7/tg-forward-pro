@@ -1,0 +1,1024 @@
+/* Кабинет автопересылки — арт-деко, зелёные оттенки, латунь, чуть «поломанности».
+   Палитра задана здесь и НЕ перебивается темой Telegram (см. applyTheme в app.js). */
+
+:root {
+  /* поверхности */
+  --bg: #04120D;
+  --bg-soft: #0A2419;
+  --card: #0B2A1D;
+  --card-hi: #103825;
+  --text: #E8F5EE;
+  /* Приглушённый текст: 7.45:1 на карточке — уровень AAA, а не «на глаз норм» */
+  --muted: #93BEA6;
+  --line: rgba(198, 246, 226, 0.14);
+
+  /* акценты */
+  --accent: #10B981;
+  --accent-soft: rgba(16, 185, 129, 0.14);
+  --emerald: #10B981;
+  --jade: #34D399;
+  --mint: #C6F6E2;
+  --brass: #C6A668;
+  --brass-light: #E8D09C;
+
+  --green: #34D399;
+  --orange: #F5B942;
+  --red: #F87171;
+
+  --radius: 3px;
+  --nav-h: 60px;
+
+  /* срезанный уголок — базовая деталь арт-деко */
+  --notch: 12px;
+  --clip-notch: polygon(
+    0 0,
+    calc(100% - var(--notch)) 0,
+    100% var(--notch),
+    100% 100%,
+    0 100%
+  );
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.4;
+  overscroll-behavior-y: none;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(120% 55% at 50% -12%, rgba(16, 185, 129, 0.18), transparent 62%),
+    radial-gradient(95% 45% at 100% 0%, rgba(198, 166, 104, 0.10), transparent 58%),
+    linear-gradient(180deg, #04120D 0%, #072017 46%, #030B08 100%);
+  background-attachment: fixed;
+}
+
+/* Едва заметные вертикальные «ребра» — геометрия арт-деко на подложке */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(198, 246, 226, 0.028) 0 1px,
+    transparent 1px 26px
+  );
+}
+
+.content, .header, .nav { position: relative; z-index: 1; }
+
+button, input, select { font: inherit; color: inherit; }
+button { border: none; background: none; cursor: pointer; }
+
+/* ─────────────────────────────── Шапка ─────────────────────────────── */
+
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 16px;
+  background: linear-gradient(180deg, rgba(7, 32, 22, 0.97), rgba(4, 18, 13, 0.92));
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid rgba(198, 166, 104, 0.22);
+  overflow: hidden;
+}
+
+/* Веер-солнце в правом верхнем углу шапки */
+.header::before {
+  content: "";
+  position: absolute;
+  top: -68px;
+  right: -46px;
+  width: 190px;
+  height: 190px;
+  pointer-events: none;
+  background: repeating-conic-gradient(
+    from 202deg at 50% 50%,
+    rgba(198, 246, 226, 0.075) 0deg 2.4deg,
+    transparent 2.4deg 8deg
+  );
+}
+
+/* «Надломленная» двойная линейка под шапкой */
+.header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 4px;
+  height: 1px;
+  pointer-events: none;
+  opacity: 0.55;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(198, 166, 104, 0.65) 9%,
+    transparent 17%,
+    transparent 58%,
+    rgba(198, 166, 104, 0.5) 66%,
+    transparent 74%,
+    transparent 88%,
+    rgba(198, 166, 104, 0.35) 94%,
+    transparent 100%
+  );
+}
+
+.header__left { display: flex; align-items: center; gap: 11px; min-width: 0; }
+
+.header__title {
+  position: relative;
+  text-transform: uppercase;
+  font-weight: 700;
+  font-size: 13.5px;
+  letter-spacing: 1.7px;
+  color: var(--brass-light);
+  text-shadow: 1px 0 rgba(255, 64, 96, 0.26), -1px 0 rgba(64, 224, 255, 0.18);
+}
+
+/* Глитч: дубль заголовка, прорезанный полосой, вспыхивает раз в несколько секунд */
+.header__title::after {
+  content: attr(data-text);
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--mint);
+  opacity: 0;
+  clip-path: polygon(0 40%, 100% 40%, 100% 60%, 0 60%);
+  animation: decoGlitch 9s infinite steps(1);
+}
+
+@keyframes decoGlitch {
+  0%, 96.4% { opacity: 0; transform: none; }
+  96.6% { opacity: 0.9; transform: translate(2px, -1px); }
+  97.2% { opacity: 0.9; transform: translate(-3px, 1px); }
+  97.8% { opacity: 0.9; transform: translate(1px, 0); }
+  98.4%, 100% { opacity: 0; transform: none; }
+}
+
+.header__sub {
+  color: var(--muted);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+}
+
+.icon-btn {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  flex: none;
+  color: var(--brass-light);
+  background: rgba(198, 246, 226, 0.05);
+  border: 1px solid var(--line);
+  clip-path: var(--clip-notch);
+}
+.icon-btn:active { transform: scale(0.94); }
+
+/* ─────────────────────────────── Контент ─────────────────────────────── */
+
+.content { padding: 14px 16px calc(var(--nav-h) + 28px); }
+.tab.hidden { display: none; }
+
+.section-label {
+  display: flex;
+  align-items: center;
+  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--brass);
+  margin: 20px 4px 9px;
+}
+.section-label::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-right: 9px;
+  background: var(--brass);
+  transform: rotate(45deg);
+  opacity: 0.85;
+  flex: none;
+}
+
+/* ── Поиск ── */
+
+.search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 42px;
+  padding: 0 12px;
+  margin-bottom: 12px;
+  background: rgba(3, 11, 8, 0.66);
+  border: 1px solid var(--line);
+  clip-path: var(--clip-notch);
+}
+.search:focus-within { border-color: rgba(198, 166, 104, 0.55); }
+.search__icon { font-size: 13px; opacity: 0.55; margin-right: 8px; }
+.search input {
+  flex: 1;
+  border: none;
+  background: none;
+  outline: none;
+  height: 100%;
+  color: var(--text);
+}
+.search input::placeholder { color: rgba(147, 190, 166, 0.8); }
+
+/* ── Поверхности карточек ── */
+
+.cards, .list { display: flex; flex-direction: column; gap: 10px; }
+
+.card, .task, .chat, .account {
+  position: relative;
+  padding: 14px;
+  background:
+    linear-gradient(158deg, rgba(16, 185, 129, 0.075), rgba(4, 18, 13, 0.55) 48%),
+    var(--card);
+  border: 1px solid var(--line);
+  clip-path: var(--clip-notch);
+}
+
+/* тонкая латунная кромка по диагонали срезанного уголка */
+.card::before, .task::before, .chat::before, .account::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: var(--notch);
+  height: var(--notch);
+  pointer-events: none;
+  background: linear-gradient(135deg, rgba(198, 166, 104, 0.75) 0 1px, transparent 1px);
+}
+
+.card--row { display: flex; gap: 12px; align-items: flex-start; }
+.card__emoji { font-size: 21px; line-height: 1; flex: none; }
+.card__body { min-width: 0; }
+.card__title { font-weight: 650; color: var(--mint); margin-bottom: 3px; }
+.card__desc { color: var(--muted); font-size: 13px; }
+
+.card--cmd {
+  display: flex;
+  gap: 12px;
+  align-items: center;          /* шеврон выравнивается по центру строки */
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  position: relative;
+}
+.card--cmd::after {            /* намёк на кликабельность даже без анимации */
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px transparent;
+  transition: box-shadow 0.18s ease;
+}
+.card--cmd:hover::after,
+.card--cmd:focus-visible::after { box-shadow: inset 0 0 0 1px rgba(198, 166, 104, 0.32); }
+.card--cmd:active { background: linear-gradient(158deg, rgba(16, 185, 129, 0.16), rgba(4, 18, 13, 0.6)); }
+
+.cmd__main { flex: 1; min-width: 0; }
+.cmd__head { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; flex-wrap: wrap; }
+.cmd__title { font-weight: 650; color: var(--mint); }
+.cmd__desc { color: var(--muted); font-size: 13px; }
+
+/* Шеврон — главный сигнал «нажми, чтобы открыть». */
+.cmd__chevron {
+  font-size: 28px;
+  line-height: 1;
+  color: var(--brass);
+  flex: none;
+  margin-left: 4px;
+  transition: transform 0.18s ease, color 0.18s ease;
+}
+.card--cmd:hover .cmd__chevron,
+.card--cmd:focus-visible .cmd__chevron { color: var(--brass-light); transform: translateX(2px); }
+
+/* Статус-метка: тише, чем была — точка + подпись, без верхнего регистра.
+   Главный CTA здесь — сама карточка и шеврон, статус — справочный. */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--muted);
+  flex: none;
+}
+.status__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.04);
+}
+.status--ready { color: var(--jade); }
+.status--setup { color: var(--orange); }
+.status--off   { color: var(--muted); opacity: 0.8; }
+
+.card--add {
+  width: 100%;
+  padding: 14px;
+  margin-bottom: 10px;
+  color: var(--brass-light);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  font-size: 13px;
+  background: rgba(198, 246, 226, 0.03);
+  border: 1px dashed rgba(198, 166, 104, 0.4);
+  clip-path: var(--clip-notch);
+}
+.card--add:active { background: rgba(198, 166, 104, 0.09); }
+
+/* ── Сегментированный переключатель ── */
+
+.segmented {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 14px;
+  background: rgba(3, 11, 8, 0.72);
+  border: 1px solid rgba(198, 166, 104, 0.2);
+  clip-path: var(--clip-notch);
+}
+.seg {
+  flex: 1;
+  padding: 8px 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+  border-radius: 2px;
+}
+.seg.is-active {
+  background: linear-gradient(135deg, var(--emerald), var(--jade));
+  color: #04120D;
+  font-weight: 700;
+  box-shadow: none;
+}
+
+.segmented--sm { margin: 8px 0 0; }
+.segmented--sm .seg { font-size: 12px; padding: 7px 6px; }
+
+/* ── Пустые состояния ── */
+
+.empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 46px 20px;
+  font-size: 13.5px;
+}
+.empty__big { font-size: 32px; margin-bottom: 12px; }
+.empty__title { font-weight: 650; color: var(--mint); font-size: 15px; margin-bottom: 6px; }
+
+/* ── Задачи ── */
+
+.task__top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.task__dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  background: var(--jade);
+  transform: rotate(45deg); /* ромб вместо круга */
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.6);
+}
+.task__dot--off { background: var(--muted); box-shadow: none; }
+.task__title {
+  font-weight: 650;
+  flex: 1;
+  min-width: 0;
+  color: var(--mint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task__meta { color: var(--muted); font-size: 12.5px; margin-bottom: 10px; }
+.task__actions { display: flex; gap: 8px; }
+
+/* ── Кнопки ── */
+
+.btn {
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mint);
+  background: rgba(198, 246, 226, 0.055);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+}
+.btn:active { transform: scale(0.97); }
+.btn--primary {
+  background: linear-gradient(135deg, var(--emerald), var(--jade));
+  color: #04120D;
+  font-weight: 700;
+  border-color: rgba(198, 166, 104, 0.5);
+}
+.btn--block { width: 100%; padding: 13px; font-size: 14px; margin-top: 14px; letter-spacing: 0.4px; }
+.btn--danger { background: rgba(248, 113, 113, 0.12); color: var(--red); border-color: rgba(248, 113, 113, 0.3); }
+
+.fab {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: calc(var(--nav-h) + 14px);
+  z-index: 15;
+  padding: 14px;
+  font-weight: 700;
+  font-size: 13.5px;
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+  color: #04120D;
+  background: linear-gradient(135deg, var(--emerald), var(--jade));
+  border: 1px solid rgba(198, 166, 104, 0.55);
+  clip-path: var(--clip-notch);
+  box-shadow: 0 8px 22px rgba(16, 185, 129, 0.28);
+}
+.fab:active { transform: scale(0.98); }
+
+/* ── Чаты ── */
+
+.chips { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 12px; }
+.chip {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--muted);
+  background: rgba(198, 246, 226, 0.045);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+}
+.chip.is-active {
+  background: linear-gradient(135deg, var(--emerald), var(--jade));
+  color: #04120D;
+  border-color: rgba(198, 166, 104, 0.45);
+  font-weight: 700;
+}
+
+.chat { display: flex; align-items: center; gap: 11px; padding: 11px 13px; }
+.chat__emoji { font-size: 18px; flex: none; }
+.chat__body { flex: 1; min-width: 0; }
+.chat__title { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat__sub { color: var(--muted); font-size: 12px; }
+
+/* ── Аккаунты ── */
+
+.card--sub { padding: 16px; overflow: hidden; }
+
+/* Веер-солнце, выходящий из-за правого верхнего угла */
+.card--sub::after {
+  content: "";
+  position: absolute;
+  top: -54px;
+  right: -34px;
+  width: 168px;
+  height: 168px;
+  pointer-events: none;
+  background: repeating-conic-gradient(
+    from 196deg at 50% 50%,
+    rgba(198, 246, 226, 0.07) 0deg 2.6deg,
+    transparent 2.6deg 8.6deg
+  );
+}
+
+.sub__top { position: relative; display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.sub__label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.9px; }
+.sub__value {
+  position: relative;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.4px;
+  margin-top: 2px;
+  color: var(--mint);
+  text-shadow: 1.5px 0 rgba(255, 64, 96, 0.20), -1.5px 0 rgba(64, 224, 255, 0.16);
+}
+.sub__badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  padding: 5px 9px;
+  background: rgba(198, 246, 226, 0.06);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  white-space: nowrap;
+}
+.sub__badge.is-active { background: rgba(52, 211, 153, 0.14); color: var(--jade); border-color: rgba(52, 211, 153, 0.35); }
+.sub__note { position: relative; color: var(--muted); font-size: 12.5px; margin: 10px 0 14px; }
+.sub__actions { position: relative; display: flex; gap: 8px; }
+.sub__actions .btn { flex: 1; }
+
+.account { display: flex; align-items: center; gap: 11px; padding: 12px 13px; }
+.account__avatar {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  font-weight: 700;
+  color: var(--brass-light);
+  background: linear-gradient(150deg, rgba(16, 185, 129, 0.18), rgba(4, 18, 13, 0.6));
+  border: 1px solid rgba(198, 166, 104, 0.4);
+  clip-path: polygon(0 0, 100% 0, 100% 72%, 72% 100%, 0 100%);
+}
+.account__body { flex: 1; min-width: 0; }
+.account__phone { font-weight: 650; color: var(--text); }
+.account__id { color: var(--muted); font-size: 12px; }
+.account__state { font-size: 11px; font-weight: 700; flex: none; text-transform: uppercase; letter-spacing: 0.6px; }
+.account__state--on { color: var(--jade); }
+.account__state--off { color: var(--muted); }
+
+/* ─────────────────────────── Нижняя навигация ─────────────────────────── */
+
+.nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  height: var(--nav-h);
+  display: flex;
+  background: linear-gradient(180deg, rgba(7, 32, 22, 0.94), rgba(3, 11, 8, 0.99));
+  backdrop-filter: blur(14px);
+  border-top: 1px solid rgba(198, 166, 104, 0.24);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.nav__item {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  color: var(--muted);
+}
+.nav__item span { font-size: 18px; line-height: 1; }
+.nav__item i {
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+.nav__item.is-active { color: var(--mint); }
+.nav__item.is-active span { filter: drop-shadow(0 0 8px rgba(52, 211, 153, 0.6)); }
+.nav__item.is-active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 26px;
+  height: 2px;
+  background: var(--emerald);
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.75);
+}
+
+/* ───────────────────────────── Шторки ───────────────────────────────── */
+
+.sheet { position: fixed; inset: 0; z-index: 40; display: none; }
+.sheet.is-open { display: block; }
+
+.sheet__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(2, 8, 6, 0.68);
+  animation: fade 0.18s ease;
+}
+
+.sheet__panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 8px 16px calc(20px + env(safe-area-inset-bottom));
+  max-height: 88vh;
+  overflow-y: auto;
+  background:
+    radial-gradient(110% 60% at 50% -20%, rgba(16, 185, 129, 0.16), transparent 60%),
+    linear-gradient(180deg, #072017, #04120D 60%);
+  border-top: 1px solid rgba(198, 166, 104, 0.45);
+  border-radius: 18px 18px 0 0;
+  animation: slide 0.24s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slide { from { transform: translateY(100%); } to { transform: translateY(0); } }
+
+.sheet__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0 14px;
+  position: sticky;
+  top: 0;
+  background: linear-gradient(180deg, #072017 70%, rgba(7, 32, 23, 0));
+}
+.sheet__title {
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--brass-light);
+}
+
+.settings { display: flex; flex-direction: column; }
+.setting {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 2px;
+  border-top: 1px solid var(--line);
+  width: 100%;
+  text-align: left;
+}
+.setting:first-child { border-top: none; }
+.setting__emoji { font-size: 17px; flex: none; }
+.setting__body { flex: 1; min-width: 0; }
+.setting__title { font-weight: 600; color: var(--text); }
+.setting__desc { color: var(--muted); font-size: 12.5px; }
+.setting__chev { color: var(--brass); font-size: 14px; }
+
+/* ── Форма ── */
+
+.form { display: flex; flex-direction: column; }
+.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.field > span {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--brass);
+  text-transform: uppercase;
+  letter-spacing: 1.1px;
+}
+.field input, .field select {
+  height: 44px;
+  padding: 0 12px;
+  border-radius: 2px;
+  border: 1px solid var(--line);
+  background: rgba(3, 11, 8, 0.72);
+  color: var(--text);
+  outline: none;
+  width: 100%;
+}
+.field input:focus, .field select:focus { border-color: rgba(198, 166, 104, 0.6); }
+.field input:focus-visible, .field select:focus-visible {
+  outline: 2px solid var(--brass-light);
+  outline-offset: 1px;
+  border-color: var(--brass-light);
+}
+.field input::placeholder { color: rgba(147, 190, 166, 0.8); }
+.field select option { background: #072017; }
+
+.hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.error { color: var(--red); font-size: 13px; margin-top: 10px; text-align: center; min-height: 18px; }
+
+/* ── Тост ── */
+
+.toast {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: calc(var(--nav-h) + 70px);
+  z-index: 60;
+  padding: 12px 16px;
+  font-size: 13.5px;
+  text-align: center;
+  color: var(--mint);
+  background: rgba(6, 26, 18, 0.96);
+  border: 1px solid rgba(198, 166, 104, 0.35);
+  border-radius: 2px;
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none;
+  transition: opacity 0.2s, transform 0.2s;
+}
+.toast.is-show { opacity: 1; transform: translateY(0); }
+
+/* ── Дополнения каталога команд ── */
+
+/* Подсказка под описанием команды: чем этот тип задачи отличается от остальных */
+.cmd__hint {
+  margin-top: 6px;
+  padding-left: 8px;
+  font-size: 12px;
+  color: var(--brass);
+  border-left: 2px solid rgba(198, 166, 104, 0.45);
+}
+
+/* ── Архивные задачи ── */
+
+.task--archived { opacity: 0.72; }
+.task--archived .task__title { color: var(--muted); }
+
+/* ── Шторка создания задачи ── */
+
+.sheet__lead {
+  margin-bottom: 14px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.field__note {
+  font-style: normal;
+  font-size: 11.5px;
+  color: rgba(127, 168, 148, 0.85);
+}
+
+/* ── Шторка результатов ── */
+
+.results { display: flex; flex-direction: column; }
+.results__meta {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.1px;
+  text-transform: uppercase;
+  color: var(--brass);
+  margin-bottom: 10px;
+}
+.result { padding: 11px 2px; border-top: 1px solid var(--line); }
+.result:first-of-type { border-top: none; }
+.result__title {
+  font-weight: 600;
+  color: var(--text);
+  font-size: 13.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.result__sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+/* ── Недоступные кнопки ── */
+
+.btn:disabled { opacity: 0.4; }
+.btn:disabled:active { transform: none; }
+
+/* ══════════════════════ Маскот «Папа, ночной портье» ══════════════════════ */
+
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+.mascot { display: block; flex: none; }
+.mascot--logo { width: 40px; height: 40px; }
+.mascot--lg { width: 132px; height: 132px; }
+.mascot--md { width: 84px; height: 84px; margin: 0 auto 10px; }
+
+/* Покачивание конвертов, пульсация света у фонаря и редкое моргание */
+.papa__bob { animation: papaBob 3.6s ease-in-out infinite; }
+.papa__bob2 { animation: papaBob 3.6s ease-in-out infinite; animation-delay: 0.45s; }
+.papa__glow { animation: papaGlow 2.8s ease-in-out infinite; transform-origin: 28px 81px; }
+.papa__lantern { animation: papaLantern 2.8s ease-in-out infinite; }
+.papa__eyes { animation: papaBlink 6.5s infinite; transform-origin: 60px 65px; }
+
+@keyframes papaBob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2.5px); }
+}
+@keyframes papaGlow {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+@keyframes papaLantern {
+  0%, 100% { opacity: 0.82; }
+  50% { opacity: 1; }
+}
+@keyframes papaBlink {
+  0%, 94%, 100% { transform: scaleY(1); }
+  96.5% { transform: scaleY(0.08); }
+}
+
+/* ═════════════════════════ Заставка загрузки ══════════════════════════════ */
+
+.boot {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 24px;
+  text-align: center;
+  background: linear-gradient(180deg, #04120D 0%, #072017 46%, #030B08 100%);
+  transition: opacity 0.32s ease, visibility 0.32s ease;
+}
+.boot.is-hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+
+.boot__title {
+  margin-top: 14px;
+  font-size: 27px;
+  font-weight: 700;
+  letter-spacing: 7px;
+  color: var(--brass-light);
+  text-shadow: 1.5px 0 rgba(255, 64, 96, 0.22), -1.5px 0 rgba(64, 224, 255, 0.18);
+}
+.boot__sub {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 1.6px;
+  color: var(--muted);
+}
+.boot__bar {
+  width: 168px;
+  height: 2px;
+  margin-top: 20px;
+  overflow: hidden;
+  background: rgba(198, 246, 226, 0.1);
+}
+.boot__bar span {
+  display: block;
+  width: 40%;
+  height: 100%;
+  background: linear-gradient(90deg, var(--emerald), var(--brass-light));
+  animation: bootRun 1.15s ease-in-out infinite;
+}
+@keyframes bootRun {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(260%); }
+}
+
+/* ═════════════════════ Скелетоны вместо пустого экрана ════════════════════ */
+
+.sk {
+  position: relative;
+  overflow: hidden;
+  background: rgba(198, 246, 226, 0.055);
+  border-radius: 2px;
+}
+/* Бликуем трансформом, а не фоном: так анимация остаётся на GPU-слое */
+.sk::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(198, 246, 226, 0.13) 50%,
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: shimmer 1.3s ease-in-out infinite;
+}
+@keyframes shimmer { to { transform: translateX(100%); } }
+
+.sk-line { height: 11px; }
+.sk-line--sm { height: 9px; width: 62%; }
+.sk-dot { width: 21px; height: 21px; flex: none; }
+.sk-chip { width: 76px; height: 28px; }
+.sk-btn { height: 36px; flex: 1; }
+
+.sk-card {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px;
+  border: 1px solid var(--line);
+  clip-path: var(--clip-notch);
+  background: linear-gradient(158deg, rgba(16, 185, 129, 0.05), rgba(4, 18, 13, 0.5));
+}
+.sk-card__body { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+
+/* ═══════════════════ Состояние ошибки с повтором ═════════════════════════ */
+
+.state { text-align: center; color: var(--muted); padding: 34px 20px; font-size: 13.5px; }
+.state__title { font-weight: 650; color: var(--mint); font-size: 15px; margin: 8px 0 6px; }
+.state__text { margin-bottom: 16px; }
+.state__retry { min-width: 132px; }
+
+/* ═══════════════════════════ Видимый фокус ══════════════════════════════ */
+
+/* Всё, что можно нажать с клавиатуры, обязано показывать рамку. */
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--brass-light);
+  outline-offset: 2px;
+}
+
+/* Срезанный уголок (clip-path) обрезал бы внешний outline — этим элементам
+   рисуем кольцо внутри, иначе фокус остаётся невидимым. */
+:where(.icon-btn, .fab, .card--cmd, .card--add, .chip, .seg, .setting):focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--brass-light);
+}
+.search:focus-within {
+  border-color: var(--brass-light);
+  box-shadow: inset 0 0 0 1px var(--brass-light);
+}
+
+/* ═════════════════════════════ Микроанимации ═══════════════════════════ */
+
+/* Анимируем только transform и opacity — они не вызывают пересчёт layout. */
+.tab:not(.hidden) { animation: tabIn 0.24s cubic-bezier(0.2, 0.8, 0.3, 1) both; }
+@keyframes tabIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+.cards > *, .list > * { animation: rise 0.3s cubic-bezier(0.2, 0.8, 0.3, 1) both; }
+.cards > *:nth-child(2), .list > *:nth-child(2) { animation-delay: 0.03s; }
+.cards > *:nth-child(3), .list > *:nth-child(3) { animation-delay: 0.06s; }
+.cards > *:nth-child(4), .list > *:nth-child(4) { animation-delay: 0.09s; }
+.cards > *:nth-child(n + 5), .list > *:nth-child(n + 5) { animation-delay: 0.12s; }
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.btn, .chip, .seg, .icon-btn, .nav__item, .card--add, .card--cmd {
+  transition: transform 0.12s ease, background-color 0.18s ease, border-color 0.18s ease,
+    box-shadow 0.18s ease, color 0.18s ease;
+}
+
+/* Индикатор «идёт запрос» на кнопке */
+.btn.is-loading { position: relative; color: transparent; pointer-events: none; }
+.btn.is-loading::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 15px;
+  height: 15px;
+  border: 2px solid rgba(4, 18, 13, 0.35);
+  border-top-color: #04120D;
+  border-radius: 50%;
+  animation: spin 0.62s linear infinite;
+}
+.btn:not(.btn--primary).is-loading::after {
+  border-color: rgba(198, 246, 226, 0.3);
+  border-top-color: var(--brass-light);
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ═══════════════════════════ Адаптивность ══════════════════════════════ */
+
+/* На планшете и десктопе кабинет не должен растягиваться во всю ширину */
+@media (min-width: 600px) {
+  .header, .content, .nav { max-width: 600px; margin-left: auto; margin-right: auto; }
+  .nav { left: 50%; transform: translateX(-50%); right: auto; width: 100%; }
+  .fab { left: 50%; transform: translateX(-50%); right: auto; width: 568px; }
+  .fab:active { transform: translateX(-50%) scale(0.98); }
+  .sheet__panel { left: 50%; transform: translateX(-50%); right: auto; width: 600px; }
+}
+
+/* Узкие экраны: кнопки подписки не сжимаются в нечитаемую строку */
+@media (max-width: 380px) {
+  .sub__actions { flex-wrap: wrap; }
+  .sub__actions .btn { flex: 1 1 100%; }
+  .task__actions { flex-wrap: wrap; }
+  .task__actions .btn { flex: 1 1 auto; }
+  .segmented .seg { font-size: 11.5px; padding: 8px 4px; }
+}
+
+/* ═══════════════════════ Уважаем prefers-reduced-motion ════════════════ */
+
+/* Пользователь просил не анимировать — убираем движение целиком,
+   оставляя только смену прозрачности там, где она несёт смысл. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .boot__bar span { width: 100%; }
+  .sk::after { display: none; }
+}
+
+/* Плашка демо-режима: кабинет открыт вне Telegram, данные ненастоящие */
+.demo-bar {
+  position: sticky;
+  top: 0;
+  z-index: 70;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-align: center;
+  color: var(--brass-light);
+  background: rgba(198, 166, 104, 0.14);
+  border-bottom: 1px solid rgba(198, 166, 104, 0.35);
+  backdrop-filter: blur(8px);
+}

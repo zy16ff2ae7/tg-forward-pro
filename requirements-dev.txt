@@ -1,0 +1,6 @@
+# Только для разработки и CI: продакшену эти пакеты не нужны.
+-r requirements.txt
+
+pytest>=8.0
+pytest-asyncio>=0.24
+pyflakes>=3.2

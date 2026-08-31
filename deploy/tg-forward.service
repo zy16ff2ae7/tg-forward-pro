@@ -1,0 +1,18 @@
+[Unit]
+Description=Telegram auto-forward service (Garvis-style)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tg-forward
+EnvironmentFile=/opt/tg-forward/.env
+ExecStart=/opt/tg-forward/venv/bin/python -m app.main
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

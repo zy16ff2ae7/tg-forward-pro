@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#04120D">
+  <title>PAPA · Кабинет автопересылки</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- ── Маскот: Папа, ночной портье ──
+       Один <symbol> на всё: логотип в шапке, заставка загрузки, пустые состояния.
+       Анимации живут в CSS, чтобы их можно было отключить prefers-reduced-motion. -->
+  <svg class="sprite" aria-hidden="true" focusable="false">
+    <defs>
+      <radialGradient id="papaGlow">
+        <stop offset="0%" stop-color="#F5D98A" stop-opacity="0.55" />
+        <stop offset="100%" stop-color="#F5D98A" stop-opacity="0" />
+      </radialGradient>
+    </defs>
+    <symbol id="papa" viewBox="0 0 120 120">
+      <path d="M12 116V58L60 16l48 42v58z" fill="rgba(16,185,129,0.09)"
+            stroke="rgba(198,166,104,0.35)" stroke-width="1.2" />
+      <circle class="papa__glow" cx="28" cy="81" r="21" fill="url(#papaGlow)" />
+      <circle cx="60" cy="66" r="23" fill="#0E2C20" stroke="rgba(198,166,104,0.55)" stroke-width="1.4" />
+      <path d="M38 52a22 22 0 0 1 44 0z" fill="#0A2118" stroke="rgba(198,166,104,0.6)" stroke-width="1.3" />
+      <rect x="33" y="50" width="54" height="6" rx="1.5" fill="#123527"
+            stroke="rgba(198,166,104,0.6)" stroke-width="1.1" />
+      <text class="papa__mono" x="60" y="43" text-anchor="middle" font-size="14"
+            font-weight="700" fill="#E8D09C" font-family="Georgia, 'Times New Roman', serif">P</text>
+      <g class="papa__eyes" fill="#E8D09C">
+        <ellipse cx="52" cy="65" rx="2.6" ry="3.2" />
+        <ellipse cx="68" cy="65" rx="2.6" ry="3.2" />
+      </g>
+      <path d="M45 79q7-6 15-1 8-5 15 1" fill="none" stroke="#C6A668"
+            stroke-width="2.4" stroke-linecap="round" />
+      <path d="M54 85q6 4 12 0" fill="none" stroke="rgba(232,208,156,0.75)"
+            stroke-width="1.6" stroke-linecap="round" />
+      <path d="M28 68v-5" stroke="rgba(198,166,104,0.8)" stroke-width="1.2" />
+      <circle class="papa__lantern" cx="28" cy="80" r="5" fill="#F5D98A" />
+      <path d="M23.5 74h9M23.5 86h9" stroke="rgba(198,166,104,0.9)" stroke-width="1.4" />
+      <g class="papa__bob">
+        <rect x="80" y="80" width="22" height="14" rx="1" transform="rotate(-8 91 87)"
+              fill="#0A2118" stroke="rgba(198,166,104,0.7)" stroke-width="1.2" />
+        <path d="M82.5 82.5l8.5 6.5 8.5-6.5" transform="rotate(-8 91 87)" fill="none"
+              stroke="rgba(198,166,104,0.6)" stroke-width="1" />
+      </g>
+      <g class="papa__bob2">
+        <rect x="84" y="71" width="20" height="12" rx="1" transform="rotate(6 94 77)"
+              fill="#123527" stroke="rgba(198,166,104,0.55)" stroke-width="1.1" />
+      </g>
+    </symbol>
+  </svg>
+
+  <!-- Заставка первой загрузки мини-аппа -->
+  <div class="boot" id="boot" role="status" aria-live="polite">
+    <svg class="mascot mascot--lg" viewBox="0 0 120 120" aria-hidden="true"><use href="#papa" /></svg>
+    <div class="boot__title">PAPA</div>
+    <div class="boot__sub">ночной портье · открываю кабинет</div>
+    <div class="boot__bar"><span></span></div>
+  </div>
+
+  <!-- Шапка -->
+  <header class="header">
+    <div class="header__left">
+      <svg class="mascot mascot--logo" viewBox="0 0 120 120" role="img"
+           aria-label="Папа, ночной портье"><use href="#papa" /></svg>
+      <div>
+        <div class="header__title" data-text="Кабинет">Кабинет</div>
+        <div class="header__sub" id="headerSub">автопересылка</div>
+      </div>
+    </div>
+    <button class="icon-btn" id="settingsBtn" aria-label="Настройки">⚙️</button>
+  </header>
+
+  <!-- Контент -->
+  <main class="content">
+    <!-- ── Вкладка: Команды ── -->
+    <section class="tab" id="tab-commands" aria-label="Команды">
+      <div class="search">
+        <span class="search__icon" aria-hidden="true">🔍</span>
+        <input type="text" id="commandSearch" placeholder="Поиск команды"
+               autocomplete="off" aria-label="Поиск команды">
+      </div>
+      <div class="cards" id="commandList"></div>
+    </section>
+
+    <!-- ── Вкладка: Задачи ── -->
+    <section class="tab hidden" id="tab-tasks" aria-label="Задачи">
+      <div class="segmented" id="taskStatus" role="tablist" aria-label="Статус задач">
+        <button class="seg is-active" data-status="active" role="tab" aria-selected="true">Активные</button>
+        <button class="seg" data-status="paused" role="tab" aria-selected="false">На паузе</button>
+        <button class="seg" data-status="done" role="tab" aria-selected="false">Завершённые</button>
+      </div>
+      <div class="list" id="taskList"></div>
+    </section>
+
+    <!--
+      Кнопка «Запустить задачу» намеренно вынесена из #tab-tasks:
+      у вкладки есть анимация `tabIn` с `transform`, а это создаёт containing
+      block для `position: fixed` потомков — и FAB прилипал к низу самой
+      вкладки, а не вьюпорта, наезжая на пустое состояние.
+      Показываем только когда активна вкладка «Задачи» (см. switchTab).
+    -->
+    <button class="fab hidden" id="addTaskBtn" aria-hidden="true">＋ Запустить задачу</button>
+
+    <!-- ── Вкладка: Чаты ── -->
+    <section class="tab hidden" id="tab-chats" aria-label="Чаты">
+      <div class="search">
+        <span class="search__icon" aria-hidden="true">🔍</span>
+        <input type="text" id="chatSearch" placeholder="Название, тема или @username"
+               autocomplete="off" aria-label="Поиск чата">
+      </div>
+      <div class="chips" id="chatTags"></div>
+      <div class="list" id="chatList"></div>
+    </section>
+
+    <!-- ── Вкладка: Аккаунты ── -->
+    <section class="tab hidden" id="tab-accounts" aria-label="Аккаунты">
+      <div class="section-label">подписка</div>
+      <div class="card card--sub">
+        <div class="sub__top">
+          <div>
+            <div class="sub__label">Копилка подписок</div>
+            <div class="sub__value"><span id="piggyDays">0</span> дней</div>
+          </div>
+          <div class="sub__badge" id="subBadge">нет подписки</div>
+        </div>
+        <div class="sub__note">Дни в копилке не сгорают — распределите их на любой аккаунт.</div>
+        <div class="sub__actions">
+          <button class="btn btn--primary" id="topUpBtn">💳 Пополнить</button>
+          <button class="btn" id="distributeBtn">Распределить подписку</button>
+          <button class="btn" id="freezeBtn">❄️ Заморозить дни</button>
+        </div>
+      </div>
+
+      <div class="section-label">возможности</div>
+      <div class="card card--row" id="freeSubCard" role="button" tabindex="0">
+        <div class="card__emoji" aria-hidden="true">🎁</div>
+        <div class="card__body">
+          <div class="card__title">Бесплатная подписка</div>
+          <div class="card__desc">Проверьте доступное задание на 24 часа для каждого аккаунта.</div>
+        </div>
+      </div>
+
+      <div class="section-label">аккаунты</div>
+      <button class="card card--add" id="addAccountBtn">＋ Добавить аккаунт</button>
+      <div class="list" id="accountList"></div>
+    </section>
+  </main>
+
+  <!-- Нижняя навигация -->
+  <nav class="nav" aria-label="Разделы кабинета">
+    <button class="nav__item is-active" data-tab="commands" aria-current="page">
+      <span aria-hidden="true">🪄</span><i>Команды</i></button>
+    <button class="nav__item" data-tab="tasks"><span aria-hidden="true">✅</span><i>Задачи</i></button>
+    <button class="nav__item" data-tab="chats"><span aria-hidden="true">💬</span><i>Чаты</i></button>
+    <button class="nav__item" data-tab="accounts"><span aria-hidden="true">👤</span><i>Аккаунты</i></button>
+  </nav>
+
+  <!-- Панель настроек -->
+  <div class="sheet" id="settingsSheet" role="dialog" aria-modal="true" aria-label="Настройки">
+    <div class="sheet__backdrop" data-close></div>
+    <div class="sheet__panel">
+      <div class="sheet__head">
+        <div class="sheet__title">НАСТРОЙКИ</div>
+        <button class="icon-btn" data-close aria-label="Закрыть">✕</button>
+      </div>
+      <div class="settings" id="settingsList"></div>
+    </div>
+  </div>
+
+  <!-- Модалка создания задачи -->
+  <div class="sheet" id="taskSheet" role="dialog" aria-modal="true" aria-label="Новая задача">
+    <div class="sheet__backdrop" data-close></div>
+    <div class="sheet__panel">
+      <div class="sheet__head">
+        <div class="sheet__title" id="taskSheetTitle">Новая задача</div>
+        <button class="icon-btn" data-close aria-label="Закрыть">✕</button>
+      </div>
+      <div class="form">
+        <div class="sheet__lead" id="taskSheetLead"></div>
+        <div id="taskFields"></div>
+        <div class="hint" id="taskHint"></div>
+        <button class="btn btn--primary btn--block" id="taskSubmit">Запустить задачу</button>
+        <div class="error" id="taskError" role="alert"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модалка результатов задачи -->
+  <div class="sheet" id="resultsSheet" role="dialog" aria-modal="true" aria-label="Результаты задачи">
+    <div class="sheet__backdrop" data-close></div>
+    <div class="sheet__panel">
+      <div class="sheet__head">
+        <div class="sheet__title" id="resultsTitle">Результаты</div>
+        <button class="icon-btn" data-close aria-label="Закрыть">✕</button>
+      </div>
+      <div class="results" id="resultsBody"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>
