@@ -991,6 +991,51 @@ function renderPiggyBank(banked, daysLeft) {
   }
 }
 
+/* ─────────────────────────────── Оплата Stars ─────────────────────────── */
+
+/* Инвойс создаёт бот через Bot API, кабинет только открывает его:
+   сумма и payload формируются на сервере, пользователь не покидает
+   мини-апп. Зачисление приходит в хендлер successful_payment бота. */
+async function payWithStars(button, months = 1) {
+  // Вне Telegram (демо или обычный браузер) платёжный WebView не поднимется —
+  // честно уводим в бота, а не делаем вид, что что-то произошло.
+  if (DEMO || !tg || !tg.openInvoice) {
+    openBot('subscribe');
+    return;
+  }
+
+  try {
+    const invoice = await withLoading(button, () =>
+      api('/api/subscription/invoice', { method: 'POST', body: JSON.stringify({ months }) })
+    );
+    openStarsInvoice(invoice.url);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function openStarsInvoice(url) {
+  tg.openInvoice(url, (status) => {
+    if (status === 'paid') {
+      toast('Оплата прошла — абонемент активен.');
+      loadAccounts();
+    } else if (status === 'pending') {
+      toast('Платёж обрабатывается, абонемент появится после подтверждения.');
+    } else if (status === 'failed') {
+      toast('Платёж не прошёл. Попробуйте ещё раз.');
+    }
+    // 'cancelled' — пользователь закрыл окно сам, молчим.
+  });
+}
+
+/* На кнопке сразу видно цену: она приходит в /api/me вместе с тарифами. */
+function renderTopUpButton() {
+  const button = $('topUpBtn');
+  if (!button) return;
+  const stars = (state.me && state.me.tariffs && state.me.tariffs.stars) || 0;
+  button.textContent = stars ? `⭐ Оплатить ${stars} звёзд` : '⭐ Оплатить звёздами';
+}
+
 async function moveBankDays(direction, button) {
   const path = direction === 'freeze' ? '/api/subscription/bank' : '/api/subscription/distribute';
   try {
@@ -1177,7 +1222,11 @@ function bindEvents() {
     if (!button) return;
     openBot('resume_login');
   });
-  $('topUpBtn').addEventListener('click', () => openBot('subscribe'));
+  $('topUpBtn').addEventListener('click', (event) => {
+    // currentTarget, а не target: внутри кнопки может лежать <span>, и тогда
+    // индикатор загрузки (withLoading) повесился бы не на ту кнопку.
+    payWithStars(event.currentTarget);
+  });
   $('distributeBtn').addEventListener('click', (event) => {
     moveBankDays('distribute', event.currentTarget);
   });
@@ -1235,6 +1284,9 @@ async function boot() {
     try {
       state.me = await api('/api/me');
       renderHeader();
+      // Цена в звёздах приходит с тарифами, поэтому подпись кнопки знает её
+      // только здесь — до этого на кнопке нейтральный текст из index.html.
+      renderTopUpButton();
     } catch (error) {
       toast(error.message);
     }

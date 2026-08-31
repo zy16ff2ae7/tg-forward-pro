@@ -14,13 +14,14 @@ import time
 from typing import Any, Callable
 from urllib.parse import parse_qsl, unquote
 
+from aiogram.types import LabeledPrice
 from aiohttp import web
 from loguru import logger
 
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
-from app.errors import FeatureUnavailable, _dumps
+from app.errors import FeatureUnavailable, ValidationError, _dumps
 from app.telegram_client.jobs import MAX_PARSER_LIMIT, ONE_SHOT_KINDS
 from app.telegram_client.manager import manager
 
@@ -649,6 +650,77 @@ async def subscription(request: web.Request) -> web.Response:
             },
         }
     )
+
+
+# ──────────────────────────────── Оплата Stars ───────────────────────────
+
+# Верхняя граница срока в одном счёте: защищает от «оплати 9999 месяцев»
+# и от случайной гигантской суммы в звёздах.
+MAX_INVOICE_MONTHS = 12
+
+STARS_INVOICE_DESCRIPTION = (
+    "Автоматическая пересылка сообщений: безлимит правил, 24/7, "
+    "без метки «Переслано от»."
+)
+
+
+@routes.post("/api/subscription/invoice")
+@require_auth
+async def create_stars_invoice(request: web.Request) -> web.Response:
+    """Ссылка на счёт в Telegram Stars для оплаты абонемента.
+
+    Инвойс создаёт бот через Bot API: сумма и payload формируются на сервере,
+    мини-апп получает только ссылку и открывает её через WebApp.openInvoice.
+    Пользователь не покидает кабинет, а зачисление по-прежнему приходит
+    в хендлер successful_payment бота — вторую реализацию оплаты не плодим.
+    """
+    user_id = request[USER_ID_KEY]
+
+    # Пустое тело — нормальный случай: «оплатить месяц». А мусор вместо
+    # JSON-объекта молча принимать нельзя: months уедет в значение по умолчанию
+    # и пользователь заплатит не за то, что выбирал.
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = None
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        raise ValidationError("Ожидается JSON-объект с полем months")
+    months = _as_int(body.get("months"), 1)
+
+    if not 1 <= months <= MAX_INVOICE_MONTHS:
+        raise ValidationError(f"Срок — от 1 до {MAX_INVOICE_MONTHS} месяцев")
+
+    if _bot is None:
+        raise FeatureUnavailable(
+            "Оплата звёздами временно недоступна",
+            feature="stars",
+            status="bot_unavailable",
+        )
+
+    title = "Абонемент на 1 месяц" if months == 1 else f"Абонемент на {months} мес."
+    amount = settings.price_stars * months
+    try:
+        link = await _bot.create_invoice_link(
+            title=title,
+            description=STARS_INVOICE_DESCRIPTION,
+            # Формат читает хендлер successful_payment в боте — менять нельзя.
+            payload=f"sub:{user_id}:{months}",
+            provider_token="",  # для Stars платёжный токен не нужен
+            currency="XTR",
+            prices=[LabeledPrice(label=title, amount=amount)],
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Пользователю подробности Bot API ни к чему, а в лог они попасть должны.
+        logger.warning("Не удалось создать инвойс Stars для {}: {}", user_id, exc)
+        raise FeatureUnavailable(
+            "Не удалось создать счёт. Попробуйте позже.",
+            feature="stars",
+            status="invoice_failed",
+        ) from exc
+
+    return _json({"url": link, "months": months, "amount": amount, "currency": "XTR"})
 
 
 @routes.post("/api/subscription/bank")

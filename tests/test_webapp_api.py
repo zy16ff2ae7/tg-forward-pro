@@ -225,3 +225,119 @@ async def test_commands_payload_does_not_mutate_catalog(monkeypatch):
 
     assert {item["status"] for item in commands_payload()} == {"ready"}
     assert {item["status"] for item in COMMANDS} == {"ready"}
+
+
+# ──────────────────────────────── оплата Stars ────────────────────────────────
+
+
+class FakeInvoiceBot:
+    """Минимальная замена Bot: запоминает вызов create_invoice_link."""
+
+    def __init__(self, link: str = "https://t.me/invoice/abc", error: Exception | None = None):
+        self.link = link
+        self.error = error
+        self.calls: list[dict] = []
+
+    async def create_invoice_link(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return self.link
+
+
+@pytest.fixture
+async def bot_client():
+    """Клиент, у которого есть «живой» бот.
+
+    setup_webapp_routes пишет бота в глобальную переменную модуля, поэтому
+    после теста её обязательно возвращаем в None — иначе следующий тест
+    неожиданно увидит рабочего бота там, где ожидается его отсутствие.
+    """
+    import app.webapp_api as webapp_api
+
+    started: list[TestClient] = []
+
+    async def factory(bot):
+        app = web.Application(middlewares=[http_error_middleware])
+        setup_webapp_routes(app, bot=bot)
+        test_client = TestClient(TestServer(app))
+        await test_client.start_server()
+        started.append(test_client)
+        return test_client
+
+    try:
+        yield factory
+    finally:
+        for test_client in started:
+            await test_client.close()
+        webapp_api._bot = None
+
+
+async def test_stars_invoice_requires_auth(client):
+    assert (await client.post("/api/subscription/invoice")).status == 401
+
+
+async def test_stars_invoice_unavailable_without_bot(client, auth_headers):
+    response = await client.post("/api/subscription/invoice", headers=auth_headers)
+    assert response.status == 503
+
+    body = await response.json()
+    assert body["feature"] == "stars"
+    assert body["status"] == "bot_unavailable"
+
+
+@pytest.mark.parametrize("months", [0, -1, 13, 10_000])
+async def test_stars_invoice_rejects_bad_months(client, auth_headers, months):
+    """Срок ограничен сверху: иначе в счёт уедет гигантская сумма в звёздах."""
+    response = await client.post(
+        "/api/subscription/invoice", headers=auth_headers, json={"months": months}
+    )
+    assert response.status == 400
+
+
+async def test_stars_invoice_rejects_non_object_body(client, auth_headers):
+    response = await client.post(
+        "/api/subscription/invoice", headers=auth_headers, json=["not", "an", "object"]
+    )
+    assert response.status == 400
+
+
+async def test_stars_invoice_prices_are_calculated_server_side(bot_client, auth_headers):
+    """Цена и payload считаются на сервере, а не приходят от клиента."""
+    bot = FakeInvoiceBot()
+    test_client = await bot_client(bot)
+
+    response = await test_client.post(
+        "/api/subscription/invoice", headers=auth_headers, json={"months": 3}
+    )
+    assert response.status == 200
+
+    body = await response.json()
+    assert body["url"] == bot.link
+    assert body["amount"] == settings.price_stars * 3
+    assert body["currency"] == "XTR"
+
+    call = bot.calls[0]
+    # Формат читает хендлер successful_payment в боте — менять нельзя.
+    assert call["payload"] == f"sub:{TEST_USER_ID}:3"
+    assert call["prices"][0].amount == settings.price_stars * 3
+    assert call["provider_token"] == ""  # для Stars токен не нужен
+
+
+async def test_stars_invoice_defaults_to_one_month(bot_client, auth_headers):
+    bot = FakeInvoiceBot()
+    test_client = await bot_client(bot)
+
+    response = await test_client.post("/api/subscription/invoice", headers=auth_headers)
+    assert response.status == 200
+    assert bot.calls[0]["payload"] == f"sub:{TEST_USER_ID}:1"
+
+
+async def test_stars_invoice_bot_failure_becomes_503(bot_client, auth_headers):
+    """Сбой Bot API — не 500: пользователю важно «попробуйте позже», а не трассировка."""
+    bot = FakeInvoiceBot(error=RuntimeError("Bot API is down"))
+    test_client = await bot_client(bot)
+
+    response = await test_client.post("/api/subscription/invoice", headers=auth_headers)
+    assert response.status == 503
+    assert (await response.json())["status"] == "invoice_failed"
