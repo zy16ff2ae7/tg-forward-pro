@@ -169,27 +169,44 @@ pytest -q -k subscription      # по маске
 
 ## Деплой на VDS (24/7)
 
-Требуется: Ubuntu/Debian, домен с HTTPS (для вебхука) и SSH-доступ.
+Требуется: Ubuntu/Debian, домен с HTTPS (для мини-аппа — Telegram WebApp
+открывается только по HTTPS) и SSH-доступ.
+
+Бот может работать двумя способами:
+
+- **Long polling** (по умолчанию) — `WEBHOOK_URL` пуст. Не нужен публичный
+  порт, проще всего. Работает сразу после заливки.
+- **Webhook** — `WEBHOOK_URL=https://YOUR_DOMAIN`, путь `/webhook`. Экономит
+  запросы, но требует, чтобы сервер был доступен по HTTPS извне.
+
+Для мини-аппа HTTPS всё равно нужен — его отдаёт nginx поверх сервиса.
 
 ```bash
 # 1. На сервере один раз: nginx + certbot
 sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx
-sudo certbot --nginx -d YOUR_DOMAIN
 
-# 2. В .env на сервере укажите
-#    WEBHOOK_URL=https://YOUR_DOMAIN
-#    WEBHOOK_PATH=/webhook
-#    WEBHOOK_SECRET=<случайная строка>
-#    PORT=8080
+# 2. В .env на сервере:
+#    HOST=127.0.0.1   PORT=8080
+#    WEBHOOK_URL=            # пусто → long polling
+#    WEBAPP_URL=https://YOUR_DOMAIN
 
-# 3. Заливка
+# 3. Заливка кода (rsync + venv + systemd), см. deploy/deploy.sh
 ./deploy/deploy.sh root@YOUR_SERVER
+
+# 4. Когда домен указывает на сервер (A-запись) — выпустить сертификат.
+#    certbot сам допишет блок 443 и HTTPS-редирект в конфиг nginx:
+sudo certbot --nginx -d YOUR_DOMAIN
 ```
 
 Конфиг nginx — в `deploy/nginx.conf`, systemd-юнит — в `deploy/tg-forward.service`.
 Важно: nginx проксирует не только `/webhook`, но и `/` — иначе мини-апп (`/app/`)
 и его API (`/api/`) снаружи недоступны, потому что приложение слушает только
 `127.0.0.1:8080`.
+
+До выпуска сертификата удобно отдавать сервис по HTTP (см. блок `listen 80`
+в `deploy/nginx.conf`): так видно, что он жив, ещё без HTTPS. Как только
+`certbot --nginx` выпустит сертификат, он добавит `listen 443` и редирект
+`301 → https` — менять ничего вручную не нужно.
 
 При первом деплое скрипт создаст на сервере `.env` из `.env.example` и остановится:
 systemd читает этот файл через `EnvironmentFile`, а ключи у вас свои. Заполните
