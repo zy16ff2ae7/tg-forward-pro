@@ -15,6 +15,11 @@ const state = {
   pendingLogin: null,
   commands: [],
   tasks: [],
+  // Все задачи пользователя, разложенные по статусу — нужны для агрегации
+  // бейджей команд: видим «N на паузе» даже когда пользователь смотрит
+  // вкладку «Активные», и наоборот.
+  tasksByStatus: { active: [], paused: [], done: [] },
+  taskCounts: {}, // kind → { active, paused, done }
   taskStatus: 'active',
   chatTag: null,
   mode: 'copy',
@@ -22,6 +27,10 @@ const state = {
   activeCommand: null, // команда, под которую сейчас собрана шторка
   lastResultsId: null, // для кнопки «Повторить» в шторке результатов
   bankedDays: 0,
+  chats: [],                // последний список чатов с бэка
+  selectedChats: [],       // объекты выбранных чатов (полные, не только id) —
+                           // иначе при поиске выборка «исчезает» с экрана,
+                           // и действия над выбранным работать перестают.
   features: {
     account_login_enabled: true,
     account_login_status: 'ready',
@@ -120,11 +129,11 @@ const DEMO_COMMANDS = [
   { id: 'broadcast', kind: 'broadcast', emoji: '📣', title: 'Рассылка по чатам', status: 'ready',
     needs: ['account', 'source', 'target', 'targets'], optional: [],
     description: 'Одно сообщение из источника — в несколько чатов сразу.',
-    hint: 'Дополнительные получатели — через запятую: @chan1, @chan2.' },
+    hint: 'Выберите чаты во вкладке «Чаты» и нажмите «📣 Рассылка» — они станут получателями. Источник: сообщение из него уйдёт во все выбранные чаты.' },
   { id: 'parser', kind: 'parser', emoji: '🕵️', title: 'Парсер аудитории', status: 'ready',
     needs: ['account', 'source'], optional: ['limit'],
     description: 'Собирает участников чужого чата в список по вашей команде.',
-    hint: 'Запускается сразу после создания. Результат — кнопкой «Результаты».' },
+    hint: 'Выберите чат во вкладке «Чаты» и нажмите «🕵️ Парсер» — он станет источником. Запускается сразу, результат — кнопкой «Результаты».' },
   { id: 'autosubscribe', kind: 'autosubscribe', emoji: '🤝', title: 'Автоподписка', status: 'ready',
     needs: ['account', 'targets'], optional: ['source'],
     description: 'Вступает в каналы из списка и подхватывает ссылки из источника.',
@@ -454,20 +463,42 @@ async function loadCommands() {
   }
 }
 
-/* Статус команды приходит с сервера и считается по реальному состоянию
-   сервиса, а не берётся из справочника: без MTProto-шлюза ни одна команда
-   не выполнима, и показывать «включено» было бы обманом. */
-const COMMAND_STATUS = {
-  ready: { label: 'включено', kind: 'ready' },
-  setup_required: { label: 'на настройке', kind: 'setup' },
+/* Статус команды с точки зрения пользователя, а не сервиса.
+   Раньше метка была «включено / на настройке» — и читалась как «задача активна»,
+   хотя это значило лишь «сервис поддерживает команду». Теперь честно считаем
+   по задачам пользователя: «не запущено» по умолчанию, «N активных» если есть,
+   «M на паузе» если только на паузе, «выключено» / «на настройке» — по флагам
+   сервера. Так пользователь видит, что реально работает, а что — пусто. */
+const STATUS_LABELS = {
+  off: 'выключено',
+  setup: 'на настройке',
+  idle: 'не запущено',
+  ready: 'работает',
+  paused: 'на паузе',
 };
 
-function statusLabel(status) {
-  return (COMMAND_STATUS[status] || { label: 'выключено' }).label;
-}
-
-function statusKind(status) {
-  return (COMMAND_STATUS[status] || { kind: 'off' }).kind;
+function computeCommandState(command) {
+  if (command.status === 'setup_required') {
+    return { label: STATUS_LABELS.setup, kind: 'setup', active: 0, paused: 0 };
+  }
+  if (command.status === 'disabled') {
+    return { label: STATUS_LABELS.off, kind: 'off', active: 0, paused: 0 };
+  }
+  // status === 'ready': берём готовый агрегат по всем трём спискам задач
+  const counts = state.taskCounts[command.kind] || { active: 0, paused: 0, done: 0 };
+  if (counts.active > 0) {
+    const parts = [`${counts.active} активн.`];
+    if (counts.paused > 0) parts.push(`${counts.paused} пауз.`);
+    if (counts.done > 0) parts.push(`${counts.done} архив`);
+    return { label: parts.join(' · '), kind: 'ready', ...counts };
+  }
+  if (counts.paused > 0) {
+    return { label: `${counts.paused} на паузе`, kind: 'paused', ...counts };
+  }
+  if (counts.done > 0) {
+    return { label: `${counts.done} в архиве`, kind: 'paused', ...counts };
+  }
+  return { label: STATUS_LABELS.idle, kind: 'off', active: 0, paused: 0, done: 0 };
 }
 
 function renderCommands() {
@@ -486,18 +517,19 @@ function renderCommands() {
 
   $('commandList').innerHTML = list
     .map((command) => {
-      const ready = command.status === 'ready';
-      // «включено/выключено» раньше было крупным зелёным бейджем — визуально
-      // конкурировало с самой карточкой и читалось как кнопка.
-      // Метка стала точкой + подписью, справа — шеврон: «жми, чтобы запустить».
+      const meta = computeCommandState(command);
+      // Карточка кликабельна ТОЛЬКО если команда доступна на сервере.
+      // «На настройке» — карточка остаётся видимой, но реагирует тостом.
+      const clickable = command.status === 'ready';
+      const tag = `card--cmd${clickable ? '' : ' card--cmd--locked'}`;
       return `
-        <button class="card card--cmd" data-command="${command.id}">
+        <button class="${tag}" data-command="${command.id}">
           <div class="card__emoji">${command.emoji}</div>
           <div class="cmd__main">
             <div class="cmd__head">
               <div class="cmd__title">${esc(command.title)}</div>
-              <span class="status status--${statusKind(command.status)}">
-                <span class="status__dot" aria-hidden="true"></span>${statusLabel(command.status)}
+              <span class="status status--${meta.kind}" title="${esc(meta.label)}">
+                <span class="status__dot" aria-hidden="true"></span>${esc(meta.label)}
               </span>
             </div>
             <div class="cmd__desc">${esc(command.description)}</div>
@@ -511,22 +543,49 @@ function renderCommands() {
 
 /* ──────────────────────────────── Задачи ─────────────────────────────── */
 
-async function loadTasks() {
+async function loadTasks(targetStatus) {
+  const status = targetStatus || state.taskStatus;
   const holder = $('taskList');
-  beginLoad(holder, 'plain', 3);
-  try {
-    const data = await api(`/api/tasks?status=${state.taskStatus}`);
-    state.tasks = data.tasks || [];
-    endLoad(holder);
-    renderTasks(state.tasks);
-  } catch (error) {
-    failLoad(holder, error, 'loadTasks');
+  // Скелетон рисуем только когда это активная вкладка и в ней ещё нет данных.
+  if (status === state.taskStatus && !state.tasksByStatus[status].length) {
+    beginLoad(holder, 'plain', 3);
   }
+  try {
+    const data = await api(`/api/tasks?status=${status}`);
+    state.tasksByStatus[status] = data.tasks || [];
+    if (status === state.taskStatus) state.tasks = state.tasksByStatus[status];
+    // Все списки под рукой — пересчитываем агрегат по командам.
+    aggregateTaskCounts();
+    if (status === state.taskStatus) {
+      endLoad(holder);
+      renderTasks(state.tasksByStatus[status]);
+    }
+    renderCommands();
+  } catch (error) {
+    if (status === state.taskStatus) failLoad(holder, error, 'loadTasks');
+  }
+}
+
+function aggregateTaskCounts() {
+  const counts = {};
+  for (const list of Object.values(state.tasksByStatus)) {
+    for (const task of list) {
+      const kind = task.kind || 'forward';
+      if (!counts[kind]) counts[kind] = { active: 0, paused: 0, done: 0 };
+      if (task.enabled && !task.archived) counts[kind].active++;
+      else if (!task.archived) counts[kind].paused++;
+      else counts[kind].done++;
+    }
+  }
+  state.taskCounts = counts;
 }
 
 function renderTasks(tasks) {
   const holder = $('taskList');
-  if (!tasks.length) {
+  // tasksByStatus[active] может быть пустым просто потому, что у пользователя
+  // нет активных рассылок. Скелетон в этом случае не нужен — покажем сразу
+  // дружелюбное пустое состояние.
+  if (!tasks || !tasks.length) {
     const texts = {
       active: ['✅', 'Нет задач', 'Здесь появятся активные рассылки и триггеры. Запустите первую — она будет работать, даже когда вы офлайн.'],
       paused: ['⏸', 'Нет задач на паузе', 'Остановленные задачи можно вернуть в работу одним нажатием.'],
@@ -590,6 +649,26 @@ const ACTION_MESSAGES = {
   toggle: 'Готово',
 };
 
+/* Любое действие, меняющее состав задач — обновляет не только текущую
+   вкладку, но и счётчики по всем трём статусам, чтобы бейджи команд
+   оставались честными. */
+async function refreshAllTaskLists() {
+  const visible = state.taskStatus;
+  await Promise.all([
+    loadTasks('active'),
+    loadTasks('paused'),
+    loadTasks('done'),
+  ]);
+  if (state.taskStatus !== visible) {
+    state.taskStatus = visible;
+    document.querySelectorAll('#taskStatus .seg').forEach((seg) => {
+      seg.classList.toggle('is-active', seg.dataset.status === visible);
+    });
+  }
+  renderTasks(state.tasksByStatus[visible]);
+  renderCommands();
+}
+
 async function taskAction(action, id, button) {
   try {
     if (action === 'toggle') await withLoading(button, () => api(`/api/tasks/${id}/toggle`, { method: 'POST' }));
@@ -604,11 +683,11 @@ async function taskAction(action, id, button) {
     if (action === 'run') {
       const data = await withLoading(button, () => api(`/api/tasks/${id}/run`, { method: 'POST' }));
       toast(runMessage(data.run));
-      await loadTasks();
+      await refreshAllTaskLists();
       return;
     }
     toast(ACTION_MESSAGES[action] || 'Готово');
-    await loadTasks();
+    await refreshAllTaskLists();
   } catch (error) {
     toast(error.message);
   }
@@ -668,17 +747,81 @@ async function openResults(id) {
 
 /* ───────────────────────────────── Чаты ──────────────────────────────── */
 
+/* ───────────────────────────────── Чаты ──────────────────────────────── */
+
+/* Как передать выбранный чат в форму задачи: приоритет у @username (его
+   сервер резолвит надёжно по manager.resolve_chat). Если username нет —
+   подставляем «id» числом: бэк понимает любой из этих форматов. */
+function chatToRef(chat) {
+  if (!chat) return '';
+  if (chat.username) return `@${String(chat.username).replace(/^@/, '')}`;
+  return String(chat.id);
+}
+
+function chatTitle(chat) {
+  if (!chat) return '';
+  return chat.title || String(chat.id || '');
+}
+
+/* Текущая выборка чатов в читабельном виде: «Aльфа, Браво, +2». */
+function selectedChatsSummary() {
+  const n = state.selectedChats.length;
+  if (n === 0) return '';
+  const first = state.selectedChats.slice(0, 2).map(chatTitle).join(', ');
+  return n > 2 ? `${first}, +${n - 2}` : first;
+}
+
+function getSelectedChats() {
+  return state.selectedChats;
+}
+
+function isChatSelected(id) {
+  return state.selectedChats.some((chat) => chat.id === id);
+}
+
+function toggleChatSelection(chat) {
+  if (!chat || chat.id == null) return;
+  const idx = state.selectedChats.findIndex((item) => item.id === chat.id);
+  if (idx >= 0) state.selectedChats.splice(idx, 1);
+  else state.selectedChats.push(chat);
+  updateChatBar();
+}
+
+function clearChatSelection() {
+  state.selectedChats = [];
+  // Перерисовать отметки на текущем списке, не дёргая сервер
+  document.querySelectorAll('#chatList .chat.is-selected').forEach((node) => {
+    node.classList.remove('is-selected');
+    const check = node.querySelector('.chat__check');
+    if (check) check.textContent = '';
+  });
+  updateChatBar();
+}
+
+function updateChatBar() {
+  const bar = $('chatBar');
+  if (!bar) return;
+  const n = state.selectedChats.length;
+  bar.classList.toggle('is-visible', n > 0);
+  const countEl = $('chatBarCount');
+  if (countEl) countEl.textContent = String(n);
+  const sumEl = $('chatBarSummary');
+  if (sumEl) sumEl.textContent = n ? selectedChatsSummary() : '';
+}
+
 async function loadChats() {
   const holder = $('chatList');
   const account = state.accounts[0];
 
   if (!state.features.account_login_enabled) {
     holder.innerHTML = emptyHtml('⚙️', 'Нужен MTProto-вход', 'Список чатов появится после заполнения API_ID/API_HASH и подключения аккаунта по телефону.');
+    updateChatBar();
     return;
   }
 
   if (!account) {
     holder.innerHTML = emptyHtml('👤', 'Нет аккаунта', 'Подключите аккаунт во вкладке «Аккаунты».');
+    updateChatBar();
     return;
   }
 
@@ -687,29 +830,72 @@ async function loadChats() {
   try {
     const data = await api(`/api/chats?account_id=${account.id}&q=${query}`);
     endLoad(holder);
+    state.chats = data.chats || [];
     if (!data.online) {
       holder.innerHTML = emptyHtml('📴', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте.');
+      updateChatBar();
       return;
     }
-    if (!data.chats.length) {
+    if (!state.chats.length) {
       holder.innerHTML = emptyHtml('💬', 'Ничего не найдено', 'Измените запрос или тег.');
+      updateChatBar();
       return;
     }
-    holder.innerHTML = data.chats
-      .map(
-        (chat) => `
-        <div class="chat">
+    // Рисуем чаты КАК КНОПКИ: теперь их можно выбрать мышкой.
+    // Выделение сохраняется между поисковыми запросами — хранится в state,
+    // поэтому id чата не «теряется» после фильтра поиска.
+    holder.innerHTML = state.chats.map((chat) => {
+      const selected = isChatSelected(chat.id);
+      return `
+        <button class="chat${selected ? ' is-selected' : ''}" data-chat-id="${chat.id}" type="button">
           <div class="chat__emoji">${chat.is_channel ? '📢' : chat.is_group ? '👥' : '💬'}</div>
           <div class="chat__body">
             <div class="chat__title">${esc(chat.title)}</div>
-            <div class="chat__sub"><code>${chat.id}</code></div>
+            <div class="chat__sub"><code>${chat.id}</code>${chat.username ? ' · @' + esc(chat.username) : ''}</div>
           </div>
-        </div>`
-      )
-      .join('');
+          <span class="chat__check" aria-hidden="true">${selected ? '✓' : ''}</span>
+        </button>`;
+    }).join('');
+    updateChatBar();
   } catch (error) {
     failLoad(holder, error, 'loadChats');
+    updateChatBar();
   }
+}
+
+/* Из выбранных чатов — открыть шторку задачи с уже заполненными полями.
+   Куда именно подставить выбранные чаты — зависит от команды, иначе
+   валидация на сохранении падает «Укажите: источник»:
+     • parser      → источник (кого парсим — сам выбранный чат)
+     • forward      → приёмник (куда пересылаем)
+     • broadcast/.. → получатели (куда рассылаем / на что подписываемся).
+   Один чат → он же единственный получатель. Несколько → первый приёмник,
+   остальные — в список получателей. */
+function openTaskForSelection(kind) {
+  const selected = getSelectedChats();
+  if (!selected.length) return;
+  const refs = selected.map(chatToRef);
+  const command =
+    state.commands.find((item) => item.id === kind)
+    || state.commands.find((item) => item.kind === kind)
+    || state.commands.find((item) => item.id === 'copy_channel');
+  if (!command) {
+    toast('Каталог команд ещё не загружен');
+    return;
+  }
+  const prefill = {};
+  if (command.kind === 'parser') {
+    // Парсер собирает участников ВЫБРАННОГО чата — он и есть источник.
+    prefill.source = refs[0];
+  } else if (command.kind === 'forward') {
+    // Пересылка кладёт выбранный чат в приёмник; источник допишет пользователь.
+    prefill.target = refs[0];
+  } else {
+    // Рассылка / автоподписка и пр.: выбранные чаты — получатели.
+    prefill.target = refs[0];
+    prefill.targets = refs.length > 1 ? refs.join(', ') : '';
+  }
+  openTaskSheet(command, prefill);
 }
 
 function renderChatTags() {
@@ -859,7 +1045,7 @@ function splitList(value) {
     .filter(Boolean);
 }
 
-function openTaskSheet(command) {
+function openTaskSheet(command, prefill) {
   if (!state.features.account_login_enabled) {
     toast('Вход аккаунтов пока на настройке');
     switchTab('accounts');
@@ -888,7 +1074,27 @@ function openTaskSheet(command) {
 
   fillTaskAccounts();
   bindSheetFields();
+  applyTaskPrefill(prefill || {});
   $('taskSheet').classList.add('is-open');
+}
+
+/* Заполняем поля формы значениями из выбранных чатов. Применяется после
+   построения разметки полей (DOM уже существует). Источник оставляем пустым —
+   иначе легко отправить парсер на свой собственный канал по ошибке. */
+function applyTaskPrefill(prefill) {
+  const setValue = (key, value) => {
+    if (value == null || value === '') return;
+    const node = $(`task_${key}`);
+    if (node && node.value !== undefined) node.value = value;
+  };
+  setValue('target', prefill.target);
+  if (Array.isArray(prefill.targets)) {
+    setValue('targets', prefill.targets.join(', '));
+  } else if (prefill.targets) {
+    setValue('targets', prefill.targets);
+  }
+  setValue('source', prefill.source);
+  setValue('target_user', prefill.target_user);
 }
 
 function bindSheetFields() {
@@ -957,7 +1163,7 @@ async function submitTask() {
     document.querySelectorAll('#taskStatus .seg').forEach((seg) => {
       seg.classList.toggle('is-active', seg.dataset.status === state.taskStatus);
     });
-    await loadTasks();
+    await refreshAllTaskLists();
     switchTab('tasks');
   } catch (requestError) {
     if (requestError.status === 402) {
@@ -1171,7 +1377,14 @@ function bindEvents() {
       document.querySelectorAll('#taskStatus .seg').forEach((item) => {
         item.classList.toggle('is-active', item === seg);
       });
-      loadTasks();
+      // Если данные для этого статуса уже подгружены (агрегатор на boot),
+      // показываем их без сети; иначе подгружаем.
+      const cached = state.tasksByStatus[state.taskStatus];
+      if (cached && cached.length) {
+        renderTasks(cached);
+      } else {
+        loadTasks();
+      }
     });
   });
   $('taskList').addEventListener('click', (event) => {
@@ -1188,6 +1401,46 @@ function bindEvents() {
   $('chatSearch').addEventListener('input', () => {
     clearTimeout(chatTimer);
     chatTimer = setTimeout(loadChats, 350);
+  });
+  // Один делегированный слушатель: чаты перерисовываются при каждом поиске,
+  // поэтому вешать обработчик на каждый .chat бессмысленно.
+  $('chatList').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-chat-id]');
+    if (!item) return;
+    const id = Number(item.dataset.chatId);
+    const chat = state.chats.find((item) => item.id === id);
+    if (!chat) return;
+    const wasSelected = isChatSelected(id);
+    toggleChatSelection(chat);
+    // Визуально отражаем состояние без перерисовки всего списка — дешевле.
+    const check = item.querySelector('.chat__check');
+    if (wasSelected) {
+      item.classList.remove('is-selected');
+      if (check) check.textContent = '';
+    } else {
+      item.classList.add('is-selected');
+      if (check) check.textContent = '✓';
+    }
+  });
+  $('chatBar').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-chat-action]');
+    if (!button) return;
+    const action = button.dataset.chatAction;
+    if (action === 'clear') {
+      clearChatSelection();
+      return;
+    }
+    if (!state.selectedChats.length) {
+      toast('Сначала выберите чаты');
+      return;
+    }
+    if (action === 'broadcast') {
+      openTaskForSelection('broadcast');
+    } else if (action === 'forward') {
+      openTaskForSelection('copy_channel');
+    } else if (action === 'parser') {
+      openTaskForSelection('parser');
+    }
   });
   $('chatTags').addEventListener('click', (event) => {
     const chip = event.target.closest('.chip');
@@ -1293,7 +1546,14 @@ async function boot() {
 
     await loadAccounts();
     await loadCommands();
-    await loadTasks();
+    // Подгружаем задачи по всем трём статусам параллельно — бейджи команд
+    // («N активных · M на паузе») считаются по сумме трёх списков, а не
+    // только по текущей вкладке, иначе они врут при первом заходе.
+    await Promise.all([
+      loadTasks('active'),
+      loadTasks('paused'),
+      loadTasks('done'),
+    ]);
   } finally {
     // Заставку убираем в любом случае: если часть запросов упала, пользователь
     // всё равно должен увидеть кабинет и кнопки «Повторить».

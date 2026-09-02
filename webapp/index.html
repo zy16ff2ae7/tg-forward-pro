@@ -112,8 +112,26 @@
         <input type="text" id="chatSearch" placeholder="Название, тема или @username"
                autocomplete="off" aria-label="Поиск чата">
       </div>
+      <div class="chats-hint">
+        Нажмите на чаты, чтобы выбрать. Можно несколько — для рассылки сразу в несколько чатов.
+      </div>
       <div class="chips" id="chatTags"></div>
       <div class="list" id="chatList"></div>
+
+      <!-- Плавающая панель действий над нижней навигацией.
+           Появляется только когда выбран хотя бы один чат. -->
+      <div class="chat-bar" id="chatBar" role="region" aria-label="Действия с выбранными чатами">
+        <div class="chat-bar__count">
+          Выбрано: <b id="chatBarCount">0</b>
+          <span class="chat-bar__sum" id="chatBarSummary"></span>
+        </div>
+        <div class="chat-bar__btns">
+          <button class="btn btn--primary" data-chat-action="broadcast" title="Рассылка в выбранные чаты">📣 Рассылка</button>
+          <button class="btn" data-chat-action="forward" title="Переслать в выбранный чат">🔁 Пересылка</button>
+          <button class="btn" data-chat-action="parser" title="Спарсить аудиторию выбранного чата">🕵️ Парсер</button>
+          <button class="btn chat-bar__clear" data-chat-action="clear" title="Сбросить выбор">✕</button>
+        </div>
+      </div>
     </section>
 
     <!-- ── Вкладка: Аккаунты ── -->

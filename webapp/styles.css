@@ -335,7 +335,16 @@ button { border: none; background: none; cursor: pointer; }
 }
 .status--ready { color: var(--jade); }
 .status--setup { color: var(--orange); }
+.status--paused { color: var(--brass-light); }
 .status--off   { color: var(--muted); opacity: 0.8; }
+
+/* Заблокированная карточка команды: на настройке или выключена. */
+.card--cmd--locked {
+  opacity: 0.78;
+}
+.card--cmd--locked .cmd__chevron {
+  color: var(--muted);
+}
 
 .card--add {
   width: 100%;
@@ -476,11 +485,132 @@ button { border: none; background: none; cursor: pointer; }
   font-weight: 700;
 }
 
-.chat { display: flex; align-items: center; gap: 11px; padding: 11px 13px; }
+.chat {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 13px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+.chat:hover {
+  background: linear-gradient(158deg, rgba(16, 185, 129, 0.10), rgba(4, 18, 13, 0.55) 48%), var(--card);
+  border-color: rgba(198, 166, 104, 0.42);
+}
+.chat:active { transform: scale(0.995); }
+.chat.is-selected {
+  background:
+    linear-gradient(158deg, rgba(52, 211, 153, 0.22), rgba(16, 185, 129, 0.06) 60%),
+    var(--card);
+  border-color: rgba(52, 211, 153, 0.55);
+}
+.chat.is-selected::before {
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.85) 0 1px, transparent 1px);
+}
 .chat__emoji { font-size: 18px; flex: none; }
 .chat__body { flex: 1; min-width: 0; }
-.chat__title { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat__title {
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .chat__sub { color: var(--muted); font-size: 12px; }
+.chat__check {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1.5px solid rgba(198, 166, 104, 0.4);
+  background: rgba(7, 32, 22, 0.6);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  color: transparent;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+}
+.chat.is-selected .chat__check {
+  background: linear-gradient(135deg, var(--emerald), var(--jade));
+  border-color: var(--jade);
+  color: #04120D;
+}
+
+.chats-hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin: -4px 4px 10px;
+  padding: 9px 12px;
+  background: rgba(7, 32, 22, 0.55);
+  border-left: 2px solid rgba(198, 166, 104, 0.45);
+  border-radius: 2px;
+}
+
+/* Плавающая панель действий над нижней навигацией.
+   Появляется когда что-то выбрано; не перекрывает контент — bottom + nav-h. */
+.chat-bar {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  z-index: 25;
+  padding: 11px 12px calc(11px + env(safe-area-inset-bottom));
+  background:
+    radial-gradient(110% 80% at 0% 0%, rgba(16, 185, 129, 0.18), transparent 65%),
+    linear-gradient(180deg, rgba(7, 32, 22, 0.97), rgba(4, 18, 13, 0.97));
+  border: 1px solid rgba(198, 166, 104, 0.45);
+  border-radius: 14px;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  transform: translateY(14px);
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  bottom: calc(var(--nav-h) + 8px);
+}
+.chat-bar.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.chat-bar__count {
+  font-size: 12.5px;
+  color: var(--mint);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.chat-bar__count b { font-size: 14px; color: var(--jade); }
+.chat-bar__sum {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.chat-bar__btns {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr auto;
+  gap: 6px;
+}
+.chat-bar__btns .btn { padding: 9px 4px; font-size: 12.5px; }
+.chat-bar__clear {
+  width: 38px;
+  padding: 9px 0;
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.35);
+  color: var(--red);
+}
+@media (max-width: 380px) {
+  .chat-bar__btns { grid-template-columns: 1fr 1fr; }
+  .chat-bar__btns .btn[data-chat-action="parser"] { grid-column: 1 / 2; }
+  .chat-bar__btns .chat-bar__clear { grid-column: 2 / 3; justify-self: end; width: 38px; }
+}
 
 /* ── Аккаунты ── */
 
