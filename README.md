@@ -183,6 +183,26 @@ sqlite3 account.session "SELECT dc_id, server_address, port, hex(auth_key) FROM 
 Свои `API_ID`/`API_HASH` + вход по номеру в боте — единственный чистый путь;
 официальные креды допустимы только как временная мера (нарушают ToS Telegram).
 
+### Перенести аккаунт на другую машину (ноутбук → VDS)
+
+Повторно входить по номеру не нужно: сессию можно вытащить из базы и
+положить в базу на новом месте.
+
+```bash
+# на исходной машине: посмотреть, что есть, и выгрузить в файл
+PYTHONPATH=. python scripts/export_session.py --list
+PYTHONPATH=. python scripts/export_session.py --user-id 7686196719 --out /tmp/acc.session
+
+# на новой машине (ключ там может быть другим — не страшно, сессия
+# зашифруется заново уже местным SECRET_KEY)
+RAW_SESSION=$(cat /tmp/acc.session) PYTHONPATH=. python scripts/import_session.py \
+  --save --user-id 7686196719
+```
+
+Сессия в `--out`-файле создаётся с правами `600`; строка даёт полный доступ
+к аккаунту, поэтому не коммитьте её и не пересылайте в чаты. После импорта
+перезапустите сервис — в логе появится «Аккаунт #N на связи».
+
 ### Открыть мини-апп на локальной машине
 
 Telegram открывает Web App только по HTTPS, поэтому нужен публичный адрес:
@@ -283,9 +303,20 @@ sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx
 ./deploy/deploy.sh root@YOUR_SERVER
 
 # 4. Когда домен указывает на сервер (A-запись) — выпустить сертификат.
-#    certbot сам допишет блок 443 и HTTPS-редирект в конфиг nginx:
+#    То же самое, но с проверками и понятным сообщением, если записи ещё нет:
+scp deploy/https.sh root@YOUR_SERVER:/opt/tg-forward/deploy/
+ssh root@YOUR_SERVER bash /opt/tg-forward/deploy/https.sh YOUR_DOMAIN
+
+#    Вручную — certbot сам допишет блок 443 и HTTPS-редирект в конфиг nginx:
 sudo certbot --nginx -d YOUR_DOMAIN
 ```
+
+`deploy/https.sh` идёт по шагам и останавливается там, где что-то не готово:
+сначала сверяет A-запись с IP сервера (и печатает, какую именно запись
+добавить у регистратора), потом проверяет конфиг nginx, выпускает сертификат
+и в конце проверяет, что `https://ДОМЕН/app/` отвечает 200. Скрипт можно
+перезапускать — уже выпущенный сертификат он не перевыпустит, а только
+проверит срок.
 
 Конфиг nginx — в `deploy/nginx.conf`, systemd-юнит — в `deploy/tg-forward.service`.
 Важно: nginx проксирует не только `/webhook`, но и `/` — иначе мини-апп (`/app/`)
@@ -304,7 +335,30 @@ systemd читает этот файл через `EnvironmentFile`, а ключ
 ```bash
 systemctl status tg-forward     # статус
 journalctl -u tg-forward -f     # логи в реальном времени
+curl -s 127.0.0.1:8080/api/health   # счётчики очереди доставки
 ```
+
+### Проверить, что пересылка действительно работает
+
+Самый быстрый способ — правило «из чата с ботом в Избранное»:
+
+1. Отправьте боту `/start` с того аккаунта, который подключён как источник.
+2. В мини-аппе создайте задачу «Копирование канала»: источник — `@ваш_бот`,
+   приёмник — `me` (Избранное).
+3. Напишите боту любое сообщение и подождите пару секунд.
+
+```bash
+# сообщение ушло — счётчик sent вырос
+curl -s 127.0.0.1:8080/api/health | grep -o '"sent":[0-9]*'
+
+# и в журнале появилась строка со статусом ok
+sqlite3 data/app.db "SELECT id, rule_id, source_msg_id, target_msg_id, status
+                     FROM forward_logs ORDER BY id DESC LIMIT 5"
+```
+
+Правило после проверки удалите. Если `sent` растёт, а сообщения не видно —
+смотрите `failed` и `journalctl -u tg-forward`: причина (FloodWait, нет прав
+писать в приёмник) остаётся в логе.
 
 > ⚠️ Рекомендуется прокси для Telethon, если VDS за пределами РФ/СНГ:
 > `PROXY=socks5://user:pass@host:port` в `.env`.
