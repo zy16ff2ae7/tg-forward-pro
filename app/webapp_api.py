@@ -299,6 +299,8 @@ async def create_task(request: web.Request) -> web.Response:
         missing.append("человека, за которым следим")
     if "targets" in needs and not targets:
         missing.append("получателей")
+    if "message" in needs and not str(payload.get("message") or "").strip():
+        missing.append("сообщение")
     if missing:
         return _json({"error": "Укажите: " + ", ".join(missing)}, status=400)
 
@@ -379,6 +381,19 @@ async def create_task(request: web.Request) -> web.Response:
         filters["keywords"] = _as_list(payload.get("keywords"))
         if kind == "dialogs" and not source_id:
             source_title = "личные диалоги"
+    elif kind == "poster":
+        # Авто-постер: шлёт собственные сообщения в приёмник по расписанию.
+        # Источник не нужен — ставим 0, чтобы не создавать ложного совпадения
+        # с входящими сообщениями приёмника.
+        msgs = [m.strip() for m in str(payload.get("message") or "").split("\n") if m.strip()]
+        if not msgs:
+            msgs = [str(payload.get("message") or "").strip()]
+        filters["messages"] = msgs
+        interval_min = max(1, _as_int(payload.get("interval"), 2))
+        filters["interval_seconds"] = interval_min * 60
+        filters["window_start"] = str(payload.get("start") or "00:00")[:5]
+        filters["window_end"] = str(payload.get("end") or "23:59")[:5]
+        source_id, source_title = 0, "авто-постинг"
 
     async with SessionLocal() as session:
         rule = await repo.add_rule(
@@ -393,6 +408,9 @@ async def create_task(request: web.Request) -> web.Response:
         rule.kind = kind
         rule.mode = mode
         rule.filters = filters
+        # Авто-постер держит интервал в delay_seconds — его читает планировщик
+        if kind == "poster":
+            rule.delay_seconds = int(filters.get("interval_seconds", 120))
         await session.commit()
         rule_id = rule.id
 
@@ -916,6 +934,17 @@ COMMANDS: list[dict] = [
         "status": "ready",
         "needs": ["account", "source", "target_user"],
         "optional": ["keywords"],
+    },
+    {
+        "id": "poster",
+        "kind": "poster",
+        "emoji": "📤",
+        "title": "Авто-постинг",
+        "description": "Шлёт ваше сообщение в чат каждые N минут в заданном окне времени.",
+        "status": "ready",
+        "needs": ["account", "target", "message"],
+        "optional": ["interval", "start", "end"],
+        "hint": "Чат — куда постить. Сообщений может быть несколько (каждое с новой строки) — уходят по очереди. Интервал в минутах, окно — ЧЧ:ММ.",
     },
 ]
 

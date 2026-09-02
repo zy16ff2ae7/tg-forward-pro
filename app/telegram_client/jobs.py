@@ -44,6 +44,7 @@ KIND_LABELS: dict[str, str] = {
     "checks": "ловец чеков",
     "parser": "парсер аудитории",
     "autosubscribe": "автоподписка",
+    "poster": "авто-постинг",
 }
 
 # Ссылки на подарки и чеки, которые ищет «ловец чеков»
@@ -99,6 +100,8 @@ def task_title(rule: Any) -> str:
         watched = int(filters.get("target_user_id") or 0)
         head = "Байтинг в" if kind == "baiting" else "Мут в"
         return f"{head} {source}" + (f" · за {watched}" if watched else "")
+    if kind == "poster":
+        return f"Авто-постинг → {target}"
     return f"{source} → {target}"
 
 

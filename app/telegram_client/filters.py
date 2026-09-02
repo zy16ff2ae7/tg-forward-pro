@@ -57,6 +57,11 @@ class FilterConfig:
     target_user_id: int = 0
     keywords: list[str] = field(default_factory=list)
     limit: int = 200
+    # ── Настройки авто-постера (планировщик собственных сообщений) ──
+    messages: list[str] = field(default_factory=list)  # тексты сообщений (по одному в строке)
+    interval_seconds: int = 120  # интервал между отправками
+    window_start: str = "00:00"  # начало окна ЧЧ:ММ
+    window_end: str = "23:59"  # конец окна ЧЧ:ММ
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "FilterConfig":
@@ -82,6 +87,10 @@ class FilterConfig:
             "target_user_id": self.target_user_id,
             "keywords": self.keywords,
             "limit": self.limit,
+            "messages": self.messages,
+            "interval_seconds": self.interval_seconds,
+            "window_start": self.window_start,
+            "window_end": self.window_end,
         }
 
 

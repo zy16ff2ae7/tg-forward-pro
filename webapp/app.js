@@ -57,6 +57,14 @@ const FIELD_SPEC = {
   reaction: { label: 'Реакция', placeholder: '👍', note: 'любой эмодзи' },
   limit: { label: 'Сколько участников', control: 'number', placeholder: '200', note: 'не больше 10 000' },
   mode: { label: 'Режим', control: 'mode' },
+  message: {
+    label: 'Сообщение',
+    control: 'textarea',
+    placeholder: 'Текст для постинга. Несколько сообщений — каждое с новой строки, уходят по очереди.',
+  },
+  interval: { label: 'Интервал (мин)', control: 'number', placeholder: '2', note: 'минимум 1 минута' },
+  start: { label: 'Начало (ЧЧ:ММ)', placeholder: '00:00' },
+  end: { label: 'Конец (ЧЧ:ММ)', placeholder: '23:59' },
 };
 
 /* Заголовок шторки результатов для каждого типа задачи. */
@@ -151,6 +159,10 @@ const DEMO_COMMANDS = [
   { id: 'mute', kind: 'mute', emoji: '🔇', title: 'Мут', status: 'ready',
     needs: ['account', 'source', 'target_user'], optional: ['keywords'],
     description: 'Удаляет сообщения выбранного человека в чате, где вы администратор.' },
+  { id: 'poster', kind: 'poster', emoji: '📤', title: 'Авто-постинг', status: 'ready',
+    needs: ['account', 'target', 'message'], optional: ['interval', 'start', 'end'],
+    description: 'Шлёт ваше сообщение в чат каждые N минут в заданном окне времени.',
+    hint: 'Чат — куда постить. Сообщений может быть несколько (каждое с новой строки) — уходят по очереди. Интервал в минутах, окно — ЧЧ:ММ.' },
 ];
 
 const DEMO_FEATURES = { account_login_enabled: true, account_login_status: 'ready' };
@@ -244,6 +256,9 @@ function demoTaskTitle(body, command) {
     if (command.kind === 'baiting') return `Байтинг: ${body.target_user} в ${body.source}`;
     if (command.kind === 'mute') return `Мут: ${body.target_user} в ${body.source}`;
     if (command.kind === 'checks') return `Ловец чеков: ${body.source} → ${body.target}`;
+    if (command.kind === 'poster') {
+      return `Авто-постинг → ${body.target || ''}`;
+    }
     if (command.kind === 'broadcast') {
       return `Рассылка: ${body.source} → ${[body.target, ...(body.targets || [])].join(', ')}`;
     }
@@ -1019,6 +1034,12 @@ function fieldHtml(key) {
         <button type="button" class="seg" data-mode="forward">Форвард</button>
       </div></div>`;
   }
+  if (spec.control === 'textarea') {
+    return `<label class="field"><span>${spec.label}</span>
+      <textarea id="task_${key}" rows="4" placeholder="${esc(spec.placeholder || '')}"></textarea>
+      ${spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : ''}
+    </label>`;
+  }
   const type = spec.control === 'number' ? 'number' : 'text';
   return `<label class="field"><span>${spec.label}</span>
     <input type="${type}" id="task_${key}" placeholder="${esc(spec.placeholder || '')}" autocomplete="off">
@@ -1135,6 +1156,10 @@ function collectTaskPayload() {
   if (values.targets) body.targets = splitList(values.targets);
   if (values.limit) body.limit = Number(values.limit) || 0;
   if (values.mode) body.mode = values.mode;
+  if (values.message) body.message = values.message;
+  if (values.interval) body.interval = Number(values.interval) || 0;
+  if (values.start) body.start = values.start;
+  if (values.end) body.end = values.end;
   return { body };
 }
 

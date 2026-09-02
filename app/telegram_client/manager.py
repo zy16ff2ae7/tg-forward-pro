@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
@@ -78,6 +79,22 @@ def _snapshot(rule) -> RuleSnapshot:
     )
 
 
+def _hhmm_to_sec(value: str) -> int:
+    """«ЧЧ:ММ» → секунды от начала суток. Невалидное значение → 0."""
+    try:
+        hours, minutes = str(value).split(":")
+        return max(0, min(23, int(hours))) * 3600 + max(0, min(59, int(minutes))) * 60
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _in_window(now_sec: int, start: int, end: int) -> bool:
+    """Попадает ли момент в окно. Окно через полночь (23:00→01:00) тоже ок."""
+    if start <= end:
+        return start <= now_sec <= end
+    return now_sec >= start or now_sec <= end
+
+
 class ClientManager:
     """Держит живые Telethon-сессии и раздаёт им входящие сообщения."""
 
@@ -87,6 +104,13 @@ class ClientManager:
         self._rules: dict[tuple[int, int], list[RuleSnapshot]] = {}
         # account_id -> правила, слушающие все чаты аккаунта (например, ЛС)
         self._floating_rules: dict[int, list[RuleSnapshot]] = {}
+        # Авто-постеры — отдельный список: стреляют по расписанию, а не по
+        # входящим сообщениям, поэтому в _rules их класть не надо.
+        self._poster_rules: list[RuleSnapshot] = []
+        # Состояние планировщика на правило: last — время последней отправки,
+        # idx — индекс следующего сообщения, runs — сколько раз отправили.
+        self._poster_state: dict[int, dict] = {}
+        self._poster_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._refresh_task: asyncio.Task | None = None
 
@@ -274,9 +298,17 @@ class ClientManager:
                     else:
                         await repo.set_account_error(db, db_account, "Не удалось запустить сессию")
 
+        # Планировщик авто-постера поднимаем, только когда аккаунты реально
+        # могут постить (MTProto готов и хотя бы один поднялся).
+        if self._poster_task is None or self._poster_task.done():
+            self._poster_task = asyncio.create_task(self._poster_loop())
+
     async def stop_all(self) -> None:
         # Сначала дожимаем очередь: если отключить клиенты раньше, то, что уже
         # стоит в очереди, упадёт с ошибкой соединения.
+        if self._poster_task is not None:
+            self._poster_task.cancel()
+            self._poster_task = None
         await delivery_queue.stop()
         for account_id in list(self._clients):
             await self.stop_account(account_id)
@@ -396,9 +428,76 @@ class ClientManager:
                 floating.setdefault(rule.account_id, []).append(snapshot)
             else:
                 fresh.setdefault((rule.account_id, rule.source_id), []).append(snapshot)
+        # Авто-постеры собираем отдельно — они живут по расписанию, а не по
+        # входящим сообщениям, поэтому в _rules не попадают (иначе входящее
+        # сообщение в приёмнике случайно бы «подхватило» постер).
+        fresh_posters: list[RuleSnapshot] = []
+        for rule in rules:
+            if rule.kind == "poster" and rule.enabled and not rule.archived:
+                fresh_posters.append(_snapshot(rule))
+
         async with self._lock:
             self._rules = fresh
             self._floating_rules = floating
+            self._poster_rules = fresh_posters
+
+    # ─────────────────────────── Авто-постер (планировщик) ───────────────────────────
+
+    async def _poster_loop(self) -> None:
+        """Фоновый цикл авто-постера: раз в 20 сек проверяет расписание."""
+        while True:
+            try:
+                await asyncio.sleep(20)
+                await self._poster_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — планировщик не должен падать
+                logger.exception("Постер-планировщик упал: {}", exc)
+
+    async def _poster_tick(self) -> None:
+        """Один проход: для каждого активного постера — отправить очередное сообщение."""
+        now = time.localtime()
+        now_sec = now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec
+
+        async with self._lock:
+            rules = list(self._poster_rules)
+
+        for rule in rules:
+            if not rule.enabled or rule.archived:
+                continue
+            client = self._clients.get(rule.account_id)
+            if client is None or not client.is_connected():
+                continue
+
+            f = rule.filters
+            messages = f.messages if hasattr(f, "messages") else (f.get("messages") or [])
+            if not messages:
+                continue
+            start = _hhmm_to_sec(f.window_start if hasattr(f, "window_start") else "00:00")
+            end = _hhmm_to_sec(f.window_end if hasattr(f, "window_end") else "23:59")
+            if not _in_window(now_sec, start, end):
+                continue
+
+            interval = max(30, int(getattr(f, "interval_seconds", 120)))
+            st = self._poster_state.setdefault(rule.id, {"last": 0.0, "idx": 0, "runs": 0})
+            if time.time() - st["last"] < interval:
+                continue
+
+            msg = messages[st["idx"] % len(messages)]
+            try:
+                await client.send_message(rule.target_id, msg)
+                st["last"] = time.time()
+                st["idx"] = (st["idx"] + 1) % len(messages)
+                st["runs"] += 1
+                # Косметика: счётчик отправок, чтобы в кабинете было видно работу
+                async with SessionLocal() as session:
+                    db_rule = await repo.get_rule(session, rule.id, rule.user_id)
+                    if db_rule is not None:
+                        db_rule.forwarded_count = (db_rule.forwarded_count or 0) + 1
+                        await session.commit()
+            except Exception as exc:  # noqa: BLE001 — не спамим при ошибке
+                logger.warning("Постер #{} не отправил: {}", rule.id, exc)
+                st["last"] = time.time()
 
     def rules_for(self, account_id: int, chat_id: int) -> list[RuleSnapshot]:
         return self._rules.get((account_id, chat_id), [])
