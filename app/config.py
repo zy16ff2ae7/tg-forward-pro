@@ -128,13 +128,19 @@ class Settings:
     def mini_app_url(self) -> str | None:
         """Публичный адрес мини-аппа (для кнопок бота).
 
-        Если WEBAPP_URL не задан, строим из WEBHOOK_URL — на VDS этого достаточно.
+        Мини-апп всегда раздаётся по пути /app/ — открываем сразу туда,
+        без редиректа с корня (надёжнее внутри Telegram WebView, где
+        initData передаётся через объект WebApp, а не через URL).
         """
         if self.webapp_url:
-            return self.webapp_url.rstrip("/")
-        if self.webhook_url:
-            return self.webhook_url.rstrip("/") + "/app/"
-        return None
+            base = self.webapp_url.rstrip("/")
+        elif self.webhook_url:
+            base = self.webhook_url.rstrip("/")
+        else:
+            return None
+        if base.endswith("/app"):
+            return base + "/"
+        return base + "/app/"
 
     @property
     def mtproto_ready(self) -> bool:
