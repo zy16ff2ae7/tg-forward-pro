@@ -107,6 +107,10 @@ chmod +x run.sh deploy/deploy.sh
 получать код повторно не нужно:
 
 ```bash
+# из файла Telethon (точнее всего: DC, адрес и порт берутся из файла)
+PYTHONPATH=. python scripts/import_session.py \
+  --file ~/Downloads/255824769_telethon.session --save --user-id 7686196719
+
 # только проверить ключ, ничего не записывая
 PYTHONPATH=. python scripts/import_session.py --session "bd64...9131:1"
 

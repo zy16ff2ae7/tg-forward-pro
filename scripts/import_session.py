@@ -18,9 +18,15 @@
 (my.telegram.org), без них ни один MTProto-клиент не установит соединение —
 ключ шифрования канала есть, а «паспорта» у клиента нет.
 
+Два источника сессии:
+  --file    файл *.session от Telethon (SQLite). Самый точный: dc_id, адрес и
+            порт читаются из файла, ничего угадывать не нужно.
+  --session строка `hex:dc` или готовая StringSession. Здесь адрес DC берётся
+            из таблицы DC_SERVERS, поэтому файл надёжнее.
+
 Запуск из корня проекта:
 
-    PYTHONPATH=. python scripts/import_session.py --session "hex:1"
+    PYTHONPATH=. python scripts/import_session.py --file ~/Downloads/255824769_telethon.session
     PYTHONPATH=. python scripts/import_session.py --session "hex:1" --user-id 123456789 --save
 
 Без --save скрипт только проверяет ключ (подключается и печатает get_me),
@@ -33,6 +39,7 @@ import asyncio
 import base64
 import getpass
 import ipaddress
+import sqlite3
 import struct
 import sys
 from pathlib import Path
@@ -65,6 +72,60 @@ AUTH_KEY_BYTES = 256
 
 class ParseError(RuntimeError):
     """Не удалось разобрать строку сессии."""
+
+
+def from_parts(dc_id: int, ip: str, port: int, auth_key: bytes) -> str:
+    """Собирает StringSession из уже известных частей (DC, адрес, порт, ключ)."""
+    if len(auth_key) != AUTH_KEY_BYTES:
+        raise ParseError(
+            f"Ключ должен быть {AUTH_KEY_BYTES} байт, а получено {len(auth_key)}."
+        )
+    if not any(auth_key):
+        raise ParseError("Ключ нулевой — сессия пустая (аккаунт не авторизован).")
+    if dc_id not in DC_SERVERS:
+        raise ParseError(
+            f"DC {dc_id} неизвестен. Допустимые: {', '.join(map(str, sorted(DC_SERVERS)))}."
+        )
+    packed = struct.pack(
+        STRUCT, dc_id, ipaddress.ip_address(ip).packed, port, auth_key
+    )
+    return "1" + base64.urlsafe_b64encode(packed).decode("ascii")
+
+
+def read_sqlite_session(path: str) -> str:
+    """Читает готовый файл *.session от Telethon (SQLite).
+
+    Это самый точный источник: в файле уже лежат dc_id, server_address и port,
+    поэтому ничего угадывать не нужно — в отличие от строки `hex:dc`, где адрес
+    приходится брать из таблицы DC_SERVERS.
+    """
+    file = Path(path).expanduser()
+    if not file.is_file():
+        raise ParseError(f"Файл не найден: {file}")
+
+    # mode=ro — не создаём -wal/-shm рядом с чужой сессией и ничего не портим
+    conn = sqlite3.connect(f"file:{file}?mode=ro", uri=True)
+    try:
+        row = conn.execute(
+            "SELECT dc_id, server_address, port, auth_key FROM sessions"
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise ParseError(f"Это не сессия Telethon ({exc}).") from exc
+    finally:
+        conn.close()
+
+    if not row:
+        raise ParseError("В файле нет ни одной записи в таблице sessions.")
+
+    dc_id, server_address, port, auth_key = row
+    if not auth_key:
+        raise ParseError("В файле сессии нет auth_key — аккаунт не был авторизован.")
+
+    # Telethon может оставить адрес/порт пустыми — тогда берём из таблицы DC
+    dc_id = int(dc_id or 2)
+    ip = server_address or DC_SERVERS.get(dc_id, DC_SERVERS[2])[0]
+    port = int(port or DC_SERVERS.get(dc_id, DC_SERVERS[2])[1])
+    return from_parts(dc_id, ip, port, bytes(auth_key))
 
 
 def build_string_session(raw: str) -> str:
@@ -107,16 +168,7 @@ def build_string_session(raw: str) -> str:
     except ValueError as exc:
         raise ParseError(f"Строка не похожа на hex: {exc}") from exc
 
-    if dc_id not in DC_SERVERS:
-        raise ParseError(
-            f"DC {dc_id} неизвестен. Допустимые: {', '.join(map(str, sorted(DC_SERVERS)))}."
-        )
-
-    ip, port = DC_SERVERS[dc_id]
-    packed = struct.pack(
-        STRUCT, dc_id, ipaddress.ip_address(ip).packed, port, auth_key
-    )
-    return "1" + base64.urlsafe_b64encode(packed).decode("ascii")
+    return from_parts(dc_id, *DC_SERVERS[dc_id], auth_key)
 
 
 async def check_session(session_string: str):
@@ -171,9 +223,13 @@ async def main_async(args: argparse.Namespace) -> int:
         print("Не задан SECRET_KEY в .env — сессию нечем шифровать.", file=sys.stderr)
         return 2
 
-    raw = args.session or getpass.getpass("Сырая сессия (hex:dc): ")
     try:
-        session_string = build_string_session(raw)
+        if args.file:
+            session_string = read_sqlite_session(args.file)
+            print(f"Файл сессии: {Path(args.file).expanduser()}")
+        else:
+            raw = args.session or getpass.getpass("Сырая сессия (hex:dc): ")
+            session_string = build_string_session(raw)
     except ParseError as exc:
         print(f"Не удалось разобрать сессию: {exc}", file=sys.stderr)
         return 2
@@ -221,6 +277,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Импорт готовой MTProto-сессии (auth_key + dc) в tg-forward-pro."
     )
+    parser.add_argument("--file", help="путь к *.session от Telethon (SQLite) — точнее строки")
     parser.add_argument("--session", help="строка вида <hex>:<dc> (или готовая StringSession)")
     parser.add_argument("--user-id", help="Telegram user_id владельца кабинета")
     parser.add_argument("--phone", default="", help="номер телефона (по умолчанию из get_me)")
