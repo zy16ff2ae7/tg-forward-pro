@@ -100,6 +100,38 @@ chmod +x run.sh deploy/deploy.sh
 в логе будет `WARNING … бот и мини-апп стартуют, вход аккаунтов отключён`.
 Всё остальное — меню, мини-апп, оплата — работает.
 
+### Подключить уже готовый аккаунт (без кода из Telegram)
+
+Если аккаунт где-то уже авторизован и от него осталась «сырая» сессия —
+`<auth_key в hex, 512 символов>:<номер DC>` или файл `*.session` от Telethon —
+получать код повторно не нужно:
+
+```bash
+# только проверить ключ, ничего не записывая
+PYTHONPATH=. python scripts/import_session.py --session "bd64...9131:1"
+
+# проверить и записать в базу зашифрованной
+PYTHONPATH=. python scripts/import_session.py --session "bd64...9131:1" \
+  --save --user-id 7686196719
+```
+
+Скрипт разбирает три формата (`hex:dc`, `hex`, готовая StringSession), упаковывает
+ключ в `StringSession`, подключается, печатает `get_me()` и кладёт сессию в БД
+зашифрованной Fernet-ключом.
+
+Если есть файл `*.session` (SQLite от Telethon), из него можно достать и `auth_key`,
+и точные `dc_id`/`server_address`/`port`:
+
+```bash
+sqlite3 account.session "SELECT dc_id, server_address, port, hex(auth_key) FROM sessions"
+```
+
+**Важно:** `auth_key` привязан к `api_id`, под которым он создавался. Если сессия
+сделана на официальных кредах Telegram Desktop (`2040`), а в `.env` стоит другой
+`API_ID` — получите `AUTH_KEY_UNREGISTERED`, в худшем случае бан аккаунта.
+Свои `API_ID`/`API_HASH` + вход по номеру в боте — единственный чистый путь;
+официальные креды допустимы только как временная мера (нарушают ToS Telegram).
+
 ### Открыть мини-апп на локальной машине
 
 Telegram открывает Web App только по HTTPS, поэтому нужен публичный адрес:
@@ -365,6 +397,7 @@ scripts/
   gen_secret.py           генерация SECRET_KEY
   expose.sh               публикация мини-аппа через туннель
   get_api_credentials.py  получение API_ID/API_HASH через my.telegram.org
+  import_session.py       импорт готовой MTProto-сессии (auth_key + DC)
   make_banner.py          генерация приветственного баннера (Pillow)
   gen_initdata.py         подписанный initData, чтобы дёргать API curl-ом
 pytest.ini, requirements-dev.txt   тестовый контур (продакшену не нужен)
