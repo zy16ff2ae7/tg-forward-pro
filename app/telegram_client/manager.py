@@ -407,6 +407,26 @@ class ClientManager:
                 return int(dialog.id), title
             if raw and raw.lower() in title.lower():
                 return int(dialog.id), title
+
+        # 3) канал/чат по числовому id, даже если он не в последних диалогах.
+        #    Аккаунт может иметь доступ (быть участником/админом), но чат не
+        #    попадает в список недавних — тогда резолвим напрямую через API.
+        if numeric_id is not None:
+            candidates = [numeric_id]
+            if numeric_id < 0:
+                # id канала ходит как -100<channel_id>; PeerChannel ждёт channel_id
+                candidates.append(numeric_id + 1000000000000)
+            for cand in candidates:
+                try:
+                    entity = await client.get_entity(cand)
+                    title = (
+                        getattr(entity, "title", None)
+                        or getattr(entity, "first_name", None)
+                        or str(getattr(entity, "id", "?"))
+                    )
+                    return int(getattr(entity, "id")), title
+                except Exception:  # noqa: BLE001
+                    continue
         return None
 
     # ─────────────────────────────── Кэш правил ───────────────────────────────
