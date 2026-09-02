@@ -10,6 +10,9 @@ EnvironmentFile=/opt/tg-forward/.env
 ExecStart=/opt/tg-forward/venv/bin/python -m app.main
 Restart=always
 RestartSec=10
+# При остановке сервис дожимает очередь доставки (до 30 сек): если systemd
+# убьёт процесс раньше, недоотправленное упадёт с ошибкой соединения.
+TimeoutStopSec=75
 StandardOutput=journal
 StandardError=journal
 LimitNOFILE=65535
