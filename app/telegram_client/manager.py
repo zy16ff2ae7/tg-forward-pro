@@ -317,7 +317,12 @@ class ClientManager:
         return result
 
     async def resolve_chat(self, account_id: int, query: str) -> tuple[int, str] | None:
-        """Находит чат по @username, ссылке или названию. Возвращает (id, название)."""
+        """Находит чат по @username, ссылке t.me, числовому id или названию.
+
+        Возвращает (id, название). Числовой id (в т.ч. отрицательный id канала)
+        резолвится по списку диалогов аккаунта — именно это нужно для выбора
+        чатов мышью в мини-аппе, где chatToRef отдаёт «голый» id без username.
+        """
         if not settings.mtproto_ready:
             return None
         client = self._clients.get(account_id)
@@ -326,25 +331,48 @@ class ClientManager:
         query = (query or "").strip()
         if not query:
             return None
-        try:
-            entity = await client.get_entity(query)
-        except Exception:  # noqa: BLE001
-            # пробуем поиском по диалогам
-            async for dialog in client.iter_dialogs(limit=200):
-                title = (
-                    getattr(dialog.entity, "title", None)
-                    or getattr(dialog.entity, "first_name", None)
-                    or ""
-                )
-                if query.lower() in title.lower():
-                    return dialog.id, title
+
+        # нормализуем: ссылки t.me/c/... и t.me/..., а также ведущий @
+        raw = query
+        low = raw.lower()
+        if "t.me/" in low:
+            raw = raw.split("t.me/", 1)[1].split("/")[0].split("?")[0]
+        raw = raw.lstrip("@")
+        raw = raw.strip()
+        if not raw:
             return None
-        title = (
-            getattr(entity, "title", None)
-            or getattr(entity, "first_name", None)
-            or str(getattr(entity, "id", "?"))
-        )
-        return int(getattr(entity, "id")), title
+
+        # числовой id (голые id чатов/каналов/пользователей, в т.ч. отрицательные)
+        numeric_id: int | None = None
+        if raw.lstrip("-").isdigit():
+            numeric_id = int(raw)
+
+        # 1) username / ссылка — резолвим напрямую через API
+        if numeric_id is None:
+            try:
+                entity = await client.get_entity(raw)
+                title = (
+                    getattr(entity, "title", None)
+                    or getattr(entity, "first_name", None)
+                    or str(getattr(entity, "id", "?"))
+                )
+                return int(getattr(entity, "id")), title
+            except Exception:  # noqa: BLE001
+                pass  # дальше ищем по диалогам
+
+        # 2) ищем среди диалогов: сначала точное совпадение по id, затем по названию
+        async for dialog in client.iter_dialogs(limit=200):
+            entity = dialog.entity
+            title = (
+                getattr(entity, "title", None)
+                or getattr(entity, "first_name", None)
+                or "Без имени"
+            )
+            if numeric_id is not None and int(dialog.id) == numeric_id:
+                return int(dialog.id), title
+            if raw and raw.lower() in title.lower():
+                return int(dialog.id), title
+        return None
 
     # ─────────────────────────────── Кэш правил ───────────────────────────────
 
