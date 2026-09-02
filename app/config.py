@@ -102,6 +102,15 @@ class Settings:
     trongrid_api_key: str | None = None
     usdt_min_confirmations: int = 1
 
+    # Масштабирование пересылки (безопасные лимиты, не обход антиспама Telegram)
+    delivery_workers: int = 4
+    delivery_queue_maxsize: int = 2000
+    send_global_concurrency: int = 8
+    send_min_interval_seconds: float = 1.2
+    send_retry_attempts: int = 2
+    send_retry_base_seconds: float = 2.0
+    flood_wait_max_seconds: int = 900
+
     log_level: str = "INFO"
 
     @property
@@ -208,6 +217,12 @@ class Settings:
             problems.append(
                 "ЮKassa подключена наполовину: нужен и YOOKASSA_SHOP_ID, и YOOKASSA_SECRET_KEY"
             )
+        if self.delivery_workers < 1:
+            problems.append("DELIVERY_WORKERS меньше 1 — очередь доставки не сможет работать")
+        if self.delivery_queue_maxsize < 10:
+            problems.append("DELIVERY_QUEUE_MAXSIZE слишком мал — при всплеске посты будут отбрасываться")
+        if self.send_min_interval_seconds < 0.5:
+            problems.append("SEND_MIN_INTERVAL_SECONDS ниже 0.5 — высокий риск FloodWait")
         return problems
 
 
@@ -263,6 +278,15 @@ def load_settings() -> Settings:
         usdt_wallet=_get("USDT_TRC20_WALLET"),
         trongrid_api_key=_get("TRONGRID_API_KEY"),
         usdt_min_confirmations=_get_int("USDT_MIN_CONFIRMATIONS", 1),
+        delivery_workers=max(1, _get_int("DELIVERY_WORKERS", 4)),
+        delivery_queue_maxsize=max(10, _get_int("DELIVERY_QUEUE_MAXSIZE", 2000)),
+        send_global_concurrency=max(1, _get_int("SEND_GLOBAL_CONCURRENCY", 8)),
+        send_min_interval_seconds=max(
+            0.1, _get_float("SEND_MIN_INTERVAL_SECONDS", 1.2)
+        ),
+        send_retry_attempts=max(0, _get_int("SEND_RETRY_ATTEMPTS", 2)),
+        send_retry_base_seconds=max(0.1, _get_float("SEND_RETRY_BASE_SECONDS", 2.0)),
+        flood_wait_max_seconds=max(1, _get_int("FLOOD_WAIT_MAX_SECONDS", 900)),
         log_level=_get_choice("LOG_LEVEL", LOG_LEVELS, "INFO"),
     )
 

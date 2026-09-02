@@ -21,8 +21,9 @@ from app.db.database import SessionLocal, session_scope
 from app.db.models import TelegramAccount
 from app.db import repo
 from app.telegram_client.filters import FilterConfig
-from app.telegram_client.forwarder import deliver
+from app.telegram_client.forwarder import deliver, log_delivery_error
 from app.telegram_client.jobs import FLOATING_KINDS
+from app.telegram_client.queue import DeliveryQueue
 from app.telegram_client.types import RuleSnapshot
 
 
@@ -179,8 +180,11 @@ class ClientManager:
             return
 
         for rule in rules:
-            asyncio.create_task(
-                deliver(client=event.client, message=event.message, rule=rule)
+            # Не asyncio.create_task: при всплеске (сотня постов разом) задачи
+            # скопом лезли в Telegram и ловили FloodWait. Очередь держит темп,
+            # а при переполнении честно отбрасывает с записью в журнал.
+            delivery_queue.submit(
+                client=event.client, message=event.message, rule=rule
             )
 
     async def start_account(self, account: TelegramAccount, session_string: str) -> bool:
@@ -236,6 +240,8 @@ class ClientManager:
         """Поднимает все активные аккаунты из БД."""
         from app.security import decrypt_session
 
+        await delivery_queue.start()
+
         if not settings.mtproto_ready:
             logger.warning(
                 "API_ID/API_HASH не заданы: бот и мини-апп стартуют, вход аккаунтов отключён"
@@ -269,6 +275,9 @@ class ClientManager:
                         await repo.set_account_error(db, db_account, "Не удалось запустить сессию")
 
     async def stop_all(self) -> None:
+        # Сначала дожимаем очередь: если отключить клиенты раньше, то, что уже
+        # стоит в очереди, упадёт с ошибкой соединения.
+        await delivery_queue.stop()
         for account_id in list(self._clients):
             await self.stop_account(account_id)
         if self._refresh_task is not None:
@@ -281,6 +290,10 @@ class ClientManager:
 
     def online_ids(self) -> Iterable[int]:
         return [acc_id for acc_id in self._clients if self.is_online(acc_id)]
+
+    def delivery_stats(self) -> dict[str, int]:
+        """Счётчики очереди доставки — для админки и /api/health."""
+        return delivery_queue.stats()
 
     async def list_dialogs(self, account_id: int, limit: int = 30) -> list[dict[str, Any]]:
         """Список чатов аккаунта: для выбора источника и приёмника."""
@@ -400,6 +413,9 @@ class ClientManager:
 
         self._refresh_task = asyncio.create_task(loop())
 
+
+#: Очередь доставки одна на процесс: она и держит общий темп отправки.
+delivery_queue = DeliveryQueue.from_settings(deliver, on_error=log_delivery_error)
 
 manager = ClientManager()
 

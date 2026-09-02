@@ -144,8 +144,12 @@ def require_auth(handler: Callable) -> Callable:
 
 @routes.get("/api/health")
 async def health(_request: web.Request) -> web.Response:
-    """Проверка живости. Без авторизации — для мониторинга."""
-    return _json({"ok": True, "service": "tg-forward"})
+    """Проверка живости. Без авторизации — для мониторинга.
+
+    Плюс счётчики очереди: по ним видно, не копятся ли отправки и не сыплются
+    ли ошибки, — иначе узнаём о проблеме только от пользователей.
+    """
+    return _json({"ok": True, "service": "tg-forward", "delivery": manager.delivery_stats()})
 
 
 @routes.get("/api/me")
