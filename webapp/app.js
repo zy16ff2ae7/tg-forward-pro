@@ -1465,6 +1465,8 @@ function bindEvents() {
       openTaskForSelection('copy_channel');
     } else if (action === 'parser') {
       openTaskForSelection('parser');
+    } else if (action === 'poster') {
+      openTaskForSelection('poster');
     }
   });
   $('chatTags').addEventListener('click', (event) => {
