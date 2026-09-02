@@ -616,8 +616,18 @@ function renderTasks(tasks) {
       const isForward = kind === 'forward';
       const lines = [task.kind_label || (isForward ? 'пересылка' : kind)];
       if (isForward) lines.push(task.mode === 'copy' ? 'копия без метки' : 'обычный форвард');
-      if (task.oneshot) lines.push('запуск по кнопке');
-      else lines.push(`задержка ${task.delay} сек`);
+      if (kind === 'poster') {
+        // Авто-постер: показываем расписание вместо «задержки в секундах».
+        lines.push(`каждые ${task.interval_min || 1} мин`);
+        if (task.window_start && task.window_end) {
+          lines.push(`окно ${task.window_start}–${task.window_end}`);
+        }
+        if (task.messages_count) lines.push(`${task.messages_count} сообщ.`);
+      } else if (task.oneshot) {
+        lines.push('запуск по кнопке');
+      } else {
+        lines.push(`задержка ${task.delay} сек`);
+      }
       lines.push(`переслано ${task.forwarded}`);
 
       const actions = [];

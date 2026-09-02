@@ -825,10 +825,11 @@ async def _bot_username() -> str | None:
 
 def _task_view(rule) -> dict:
     """Правило → вид задачи для мини-аппа."""
+    from app.telegram_client.filters import FilterConfig
     from app.telegram_client.jobs import KIND_LABELS, task_title
 
     kind = rule.kind or "forward"
-    return {
+    view = {
         "id": rule.id,
         "kind": kind,
         "kind_label": KIND_LABELS.get(kind, kind),
@@ -845,6 +846,15 @@ def _task_view(rule) -> dict:
         "oneshot": kind in ONE_SHOT_KINDS,
         "created_at": rule.created_at.isoformat() if rule.created_at else None,
     }
+    # Авто-постер: выносим расписание, чтобы в карточке задачи было видно,
+    # как часто и в каком окне он шлёт (delay в секундах неинформативен).
+    if kind == "poster":
+        f = FilterConfig.from_dict(rule.filters or {})
+        view["interval_min"] = max(1, f.interval_seconds // 60)
+        view["window_start"] = f.window_start
+        view["window_end"] = f.window_end
+        view["messages_count"] = len(f.messages)
+    return view
 
 
 # Каталог команд мини-аппа.
