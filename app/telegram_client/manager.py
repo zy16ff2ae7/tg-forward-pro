@@ -69,6 +69,7 @@ def _snapshot(rule) -> RuleSnapshot:
         id=rule.id,
         user_id=rule.user_id,
         target_id=rule.target_id,
+        account_id=rule.account_id,
         mode=rule.mode,
         delay_seconds=rule.delay_seconds,
         filters=FilterConfig.from_dict(rule.filters or {}),
@@ -76,6 +77,8 @@ def _snapshot(rule) -> RuleSnapshot:
         source_id=rule.source_id,
         source_title=rule.source_title or "",
         target_title=rule.target_title or "",
+        enabled=bool(rule.enabled),
+        archived=bool(rule.archived),
     )
 
 
