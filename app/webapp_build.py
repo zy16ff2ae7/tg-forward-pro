@@ -12,6 +12,7 @@ Telegram Desktop и мобильные клиенты держат `styles.css` 
 """
 from __future__ import annotations
 
+import json
 from hashlib import blake2b
 from pathlib import Path
 import re
@@ -88,3 +89,29 @@ def cache_control_for(has_version: bool) -> str:
     if has_version:
         return "public, max-age=31536000, immutable"
     return "no-cache"
+
+
+def stale_shell_loader(stamp: str) -> str:
+    """Скрипт вместо бандла для старого каркаса, застрявшего в кэше клиента.
+
+    Свежий `index.html` просит статику только с меткой, поэтому `app.js` без
+    `?v=` запрашивает ровно одна вещь: копия старого `index.html`, которую
+    WebView держит у себя и не перепроверяет (её ответ уходил ещё без
+    `Cache-Control`). Отдать такой копии новый бандл нельзя — разметка у неё
+    прежняя, и новый код не найдёт половину элементов.
+
+    Поэтому отдаём перезагрузку на адрес с меткой: у него другой ключ кэша, и
+    каркас гарантированно приезжает с сервера. `location.hash` переносим — в
+    нём Telegram передаёт initData, без него кабинет уйдёт в демо-режим и
+    покажет чужие цифры. Прочие параметры (`demo=1`) тоже сохраняем.
+    """
+    return (
+        "/* Спасатель кэша: старый каркас уводим на адрес с меткой сборки. */\n"
+        "(function () {\n"
+        f"  var stamp = {json.dumps(stamp)};\n"
+        "  var params = new URLSearchParams(location.search);\n"
+        "  if (!stamp || params.get('v') === stamp) return;\n"
+        "  params.set('v', stamp);\n"
+        "  location.replace(location.pathname + '?' + params.toString() + location.hash);\n"
+        "})();\n"
+    )

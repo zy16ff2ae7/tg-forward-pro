@@ -34,6 +34,16 @@ def default_filters() -> dict:
         "target_user_id": 0,    # байтинг/мут: за кем следим (0 — за всеми)
         "keywords": [],         # ловец чеков и уведомления: слова-триггеры
         "limit": 200,           # парсер: сколько участников собрать за запуск
+        # ── Рассылка по чатам (kind="mailing") ──
+        "gap_seconds": 5,       # пауза между получателями
+        "gap_jitter": 0,        # к паузе между получателями добавляем 0..N секунд
+        "cycle_seconds": 10,    # пауза перед следующим кругом рассылки
+        "cycle_jitter": 0,      # к паузе между кругами добавляем 0..N секунд
+        "repeats": 0,           # сколько кругов сделать (0 — без лимита)
+        "typing": False,        # показывать «печатает» перед отправкой
+        "link_preview": False,  # оставлять блок предпросмотра ссылки
+        "random_pick": False,   # брать из набора случайное сообщение, а не по кругу
+        "library_ids": [],      # id сохранённых сообщений (таблица saved_messages)
     }
 
 
@@ -62,6 +72,18 @@ class FilterConfig:
     interval_seconds: int = 120  # интервал между отправками
     window_start: str = "00:00"  # начало окна ЧЧ:ММ
     window_end: str = "23:59"  # конец окна ЧЧ:ММ
+    # ── Рассылка по чатам (kind="mailing") ──
+    gap_seconds: int = 5  # пауза между получателями
+    gap_jitter: int = 0  # случайная добавка к паузе между получателями
+    cycle_seconds: int = 10  # пауза перед следующим кругом
+    cycle_jitter: int = 0  # случайная добавка к паузе между кругами
+    # Кругов по умолчанию нет предела: настройка не задана — значит рассылка
+    # крутится, пока её не остановят. Число кругов приходит из кабинета явно.
+    repeats: int = 0  # сколько кругов (0 — без лимита)
+    typing: bool = False  # показывать «печатает»
+    link_preview: bool = False  # оставлять предпросмотр ссылки
+    random_pick: bool = False  # случайное сообщение из набора
+    library_ids: list[int] = field(default_factory=list)  # id из saved_messages
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "FilterConfig":
@@ -91,6 +113,15 @@ class FilterConfig:
             "interval_seconds": self.interval_seconds,
             "window_start": self.window_start,
             "window_end": self.window_end,
+            "gap_seconds": self.gap_seconds,
+            "gap_jitter": self.gap_jitter,
+            "cycle_seconds": self.cycle_seconds,
+            "cycle_jitter": self.cycle_jitter,
+            "repeats": self.repeats,
+            "typing": self.typing,
+            "link_preview": self.link_preview,
+            "random_pick": self.random_pick,
+            "library_ids": self.library_ids,
         }
 
 

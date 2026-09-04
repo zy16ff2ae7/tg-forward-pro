@@ -4,18 +4,21 @@
 ``forwarder.deliver`` — на том же контракте: подключённый Telethon-клиент,
 сообщение и снимок правила. Классическая пересылка от этого не меняется.
 
-Задачи делятся на два класса:
+Задачи делятся на три класса:
 
 * **потоковые** — реагируют на каждое сообщение (broadcast, baiting, mute,
   dialogs, checks, autosubscribe);
 * **разовые** — запускаются по команде пользователя и сразу отдают результат
-  (parser, autosubscribe).
+  (parser, autosubscribe);
+* **расписанные** — живут в планировщике ``manager`` и сами решают, когда
+  отправлять (poster, mailing); входящие сообщения им не нужны.
 """
 from __future__ import annotations
 
 import asyncio
+import random
 import re
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, Sequence
 
 from loguru import logger
 from telethon.errors import FloodWaitError, RPCError
@@ -38,7 +41,7 @@ ONE_SHOT_KINDS: tuple[str, ...] = ("parser", "autosubscribe")
 MANUAL_ONLY_KINDS: tuple[str, ...] = ("parser",)
 
 # Живут по расписанию планировщика, а не по входящим сообщениям
-SCHEDULED_KINDS: tuple[str, ...] = ("poster",)
+SCHEDULED_KINDS: tuple[str, ...] = ("poster", "mailing")
 
 # Складывают находки в collected_items — у них есть кнопка «Результаты»
 COLLECTING_KINDS: tuple[str, ...] = ONE_SHOT_KINDS + ("checks",)
@@ -53,6 +56,7 @@ KIND_LABELS: dict[str, str] = {
     "parser": "парсер аудитории",
     "autosubscribe": "автоподписка",
     "poster": "авто-постинг",
+    "mailing": "рассылка по чатам",
 }
 
 # Ссылки на подарки и чеки, которые ищет «ловец чеков»
@@ -110,6 +114,12 @@ def task_title(rule: Any) -> str:
         return f"{head} {source}" + (f" · за {watched}" if watched else "")
     if kind == "poster":
         return f"Авто-постинг → {target}"
+    if kind == "mailing":
+        extra = len(filters.get("targets") or [])
+        total = extra + (1 if getattr(rule, "target_id", 0) else 0)
+        if total > 1:
+            return f"Рассылка по чатам: {total} чат."
+        return f"Рассылка по чатам → {target}" if target else "Рассылка по чатам"
     return f"{source} → {target}"
 
 
@@ -205,6 +215,149 @@ def _broadcast_targets(rule: RuleSnapshot) -> list[int]:
         if value and value != rule.source_id and value not in seen:
             seen.append(value)
     return seen
+
+
+# ── Рассылка по чатам (kind="mailing"): считалки для планировщика ──
+#
+# Логика вынесена из планировщика отдельными чистыми функциями: их видно в
+# тестах без Telethon, а планировщик остаётся про порядок вызовов.
+
+MAILING_MIN_GAP = 1  # быстрее секунды между чатами Telegram всё равно не даст
+MAILING_MAX_GAP = 7 * 24 * 3600  # неделя: дальше это уже не «пауза», а ошибка ввода
+
+
+def mailing_recipients(rule: RuleSnapshot) -> list[int]:
+    """Получатели рассылки: приёмник правила плюс дополнительные чаты.
+
+    Та же геометрия, что у broadcast: первый чат живёт в ``target_id`` (колонка
+    обязательная), остальные — в ``filters.targets``. Повторы убираем, иначе
+    один чат получил бы сообщение дважды за круг.
+    """
+    return _broadcast_targets(rule)
+
+
+def mailing_gap(config: FilterConfig, *, cycle: bool = False) -> float:
+    """Пауза перед следующей отправкой: базовая плюс случайная добавка.
+
+    ``cycle=True`` — пауза перед новым кругом. Джиттер именно прибавляется
+    (а не разбрасывается вокруг базы): человек задал минимум, и уходить ниже
+    него — прямой путь под ограничения Telegram.
+    """
+    base = int(getattr(config, "cycle_seconds" if cycle else "gap_seconds", 0) or 0)
+    spread = int(getattr(config, "cycle_jitter" if cycle else "gap_jitter", 0) or 0)
+    gap = max(MAILING_MIN_GAP, base) + (random.uniform(0, spread) if spread > 0 else 0.0)
+    return float(min(gap, MAILING_MAX_GAP))
+
+
+def mailing_next_due(planned: float, now: float, gap: float) -> float:
+    """Когда отправлять следующему получателю.
+
+    Отсчёт от планового времени, а не от «сейчас»: иначе задержки RPC копятся и
+    темп уползает. Но и не раньше «сейчас» — после простоя (перезапуск, FloodWait)
+    накопившийся долг не должен вылиться очередью подряд.
+    """
+    return max(planned, now) + gap
+
+
+def mailing_position(done: int, recipients: int) -> tuple[int, int]:
+    """Где остановились: (номер получателя в круге, номер круга).
+
+    Считается от ``forwarded_count``, поэтому рассылка продолжается с того же
+    места после перезапуска процесса, а отдельная таблица прогресса не нужна.
+    """
+    if recipients <= 0:
+        return 0, 0
+    done = max(0, int(done or 0))
+    return done % recipients, done // recipients
+
+
+class MailingMessageGone(RuntimeError):
+    """Сохранённое сообщение ссылается на пост, которого уже нет."""
+
+
+# Сколько «печатать» перед отправкой, когда режим «печатает» включён
+MAILING_TYPING_SECONDS = 2
+
+
+async def load_mailing_library(
+    user_id: int, library_ids: Sequence[int] | None = None
+) -> list[Any]:
+    """Что рассылать: сообщения из библиотеки пользователя.
+
+    Пустой список в настройках означает «все сохранённые» — иначе человеку
+    пришлось бы сначала завести библиотеку, а потом заново править задачу.
+    Пустые записи (ни текста, ни ссылки на пост) отбрасываем: слать нечего.
+    """
+    async with SessionLocal() as session:
+        if library_ids:
+            items = await repo.saved_messages_by_ids(session, user_id, library_ids)
+        else:
+            # Список в кабинете идёт свежими вперёд, а очередь рассылки — в том
+            # порядке, в каком сообщения добавляли: первым уходит первое.
+            items = list(reversed(await repo.list_saved_messages(session, user_id)))
+    return [
+        item
+        for item in items
+        if (getattr(item, "text", "") or "").strip()
+        or (int(getattr(item, "chat_id", 0) or 0) and int(getattr(item, "message_id", 0) or 0))
+    ]
+
+
+def mailing_pick(
+    items: Sequence[Any], step: int, *, random_pick: bool = False
+) -> Any | None:
+    """Какое сообщение уходит следующим: по кругу или наугад."""
+    if not items:
+        return None
+    if random_pick:
+        return random.choice(list(items))
+    return list(items)[max(0, int(step or 0)) % len(items)]
+
+
+async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: int) -> None:
+    """Отправляет одно сохранённое сообщение в один чат.
+
+    Ошибки не перехватываем: паузы, повторы и запись в журнал — дело
+    планировщика (``manager._mailing_tick``), как и у авто-постера.
+    """
+    filters = rule.filters
+
+    # Сообщение-ссылка: перечитываем пост и копируем его целиком, поэтому
+    # медиа и вложенные пересылки доезжают как есть.
+    message: Any = None
+    chat_id = int(getattr(item, "chat_id", 0) or 0)
+    message_id = int(getattr(item, "message_id", 0) or 0)
+    if chat_id and message_id:
+        message = await client.get_messages(chat_id, ids=message_id)
+        if message is None:
+            raise MailingMessageGone(
+                f"сообщение {message_id} из чата {chat_id} не найдено"
+            )
+        text = transform_text(message_text(message), filters)
+    else:
+        text = transform_text(getattr(item, "text", "") or "", filters)
+
+    async def _send() -> None:
+        if message is not None:
+            await send_copy(
+                client, target_id, message, text, link_preview=bool(filters.link_preview)
+            )
+        else:
+            await client.send_message(
+                target_id,
+                text or "",
+                parse_mode=None,
+                link_preview=bool(filters.link_preview),
+            )
+
+    if filters.typing:
+        # «Печатает» видно в чате — так рассылка не выглядит ботом. Пауза
+        # внутри блока: вышли из него — индикатор погас.
+        async with client.action(target_id, "typing"):
+            await asyncio.sleep(MAILING_TYPING_SECONDS)
+            await _send()
+        return
+    await _send()
 
 
 async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:

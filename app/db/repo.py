@@ -15,6 +15,7 @@ from app.db.models import (
     PendingDelivery,
     PendingLogin,
     Rule,
+    SavedMessage,
     Subscription,
     TelegramAccount,
     User,
@@ -391,6 +392,83 @@ async def count_collected_items(session: AsyncSession, rule_id: int) -> int:
         select(func.count())
         .select_from(CollectedItem)
         .where(CollectedItem.rule_id == rule_id)
+    )
+    return int(result.scalar() or 0)
+
+
+# ─────────────────────── Библиотека сохранённых сообщений ─────────────────────
+
+
+async def list_saved_messages(
+    session: AsyncSession, user_id: int, limit: int = 100
+) -> Sequence[SavedMessage]:
+    result = await session.execute(
+        select(SavedMessage)
+        .where(SavedMessage.user_id == user_id)
+        .order_by(SavedMessage.id.desc())
+        .limit(max(1, min(limit, 500)))
+    )
+    return result.scalars().all()
+
+
+async def saved_messages_by_ids(
+    session: AsyncSession, user_id: int, ids: Sequence[int]
+) -> list[SavedMessage]:
+    """Сообщения по списку id — в том порядке, в котором их выбрал человек.
+
+    Порядок задаёт очередь рассылки, поэтому сортировку БД здесь применять
+    нельзя: восстанавливаем её по ``ids``. Чужие и удалённые id молча
+    отбрасываем — задача продолжает работать на том, что осталось.
+    """
+    wanted = [int(value) for value in ids if value]
+    if not wanted:
+        return []
+    result = await session.execute(
+        select(SavedMessage).where(
+            SavedMessage.user_id == user_id, SavedMessage.id.in_(wanted)
+        )
+    )
+    found = {item.id: item for item in result.scalars().all()}
+    return [found[key] for key in wanted if key in found]
+
+
+async def add_saved_message(
+    session: AsyncSession,
+    user_id: int,
+    title: str = "",
+    text: str = "",
+    chat_id: int = 0,
+    message_id: int = 0,
+) -> SavedMessage:
+    item = SavedMessage(
+        user_id=user_id,
+        title=(title or "")[:128],
+        text=text or "",
+        chat_id=int(chat_id or 0),
+        message_id=int(message_id or 0),
+    )
+    session.add(item)
+    await session.flush()
+    return item
+
+
+async def get_saved_message(
+    session: AsyncSession, item_id: int, user_id: int
+) -> SavedMessage | None:
+    item = await session.get(SavedMessage, item_id)
+    if item is None or item.user_id != user_id:
+        return None
+    return item
+
+
+async def delete_saved_message(session: AsyncSession, item: SavedMessage) -> None:
+    await session.delete(item)
+    await session.flush()
+
+
+async def count_saved_messages(session: AsyncSession, user_id: int) -> int:
+    result = await session.execute(
+        select(func.count()).select_from(SavedMessage).where(SavedMessage.user_id == user_id)
     )
     return int(result.scalar() or 0)
 

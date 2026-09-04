@@ -193,6 +193,20 @@ def test_mtproto_ready_rejects_placeholders():
     assert Settings(api_id=1, api_hash="a" * 32).mtproto_ready is True
 
 
+def test_public_api_pair_is_recognized_and_reported(clean_base_dir):
+    """Ключи официального клиента: вход аккаунтов по ним Telegram запрещает."""
+    tdesktop = Settings(api_id=2040, api_hash="b18441a1ff607e10a989891a5462e627")
+    assert tdesktop.api_keys_are_public is True
+    # Шлюз при этом считается рабочим: чтения и пересылка на них живут.
+    assert tdesktop.mtproto_ready is True
+    problems = tdesktop.warnings()
+    assert any("my.telegram.org" in text for text in problems)
+
+    own = Settings(api_id=123456, api_hash="a" * 32)
+    assert own.api_keys_are_public is False
+    assert not any("my.telegram.org" in text for text in own.warnings())
+
+
 def test_mini_app_url_falls_back_to_webhook_url(tmp_path):
     # Папка мини-аппа пустая: метке сборки браться не от чего, адрес чистый.
     # Саму метку проверяет tests/test_webapp_cache.py.

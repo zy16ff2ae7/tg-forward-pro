@@ -210,6 +210,33 @@ class CollectedItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
 
+class SavedMessage(Base):
+    """Сохранённое сообщение из библиотеки: то, что рассылка отправляет в чаты.
+
+    Два вида записи в одной таблице:
+
+    * свой текст — ``text`` заполнен, ``chat_id``/``message_id`` нулевые;
+    * ссылка на готовое сообщение — ``chat_id``/``message_id`` указывают на пост
+      в чате пользователя. Такое сообщение рассылка перечитывает через Telethon
+      и копирует целиком, поэтому медиа и вложенные пересылки сохраняются как
+      есть. Копию медиа у себя не держим — это чужой контент и лишний вес.
+    """
+
+    __tablename__ = "saved_messages"
+    __table_args__ = (Index("ix_saved_messages_user", "user_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # Откуда взять сообщение целиком (0 — сообщение задано текстом)
+    chat_id: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
 class PendingDelivery(Base):
     """Отправка, поставленная в очередь, но ещё не доведённая до конца.
 

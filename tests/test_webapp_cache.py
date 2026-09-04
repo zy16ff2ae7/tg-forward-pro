@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.config import Settings, settings
-from app.webapp_build import add_version, build_stamp, cache_control_for
+from app.webapp_build import add_version, build_stamp, cache_control_for, stale_shell_loader
 
 INDEX_HTML = (
     '<link rel="stylesheet" href="styles.css">'
@@ -119,3 +119,61 @@ def test_mini_app_url_carries_build_stamp(tmp_path: Path):
 def test_mini_app_url_stays_clean_without_webapp_files(tmp_path: Path):
     config = Settings(webhook_url="https://example.com/", webapp_dir=tmp_path / "нет")
     assert config.mini_app_url == "https://example.com/app/"
+
+
+# ──────────────────── спасение старого каркаса из кэша ────────────────────────
+
+
+def test_loader_sends_stale_shell_to_versioned_url():
+    """Скрипт-спасатель уводит на адрес с меткой и сохраняет hash с initData."""
+    code = stale_shell_loader("abc123")
+    assert '"abc123"' in code
+    assert "params.set('v', stamp)" in code
+    # Без hash Telegram не передаст initData и кабинет уйдёт в демо-режим.
+    assert "location.hash" in code
+    # Второй раз по тому же адресу не перезагружаемся — иначе цикл.
+    assert "params.get('v') === stamp" in code
+
+
+def test_loader_is_empty_action_without_stamp():
+    assert "!stamp" in stale_shell_loader("")
+
+
+async def test_bundle_without_version_returns_loader(client):
+    """Старая копия index.html просит `app.js` без метки — ей нельзя новый код."""
+    response = await client.get("/app/app.js")
+    assert response.status == 200
+    assert response.headers["Cache-Control"] == "no-store"
+
+    body = await response.text()
+    assert "location.replace" in body
+    assert build_stamp(settings.webapp_dir) in body
+    # Настоящий бандл в такой ответ попасть не должен.
+    assert "async function boot()" not in body
+
+
+async def test_bundle_with_current_version_is_the_real_file(client):
+    stamp = build_stamp(settings.webapp_dir)
+    response = await client.get(f"/app/app.js?v={stamp}")
+    assert response.status == 200
+    assert "immutable" in response.headers["Cache-Control"]
+
+    body = await response.text()
+    assert "async function boot()" in body
+    assert "location.replace" in body  # сам бандл тоже умеет обновляться
+
+
+async def test_bundle_with_foreign_version_returns_loader(client):
+    """Метка из прошлого выката — тоже старый каркас, его надо перезагрузить."""
+    response = await client.get("/app/app.js?v=устарела")
+    assert response.status == 200
+    body = await response.text()
+    assert "async function boot()" not in body
+    assert build_stamp(settings.webapp_dir) in body
+
+
+async def test_health_reports_build_stamp(client):
+    """По этой метке кабинет понимает, что открыт по старому адресу."""
+    response = await client.get("/api/health")
+    assert response.status == 200
+    assert (await response.json())["build"] == build_stamp(settings.webapp_dir)

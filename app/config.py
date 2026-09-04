@@ -18,6 +18,19 @@ LOG_LEVELS = ("TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 # Контуры оплаты, см. Settings.pay_mode
 PAY_MODES = ("external", "stars", "inline")
 
+# Пары api_id:api_hash из открытого кода официальных клиентов. Они кочуют по
+# статьям и готовым скриптам, поэтому Telegram считает их опубликованными и
+# запрещает по ним вход аккаунтов (см. Settings.api_keys_are_public).
+PUBLIC_API_PAIRS = frozenset(
+    {
+        "2040:b18441a1ff607e10a989891a5462e627",  # Telegram Desktop
+        "6:eb06d4abfb49dc3eeb1aeb98ae0f581e",  # Telegram Desktop, старая
+        "17349:344583e45741c457fe1862106095a5eb",  # Telegram Android
+        "21724:3e0cb5efcd52300aec5994fdfc5b6fa8",  # Telegram Android, вторая
+        "4:014b35b6184100b085b0d0572f9b5103",  # Telegram iOS
+    }
+)
+
 # .env подхватываем, если он есть (на VDS его создаёт deploy-скрипт)
 load_dotenv(BASE_DIR / ".env")
 
@@ -187,6 +200,19 @@ class Settings:
         return True
 
     @property
+    def api_keys_are_public(self) -> bool:
+        """Ключи MTProto взяты из официального клиента, а не получены на себя.
+
+        Такие пары гуляют по инструкциям и коду, и Telegram помечает их как
+        опубликованные: чтения работают, но на запрос кода для входа приходит
+        ``ApiIdPublishedFloodError``. Снаружи это выглядит как «не могу
+        подключить аккаунт», поэтому про это лучше сказать при старте, а не
+        когда человек уже вводит номер.
+        """
+        pair = f"{self.api_id}:{(self.api_hash or '').strip().lower()}"
+        return pair in PUBLIC_API_PAIRS
+
+    @property
     def public_login_enabled(self) -> bool:
         """Можно ли пользователям подключать аккаунты по телефону прямо сейчас."""
         return self.mtproto_ready
@@ -346,6 +372,12 @@ class Settings:
         if not self.mtproto_ready:
             problems.append(
                 "API_ID/API_HASH не заданы — вход аккаунтов по номеру и пересылка отключены"
+            )
+        elif self.api_keys_are_public:
+            problems.append(
+                "API_ID/API_HASH — публичная пара официального клиента. Telegram "
+                "отвечает на вход по ней ApiIdPublishedFloodError: подключить "
+                "аккаунт по номеру не получится. Свои ключи: my.telegram.org/apps"
             )
         if not self.admin_ids:
             problems.append("ADMIN_IDS пуст — админ-команды недоступны")

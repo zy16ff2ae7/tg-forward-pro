@@ -163,7 +163,7 @@ def create_app(sess: Session) -> tuple[str, str]:
     data = {
         "app_title": ask("Название (например: TG Forward): ") or "TG Forward",
         "app_shortname": ask("Короткое имя латиницей (например: tgforward): ") or "tgforward",
-        "app_url": ask("URL (например: https://t.me/papa_is_working_for_you_bot): ") or "",
+        "app_url": ask("URL (например: https://t.me/papina_do4a_bot): ") or "",
         "app_platform": ask(
             "Платформа (desktop / android / ios / web / other) [desktop]: "
         )

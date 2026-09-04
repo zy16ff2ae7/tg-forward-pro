@@ -1,4 +1,4 @@
-/* Кабинет автопересылки — мини-апп Telegram.
+/* ДОЧА — кабинет автоматизаций Telegram.
    Общается с /api/* и передаёт initData в заголовке X-Telegram-Init-Data. */
 
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
@@ -19,6 +19,10 @@ const state = {
   login: { stage: 'phone', phone: '', attemptsLeft: null },
   commands: [],
   commandGroups: [],   // порядок и подписи блоков каталога (из /api/commands)
+  commandGroup: null,  // выбранный чипс-фильтр каталога (null — все команды)
+  promptHits: [],      // что нашёл умный поиск на «Главной»
+  tab: 'home',
+  build: '',           // метка сборки — показываем в «Ещё», чтобы видеть, что открыто
   tasks: [],
   // Все задачи пользователя, разложенные по статусу — нужны для агрегации
   // бейджей команд: видим «N на паузе» даже когда пользователь смотрит
@@ -70,6 +74,11 @@ const FIELD_SPEC = {
   interval: { label: 'Интервал (мин)', control: 'number', placeholder: '2', note: 'минимум 1 минута' },
   start: { label: 'Начало (ЧЧ:ММ)', placeholder: '00:00' },
   end: { label: 'Конец (ЧЧ:ММ)', placeholder: '23:59' },
+  gap: { label: 'Пауза между чатами (сек)', control: 'number', placeholder: '5', note: 'быстрее секунды Telegram всё равно не даст' },
+  cycle: { label: 'Пауза перед новым кругом (сек)', control: 'number', placeholder: '10' },
+  repeats: { label: 'Сколько кругов', control: 'number', placeholder: '1', note: '0 — крутить без конца' },
+  typing: { label: 'Показывать «печатает» перед отправкой', control: 'check' },
+  random_pick: { label: 'Брать сообщение наугад, а не по очереди', control: 'check' },
 };
 
 /* Заголовок шторки результатов для каждого типа задачи. */
@@ -81,6 +90,73 @@ const RESULTS_TITLES = {
 
 const CHAT_TAGS = ['реклама', 'вопросы', 'продажа', 'работа', 'объявления'];
 
+/* Цвет иконки по типу задачи: список команд читается как набор инструментов,
+   а не как одна простыня. Классы описаны в styles.css (.ico--*). */
+const KIND_ICO = {
+  forward: 'ico--pink',
+  broadcast: 'ico--blue',
+  poster: 'ico--cyan',
+  mailing: 'ico--teal',
+  parser: 'ico--violet',
+  autosubscribe: 'ico--teal',
+  checks: 'ico--amber',
+  dialogs: 'ico--blue',
+  baiting: 'ico--violet',
+  mute: 'ico--pink',
+};
+
+const icoClass = (kind) => KIND_ICO[kind] || 'ico--pink';
+
+/* Эмодзи по типу задачи — тем же набором, что и в каталоге команд. Держим
+   отдельным словарём, а не берём из /api/commands: карточки задач рисуются
+   раньше, чем каталог успевает приехать. */
+const KIND_EMOJI = {
+  forward: '🔁',
+  broadcast: '📣',
+  poster: '📤',
+  mailing: '📨',
+  parser: '🕵️',
+  autosubscribe: '🤝',
+  checks: '🧾',
+  dialogs: '💬',
+  baiting: '🎣',
+  mute: '🔇',
+};
+
+const kindEmoji = (kind) => KIND_EMOJI[kind] || '⚙️';
+
+/* Плитки «быстрый старт» на Главной: восемь слотов, последний — весь каталог.
+   Подписи короткие: на 390 px в четыре столбца длинное название не влезает. */
+const TILES = [
+  { id: 'copy_channel', name: 'Пересылка' },
+  { id: 'broadcast', name: 'Рассылка' },
+  { id: 'poster', name: 'Постинг' },
+  { id: 'parser', name: 'Парсер' },
+  { id: 'autosubscribe', name: 'Подписка' },
+  { id: 'checks', name: 'Чеки' },
+  { id: 'dialogs', name: 'Диалоги' },
+  { id: null, name: 'Все', emoji: '☰', ico: 'ico--violet', tab: 'commands' },
+];
+
+/* Умный поиск по командам работает локально: фраза → слова → команды.
+   Никакого внешнего AI и ключей — значит, ничего не стоит и не отваливается.
+   Ключевые слова подобраны под то, как о задачах говорят вслух. */
+const SMART_WORDS = {
+  copy_channel: ['перес', 'копир', 'дубл', 'зеркал', 'репост', 'канал в канал'],
+  broadcast: ['рассыл', 'разосл', 'спам', 'всем', 'в чаты', 'массов', 'реклам'],
+  poster: ['пост', 'публик', 'по расписан', 'кажд', 'таймер', 'автопост', 'интервал'],
+  mailing: ['рассыл', 'разосл', 'по чатам', 'отправ', 'прогрев', 'всем'],
+  parser: ['парс', 'собра', 'участник', 'аудитор', 'база', 'юзер', 'подписчик'],
+  autosubscribe: ['подпис', 'вступ', 'войти', 'инвайт', 'присоедин'],
+  checks: ['чек', 'подар', 'gift', 'ловец', 'халяв', 'промо'],
+  dialogs: ['личк', 'диалог', 'входящ', 'сообщен мне', 'уведомл', 'дм'],
+  baiting: ['байт', 'реакц', 'эмодзи', 'лайк'],
+  mute: ['мут', 'удал', 'модер', 'бан', 'молч'],
+};
+
+/* Что показать, когда человек просто открыл поле и ничего не набрал. */
+const SMART_FALLBACK = ['copy_channel', 'broadcast', 'poster'];
+
 const SETTINGS = [
   { emoji: '👥', title: 'Рефералы', desc: 'Ссылка, зеркала и выплаты', start: 'referrals' },
   { emoji: '💬', title: 'Сообщения', desc: 'Сохранённые тексты, медиа и репосты', start: 'messages' },
@@ -88,6 +164,14 @@ const SETTINGS = [
   { emoji: '🌐', title: 'Язык', desc: 'Русский', start: 'language' },
   { emoji: '📖', title: 'Гайды', desc: 'Инструкции по основным сценариям', start: 'guides' },
   { emoji: '🛟', title: 'Ресурсы', desc: 'Чат, канал и поддержка', start: 'resources' },
+];
+
+/* Экран «Ещё»: то, что убрали из навигации ради короны в центре. Разделы
+   кабинета открываются здесь же (data-tab), остальное — в боте (SETTINGS). */
+const MORE_ITEMS = [
+  { emoji: '👤', title: 'Аккаунты и подписка', desc: 'Номера, копилка дней, оплата', tab: 'accounts' },
+  { emoji: '💬', title: 'Чаты', desc: 'Выбрать чаты и запустить задачу по ним', tab: 'chats' },
+  { emoji: '📦', title: 'Архив задач', desc: 'Завершённые и остановленные', tab: 'tasks', status: 'done' },
 ];
 
 /* ───────────────────────────── Утилиты ───────────────────────────────── */
@@ -118,18 +202,22 @@ const DEMO_STATE = {
     { id: 1, title: 'Новости театра → Мой канал', kind: 'forward', kind_label: 'пересылка',
       source: 'Новости театра', target: 'Мой канал', archived: false, oneshot: false,
       enabled: true, mode: 'copy', delay: 60, forwarded: 842, account_id: 1,
+      progress: { done: 842, total: null },
       created_at: '2026-08-12T10:20:00' },
     { id: 2, title: 'Афиша → Зеркало афиши', kind: 'forward', kind_label: 'пересылка',
       source: 'Афиша', target: 'Зеркало афиши', archived: false, oneshot: false,
       enabled: true, mode: 'forward', delay: 0, forwarded: 317, account_id: 1,
+      progress: { done: 317, total: null },
       created_at: '2026-08-18T09:05:00' },
     { id: 3, title: 'Подборки → Черновики', kind: 'forward', kind_label: 'пересылка',
       source: 'Подборки', target: 'Черновики', archived: false, oneshot: false,
       enabled: false, mode: 'copy', delay: 300, forwarded: 125, account_id: 1,
+      progress: { done: 125, total: null },
       created_at: '2026-08-21T18:40:00' },
     { id: 4, title: 'Парсер аудитории: Конкуренты', kind: 'parser', kind_label: 'парсер аудитории',
       source: 'Конкуренты', target: 'Конкуренты', archived: true, oneshot: true,
       enabled: false, mode: 'copy', delay: 0, forwarded: 640, account_id: 1,
+      progress: { done: 640, total: 1000 },
       created_at: '2026-08-25T11:00:00' },
   ],
   nextId: 5,
@@ -148,10 +236,10 @@ const DEMO_COMMANDS = [
   { id: 'copy_channel', group: 'publish', kind: 'forward', emoji: '🔁', title: 'Копирование канала', status: 'ready',
     needs: ['account', 'source', 'target'], optional: ['mode'],
     description: 'Копирует новые публикации между каналами с заменами текста.' },
-  { id: 'broadcast', group: 'publish', kind: 'broadcast', emoji: '📣', title: 'Рассылка по чатам', status: 'ready',
+  { id: 'broadcast', group: 'publish', kind: 'broadcast', emoji: '📣', title: 'Пересылка в несколько чатов', status: 'ready',
     needs: ['account', 'source', 'target', 'targets'], optional: [],
     description: 'Одно сообщение из источника — в несколько чатов сразу.',
-    hint: 'Выберите чаты во вкладке «Чаты» и нажмите «📣 Рассылка» — они станут получателями. Источник: сообщение из него уйдёт во все выбранные чаты.' },
+    hint: 'Выберите чаты во вкладке «Чаты» и нажмите «📣 Пост в чаты» — они станут получателями. Источник: сообщение из него уйдёт во все выбранные чаты.' },
   { id: 'parser', group: 'audience', kind: 'parser', emoji: '🕵️', title: 'Парсер аудитории', status: 'ready',
     needs: ['account', 'source'], optional: ['limit'],
     description: 'Собирает участников чужого чата в список по вашей команде.',
@@ -177,6 +265,10 @@ const DEMO_COMMANDS = [
     needs: ['account', 'target', 'message'], optional: ['interval', 'start', 'end'],
     description: 'Шлёт ваше сообщение в чат каждые N минут в заданном окне времени.',
     hint: 'Чат — куда постить. Сообщений может быть несколько (каждое с новой строки) — уходят по очереди. Интервал в минутах, окно — ЧЧ:ММ.' },
+  { id: 'mailing', group: 'publish', kind: 'mailing', emoji: '📨', title: 'Рассылка по чатам', status: 'ready',
+    needs: ['account', 'targets', 'message'], optional: ['gap', 'cycle', 'repeats', 'typing', 'random_pick'],
+    description: 'Шлёт ваши сообщения по списку чатов: по одному в круг, с паузой между чатами.',
+    hint: 'Получатели — через запятую или выбранные чаты во вкладке «Чаты». Сообщения (каждое с новой строки) уходят по очереди: первое — всем, затем второе. Пауза между чатами в секундах, «повторов 0» — крутить бесконечно.' },
 ];
 
 const DEMO_FEATURES = { account_login_enabled: true, account_login_status: 'ready' };
@@ -220,7 +312,7 @@ const DEMO_ACCOUNTS = [{
 const DEMO_LOGIN = { pending: null, nextId: 2 };
 const DEMO_MAX_ATTEMPTS = 5;
 const DEMO_CODE = '11111';
-const DEMO_PASSWORD = 'papa';
+const DEMO_PASSWORD = 'doca';
 
 /* Отказ в демо выглядит как отказ сервера: тот же status, тот же текст.
    Так шторка входа проверяется целиком, включая «осталось попыток». */
@@ -250,7 +342,7 @@ function demoAccounts() {
         attempts_left: Math.max(DEMO_MAX_ATTEMPTS - pending.attempts, 0),
       }
       : { exists: false, phone: null, stage: null, step: null, attempts_left: null },
-    bot_url: 'https://t.me/papa_is_working_for_you_bot',
+    bot_url: 'https://t.me/papina_do4a_bot',
     features: DEMO_FEATURES,
   };
 }
@@ -302,6 +394,10 @@ function demoTaskTitle(body, command) {
     if (command.kind === 'checks') return `Ловец чеков: ${body.source} → ${body.target}`;
     if (command.kind === 'poster') {
       return `Авто-постинг → ${body.target || ''}`;
+    }
+    if (command.kind === 'mailing') {
+      const count = splitList(body.targets).length || 1;
+      return `Рассылка по чатам: ${count} чат.`;
     }
     if (command.kind === 'broadcast') {
       return `Рассылка: ${body.source} → ${[body.target, ...(body.targets || [])].join(', ')}`;
@@ -433,6 +529,7 @@ function demoApi(path, options = {}) {
       mode: kind === 'forward' ? (body.mode || 'copy') : 'copy',
       delay: 0,
       forwarded: 0,
+      progress: { done: 0, total: kind === 'parser' ? (Number(body.limit) || 200) : null },
       account_id: Number(body.account_id) || 1,
       created_at: new Date().toISOString(),
     };
@@ -530,10 +627,10 @@ function openBot(startParam) {
 
 /* ─────────────────────────────── Тема ────────────────────────────────── */
 
-/* Кабинет живёт в собственной арт-деко палитре (см. :root в styles.css), а не в
+/* Кабинет живёт в собственной неоновой палитре (см. :root в styles.css), а не в
    цветах темы Telegram: иначе оформление разъезжалось бы у каждого пользователя.
    Telegram-овские theme_params намеренно НЕ перекрывают брендовые переменные. */
-const BRAND_BG = '#04120D';
+const BRAND_BG = '#0A0510';
 
 function applyTheme() {
   if (!tg) return;
@@ -544,24 +641,40 @@ function applyTheme() {
 
 /* ────────────────────────────── Навигация ────────────────────────────── */
 
+const TABS = ['home', 'commands', 'tasks', 'chats', 'accounts', 'more'];
+
+/* В навигации пять слотов, а экранов шесть: «Чаты» и «Аккаунты» открываются из
+   «Ещё» и из мастера задач. Пока открыт такой экран, подсвечиваем «Ещё» —
+   иначе панель выглядит так, будто мы никуда не переходили. */
+const NAV_FOR_TAB = { chats: 'more', accounts: 'more' };
+
 function switchTab(name) {
-  ['commands', 'tasks', 'chats', 'accounts'].forEach((tab) => {
-    $(`tab-${tab}`).classList.toggle('hidden', tab !== name);
+  const tab = TABS.includes(name) ? name : 'home';
+  state.tab = tab;
+  TABS.forEach((item) => {
+    $(`tab-${item}`).classList.toggle('hidden', item !== tab);
   });
+  const navName = NAV_FOR_TAB[tab] || tab;
   document.querySelectorAll('.nav__item').forEach((item) => {
-    item.classList.toggle('is-active', item.dataset.tab === name);
+    const active = item.dataset.tab === navName;
+    item.classList.toggle('is-active', active);
+    if (active) item.setAttribute('aria-current', 'page');
+    else item.removeAttribute('aria-current');
   });
   // FAB живёт вне .tab (см. комментарий в index.html), поэтому скрываем
   // его явно — иначе он «прилипнет» поверх любой вкладки.
   const fab = $('addTaskBtn');
-  const onTasks = name === 'tasks';
+  const onTasks = tab === 'tasks';
   fab.classList.toggle('hidden', !onTasks);
   fab.setAttribute('aria-hidden', onTasks ? 'false' : 'true');
   updateChatBar();
   syncFloatingPad();
-  if (name === 'tasks') loadTasks();
-  if (name === 'chats') loadChats();
-  if (name === 'accounts') loadAccounts();
+  if (tab === 'home') renderHome();
+  if (tab === 'tasks') loadTasks();
+  if (tab === 'chats') loadChats();
+  if (tab === 'accounts') loadAccounts();
+  // Прокрутка у документа общая: без сброса новый экран открывается с середины.
+  window.scrollTo({ top: 0, behavior: 'auto' });
 }
 
 /* У нижнего запаса один хозяин: на задачах — FAB, на чатах — панель выбора.
@@ -589,11 +702,189 @@ function renderHeader() {
   state.features = me.features || state.features;
   if (!state.features.account_login_enabled) {
     $('headerSub').textContent = 'кабинет готов · вход аккаунтов на настройке';
+    setHeroStatus('вход аккаунтов на настройке');
     return;
   }
-  $('headerSub').textContent = me.subscription.active
-    ? `подписка: ${me.subscription.days_left} дн.`
+  const sub = me.subscription || {};
+  $('headerSub').textContent = sub.active
+    ? `подписка: ${sub.days_left} дн.`
     : 'подписка не активна';
+  setHeroStatus(sub.active ? `подписка ${sub.days_left} дн.` : 'подписка не активна');
+}
+
+/* Подпись в герой-блоке: то же, что в шапке, но фразой для человека. */
+function setHeroStatus(text) {
+  const node = $('heroStatus');
+  if (node) node.textContent = text;
+}
+
+/* ─────────────────────────────── Главная ─────────────────────────────── */
+
+/* Плитки быстрого старта. Команду берём из каталога — если сервер её не отдал
+   (выключена флагом), плитку не рисуем вовсе, чтобы не вести в тупик. */
+function renderTiles() {
+  const holder = $('homeTiles');
+  if (!holder) return;
+  const items = TILES.map((tile) => {
+    if (tile.tab) return tile;
+    const command = state.commands.find((item) => item.id === tile.id);
+    if (!command) return null;
+    return { ...tile, emoji: command.emoji, ico: icoClass(command.kind), title: command.title };
+  }).filter(Boolean);
+
+  holder.innerHTML = items
+    .map(
+      (tile) => `
+      <button class="tile" ${tile.tab ? `data-goto="${tile.tab}"` : `data-command="${tile.id}"`}
+              title="${esc(tile.title || tile.name)}">
+        <span class="tile__ico ${tile.ico}" aria-hidden="true">${tile.emoji}</span>
+        <span class="tile__name">${esc(tile.name)}</span>
+      </button>`
+    )
+    .join('');
+}
+
+/* Главная показывает три задачи, которые реально идут прямо сейчас: остальное
+   живёт на своей вкладке. Пусто — значит пусто, выдуманных карточек нет. */
+function renderHomeTasks() {
+  const holder = $('homeTasks');
+  if (!holder) return;
+  const active = (state.tasksByStatus.active || []).slice(0, 3);
+  if (!active.length) {
+    const paused = (state.tasksByStatus.paused || []).length;
+    holder.innerHTML = emptyHtml(
+      '🌙',
+      'Пока ничего не работает',
+      paused
+        ? `${paused} задач(и) на паузе — снимите с паузы или создайте новую.`
+        : 'Нажмите корону внизу или «создать задачу» — соберём первую вместе.'
+    );
+    return;
+  }
+  holder.innerHTML = active.map((task) => taskCardHtml(task, { compact: true })).join('');
+}
+
+function renderHome() {
+  renderTiles();
+  renderHomeTasks();
+}
+
+/* ────────────────── Умный поиск по командам (локальный) ───────────────── */
+
+/* Считаем совпадения фразы с ключевыми словами команд и с их названиями.
+   Никакого внешнего AI: разбор строчный, работает офлайн и мгновенно. */
+function smartMatch(query) {
+  const text = String(query || '').toLowerCase().trim();
+  if (!text) {
+    return SMART_FALLBACK.map((id) => state.commands.find((item) => item.id === id))
+      .filter(Boolean)
+      .map((command) => ({ command, why: 'чаще всего запускают' }));
+  }
+
+  const words = text.split(/[^a-zа-яё0-9@+]+/i).filter((word) => word.length > 2);
+  const scored = state.commands.map((command) => {
+    const hints = SMART_WORDS[command.id] || [];
+    let score = 0;
+    let why = '';
+    hints.forEach((hint) => {
+      if (text.includes(hint)) {
+        score += 3;
+        // Показывать сам стем («похоже на «собра…»») бессмысленно — человек
+        // видит обрубок слова и не понимает, что произошло.
+        if (!why) why = 'по вашей фразе';
+      }
+    });
+    const title = command.title.toLowerCase();
+    const description = (command.description || '').toLowerCase();
+    words.forEach((word) => {
+      if (title.includes(word)) {
+        score += 2;
+        if (!why) why = 'совпало название';
+      } else if (description.includes(word)) {
+        score += 1;
+        if (!why) why = 'совпало описание';
+      }
+    });
+    return { command, score, why: why || 'по описанию' };
+  });
+
+  const ranked = scored
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+  // Если фраза попала по смыслу (стем-подсказка — это 3 балла), слабые
+  // однословные совпадения только мешают выбрать: «собрать участников чата»
+  // не должно тянуть за собой «Рассылку по чатам» из-за слова «чата».
+  const strong = ranked.filter((item) => item.score >= 3);
+  return (strong.length ? strong : ranked).slice(0, 3);
+}
+
+function renderPromptHits() {
+  const holder = $('promptHits');
+  if (!holder) return;
+  const query = ($('promptInput').value || '').trim();
+  // Пустое поле — молчим: подсказки под пустым вопросом выглядят как мусор.
+  if (!query) {
+    state.promptHits = [];
+    holder.innerHTML = '';
+    return;
+  }
+  state.promptHits = smartMatch(query);
+  if (!state.promptHits.length) {
+    holder.innerHTML = `
+      <button class="prompt-hit" data-goto="commands">
+        <span class="tile__ico ico--violet" aria-hidden="true">🔍</span>
+        <span>
+          <span class="prompt-hit__title">Не подобрала команду</span><br>
+          <span class="prompt-hit__why">Откройте каталог — там все девять</span>
+        </span>
+      </button>`;
+    return;
+  }
+  holder.innerHTML = state.promptHits
+    .map(
+      ({ command, why }) => `
+      <button class="prompt-hit" data-command="${command.id}">
+        <span class="tile__ico ${icoClass(command.kind)}" aria-hidden="true">${command.emoji}</span>
+        <span>
+          <span class="prompt-hit__title">${esc(command.title)}</span><br>
+          <span class="prompt-hit__why">${esc(why)}</span>
+        </span>
+      </button>`
+    )
+    .join('');
+}
+
+/* Enter в поле — сразу открыть лучшую догадку: лишний тап не нужен. */
+function runSmartSearch() {
+  const query = ($('promptInput').value || '').trim();
+  if (!query) {
+    switchTab('commands');
+    return;
+  }
+  const hits = smartMatch(query);
+  if (!hits.length) {
+    $('commandSearch').value = query;
+    switchTab('commands');
+    renderCommands();
+    return;
+  }
+  openCommand(hits[0].command.id);
+}
+
+/* Открыть команду по id: одна дорога для плиток, подсказок и каталога. */
+function openCommand(id) {
+  const command = state.commands.find((item) => item.id === id);
+  if (!command) {
+    toast('Каталог команд ещё не загружен');
+    return;
+  }
+  if (command.status === 'ready') {
+    openTaskSheet(command);
+  } else if (command.status === 'setup_required') {
+    toast('Подключение аккаунтов на настройке. Кабинет работает, команды включатся вместе с ним.');
+  } else {
+    toast(`${command.title} — выключено в настройках сервиса`);
+  }
 }
 
 /* ─────────────────────────────── Команды ─────────────────────────────── */
@@ -663,7 +954,7 @@ function commandCardHtml(command) {
   const tag = `card--cmd${clickable ? '' : ' card--cmd--locked'}`;
   return `
     <button class="${tag}" data-command="${command.id}">
-      <div class="card__emoji" aria-hidden="true">${command.emoji}</div>
+      <div class="cmd__ico ${icoClass(command.kind)}" aria-hidden="true">${command.emoji}</div>
       <div class="cmd__main">
         <div class="cmd__title">${esc(command.title)}</div>
         <div class="cmd__desc">${esc(command.description)}</div>
@@ -677,32 +968,68 @@ function commandCardHtml(command) {
     </button>`;
 }
 
+/* Чипсы каталога: «все» + блоки, которые прислал сервер. Счётчик в чипсе
+   считается по тем же данным, что и список, — расходиться им негде. */
+function renderCommandTags() {
+  const holder = $('commandTags');
+  if (!holder) return;
+  const groups = state.commandGroups;
+  if (!groups.length) {
+    holder.innerHTML = '';
+    return;
+  }
+  const chip = (id, title, count) => `
+    <button class="chip${state.commandGroup === id ? ' is-active' : ''}"
+            data-group="${id || ''}" role="tab"
+            aria-selected="${state.commandGroup === id ? 'true' : 'false'}">
+      ${esc(title)} <b>${count}</b>
+    </button>`;
+  holder.innerHTML =
+    chip(null, 'все', state.commands.length) +
+    groups
+      .map((group) =>
+        chip(group.id, group.title, state.commands.filter((item) => item.group === group.id).length)
+      )
+      .join('');
+}
+
 function renderCommands() {
   const query = ($('commandSearch').value || '').toLowerCase();
   const list = state.commands.filter(
     (command) =>
-      !query ||
-      command.title.toLowerCase().includes(query) ||
-      command.description.toLowerCase().includes(query)
+      (!state.commandGroup || command.group === state.commandGroup) &&
+      (!query ||
+        command.title.toLowerCase().includes(query) ||
+        command.description.toLowerCase().includes(query))
   );
+  renderCommandTags();
 
   if (!list.length) {
-    $('commandList').innerHTML = emptyHtml('🔍', 'Ничего не найдено', 'Попробуйте другой запрос');
+    $('commandList').innerHTML = emptyHtml(
+      '🔍',
+      'Ничего не найдено',
+      state.commandGroup ? 'Попробуйте другой запрос или снимите фильтр' : 'Попробуйте другой запрос'
+    );
     return;
   }
 
   // Блоки идут в порядке, который задал сервер; пустые (например, всё
   // отфильтровано поиском) не рисуем вовсе — заголовок без карточек не нужен.
-  const groups = state.commandGroups.length
-    ? state.commandGroups
-    : [{ id: null, title: '' }];
-  const known = new Set(groups.map((group) => group.id));
+  // При выбранном чипсе заголовки не нужны: блок ровно один, и он уже подписан.
+  const byGroups = Boolean(state.commandGroups.length) && !state.commandGroup;
+  const groups = byGroups ? state.commandGroups : [{ id: null, title: '' }];
   const blocks = groups.map((group) => ({
     title: group.title,
     items: list.filter((command) => (group.id ? command.group === group.id : true)),
   }));
-  const rest = list.filter((command) => !known.has(command.group));
-  if (state.commandGroups.length && rest.length) blocks.push({ title: 'прочее', items: rest });
+  // Команда с неизвестной группой (сервер завёл новую, кабинет ещё не знает)
+  // не должна пропадать из каталога — собираем такие в «прочее». При активном
+  // чипсе этого блока нет: единственный блок уже содержит все карточки.
+  if (byGroups) {
+    const known = new Set(state.commandGroups.map((group) => group.id));
+    const rest = list.filter((command) => !known.has(command.group));
+    if (rest.length) blocks.push({ title: 'прочее', items: rest });
+  }
 
   $('commandList').innerHTML = blocks
     .filter((block) => block.items.length)
@@ -733,10 +1060,29 @@ async function loadTasks(targetStatus) {
       endLoad(holder);
       renderTasks(state.tasksByStatus[status]);
     }
+    // «Главная» показывает активные задачи — обновляем её вместе со списком.
+    if (status === 'active') renderHomeTasks();
     renderCommands();
   } catch (error) {
     if (status === state.taskStatus) failLoad(holder, error, 'loadTasks');
   }
+}
+
+/* Переключение сегмента «Активные / На паузе / Завершённые». Отдельной
+   функцией, потому что дорога сюда не одна: сам сегмент, «Архив задач» из
+   «Ещё» и обновление после действий над задачей. */
+function setTaskStatus(status) {
+  state.taskStatus = status;
+  document.querySelectorAll('#taskStatus .seg').forEach((seg) => {
+    const active = seg.dataset.status === status;
+    seg.classList.toggle('is-active', active);
+    seg.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  // Если данные для этого статуса уже подгружены (агрегатор на boot),
+  // показываем их без сети; иначе подгружаем.
+  const cached = state.tasksByStatus[status];
+  if (cached && cached.length) renderTasks(cached);
+  else loadTasks();
 }
 
 function aggregateTaskCounts() {
@@ -753,8 +1099,142 @@ function aggregateTaskCounts() {
   state.taskCounts = counts;
 }
 
+/* Метка состояния задачи. «Нет связи» важнее «работает»: включённая задача при
+   отключённом аккаунте не делает ничего, и об этом надо сказать прямо.
+   Сравнение строгое (=== false): в демо-данных поля просто нет. */
+function taskBadge(task) {
+  if (task.archived) return { kind: 'done', label: 'завершена' };
+  if (!task.enabled) return { kind: 'paused', label: 'пауза' };
+  if (task.account_online === false) return { kind: 'error', label: 'нет связи' };
+  if (task.oneshot) return { kind: 'plan', label: 'по кнопке' };
+  return { kind: 'live', label: 'работает' };
+}
+
+/* Строка под названием: что это за задача и как настроена. */
+function taskMetaLines(task) {
+  const kind = task.kind || 'forward';
+  const isForward = kind === 'forward';
+  const lines = [task.kind_label || (isForward ? 'пересылка' : kind)];
+  if (isForward) lines.push(task.mode === 'copy' ? 'копия без метки' : 'обычный форвард');
+  if (kind === 'poster') {
+    // Авто-постер: показываем расписание вместо «задержки в секундах».
+    lines.push(`каждые ${task.interval_min || 1} мин`);
+    if (task.window_start && task.window_end) {
+      lines.push(`окно ${task.window_start}–${task.window_end}`);
+    }
+    if (task.messages_count) lines.push(`${task.messages_count} сообщ.`);
+  } else if (kind === 'mailing') {
+    // Рассылка: её расписание — это паузы и число кругов, а не «задержка».
+    const info = task.mailing || {};
+    if (info.recipients) lines.push(`${info.recipients} чат.`);
+    lines.push(`пауза ${info.gap_seconds || 5} сек`);
+    if (info.messages_count) lines.push(`${info.messages_count} сообщ.`);
+    lines.push(info.repeats ? `${info.repeats} круг(ов)` : 'круги без конца');
+  } else if (task.oneshot) {
+    lines.push('запуск по кнопке');
+  } else {
+    lines.push(`задержка ${task.delay} сек`);
+  }
+  if (kind === 'broadcast' && task.targets_count) lines.push(`${task.targets_count} получат.`);
+  return lines;
+}
+
+/* Полоса прогресса. Долю рисуем только там, где сервер знает «сколько всего»
+   (парсер — из лимита, автоподписка — из списка ссылок). У постоянных задач
+   конца нет, и вместо выдуманной доли идёт бегунок: честнее пустой шкалы. */
+function taskProgressHtml(task) {
+  const progress = task.progress || {};
+  const done = Number(progress.done || 0);
+  const total = Number(progress.total || 0);
+  if (!total) {
+    return `
+      <div class="task__progress task__progress--endless"><span></span></div>
+      <div class="task__nums"><b>${done}</b><i>обработано</i></div>`;
+  }
+  const pct = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+  return `
+    <div class="task__progress"><span style="width:${pct}%"></span></div>
+    <div class="task__nums">
+      <b>${done}</b><i>из ${total}</i><span class="task__pct">${pct}%</span>
+    </div>`;
+}
+
+/* Главная кнопка карточки: «Пауза» для постоянных задач и «Запустить» для
+   разовых. Вынесена отдельно, потому что нужна и полной карточке, и краткой
+   на «Главной» — двух разных реализаций тут быть не должно. */
+function taskPauseButton(task) {
+  if (task.oneshot) {
+    return `<button class="btn" data-action="run" data-id="${task.id}">▶️ Запустить</button>`;
+  }
+  return (
+    `<button class="btn" data-action="toggle" data-id="${task.id}">` +
+    (task.enabled ? '⏸ Пауза' : '▶️ Запустить') +
+    '</button>'
+  );
+}
+
+/* Кнопки карточки. Один и тот же набор работает и на «Задачах», и на
+   «Главной»: слушатель делегирован на оба списка (см. bindEvents). */
+function taskActionsHtml(task) {
+  const kind = task.kind || 'forward';
+  const acts = [];
+  if (task.archived) {
+    acts.push(`<button class="btn" data-action="unarchive" data-id="${task.id}">↩︎ Из архива</button>`);
+  } else {
+    acts.push(taskPauseButton(task));
+    if (kind === 'forward') {
+      acts.push(`<button class="btn" data-action="mode" data-id="${task.id}">🔁 Режим</button>`);
+    }
+    if (RESULTS_TITLES[kind] || task.oneshot) {
+      acts.push(`<button class="btn" data-action="results" data-id="${task.id}">📄 Результаты</button>`);
+    }
+    acts.push(`<button class="btn" data-action="archive" data-id="${task.id}">📦 Архив</button>`);
+  }
+  // Корзина стоит отдельным столбцом, а не в общем ряду: иначе при переносе
+  // она уезжала на пустую строку одна, и карточка выглядела оборванной.
+  return `
+    <div class="task__actions">
+      <div class="task__acts">${acts.join('')}</div>
+      <button class="btn btn--danger" data-action="delete" data-id="${task.id}">🗑</button>
+    </div>`;
+}
+
+function taskCardHtml(task, options) {
+  const kind = task.kind || 'forward';
+  const badge = taskBadge(task);
+  // На «Главной» карточка — только сводка: полный набор кнопок живёт на вкладке
+  // «Задачи», иначе главный экран превращается в её копию. Пауза остаётся —
+  // это то действие, которое нужно срочно и на бегу.
+  const compact = Boolean(options && options.compact);
+  const actions = compact
+    ? `<div class="task__actions">
+         <div class="task__acts">${taskPauseButton(task)}</div>
+         <button class="btn" data-goto="tasks" type="button">открыть</button>
+       </div>`
+    : taskActionsHtml(task);
+  return `
+    <div class="task${task.archived ? ' task--archived' : ''}">
+      <div class="task__top">
+        <span class="task__ico ${icoClass(kind)}" aria-hidden="true">${task.emoji || kindEmoji(kind)}</span>
+        <div class="task__head">
+          <div class="task__title">${esc(task.title)}</div>
+          <div class="task__meta">${esc(taskMetaLines(task).join(' · '))}</div>
+        </div>
+        <span class="badge badge--${badge.kind}">${badge.label}</span>
+      </div>
+      ${taskProgressHtml(task)}
+      ${actions}
+    </div>`;
+}
+
 function renderTasks(tasks) {
   const holder = $('taskList');
+  // Подпись экрана честно считает по всем трём спискам, а не по видимому.
+  const counts = state.tasksByStatus;
+  $('taskSummary').textContent =
+    `${(counts.active || []).length} работают · ${(counts.paused || []).length} на паузе · ` +
+    `${(counts.done || []).length} в архиве`;
+
   // tasksByStatus[active] может быть пустым просто потому, что у пользователя
   // нет активных рассылок. Скелетон в этом случае не нужен — покажем сразу
   // дружелюбное пустое состояние.
@@ -768,66 +1248,7 @@ function renderTasks(tasks) {
     return;
   }
 
-  holder.innerHTML = tasks
-    .map((task) => {
-      const kind = task.kind || 'forward';
-      const isForward = kind === 'forward';
-      const lines = [task.kind_label || (isForward ? 'пересылка' : kind)];
-      if (isForward) lines.push(task.mode === 'copy' ? 'копия без метки' : 'обычный форвард');
-      if (kind === 'poster') {
-        // Авто-постер: показываем расписание вместо «задержки в секундах».
-        lines.push(`каждые ${task.interval_min || 1} мин`);
-        if (task.window_start && task.window_end) {
-          lines.push(`окно ${task.window_start}–${task.window_end}`);
-        }
-        if (task.messages_count) lines.push(`${task.messages_count} сообщ.`);
-      } else if (task.oneshot) {
-        lines.push('запуск по кнопке');
-      } else {
-        lines.push(`задержка ${task.delay} сек`);
-      }
-      lines.push(`переслано ${task.forwarded}`);
-
-      const actions = [];
-      if (task.archived) {
-        actions.push('<button class="btn" data-action="unarchive" data-id="' + task.id + '">↩︎ Из архива</button>');
-      } else {
-        if (task.oneshot) {
-          actions.push('<button class="btn" data-action="run" data-id="' + task.id + '">▶️ Запустить</button>');
-        } else {
-          actions.push(
-            '<button class="btn" data-action="toggle" data-id="' + task.id + '">' +
-              (task.enabled ? '⏸ Пауза' : '▶️ Запустить') +
-              '</button>'
-          );
-        }
-        if (isForward) {
-          actions.push('<button class="btn" data-action="mode" data-id="' + task.id + '">🔁 Режим</button>');
-        }
-        if (RESULTS_TITLES[kind] || task.oneshot) {
-          actions.push('<button class="btn" data-action="results" data-id="' + task.id + '">📄 Результаты</button>');
-        }
-        actions.push('<button class="btn" data-action="archive" data-id="' + task.id + '">📦 Архив</button>');
-      }
-      // Корзина стоит отдельным столбцом, а не в общем ряду: иначе при переносе
-      // она уезжала на пустую строку одна, и карточка выглядела оборванной.
-      const del =
-        '<button class="btn btn--danger" data-action="delete" data-id="' + task.id + '">🗑</button>';
-
-      return `
-      <div class="task${task.archived ? ' task--archived' : ''}">
-        <div class="task__top">
-          <span class="task__dot ${task.enabled && !task.archived ? '' : 'task__dot--off'}"></span>
-          <div class="task__title">${esc(task.title)}</div>
-        </div>
-        <div class="task__meta">${lines.join(' · ')}</div>
-        <div class="task__actions">
-          <div class="task__acts">${actions.join('')}</div>
-          ${del}
-        </div>
-      </div>`;
-    })
-    .join('');
+  holder.innerHTML = tasks.map(taskCardHtml).join('');
 }
 
 const ACTION_MESSAGES = {
@@ -851,10 +1272,13 @@ async function refreshAllTaskLists() {
   if (state.taskStatus !== visible) {
     state.taskStatus = visible;
     document.querySelectorAll('#taskStatus .seg').forEach((seg) => {
-      seg.classList.toggle('is-active', seg.dataset.status === visible);
+      const active = seg.dataset.status === visible;
+      seg.classList.toggle('is-active', active);
+      seg.setAttribute('aria-selected', active ? 'true' : 'false');
     });
   }
   renderTasks(state.tasksByStatus[visible]);
+  renderHomeTasks();
   renderCommands();
 }
 
@@ -936,8 +1360,6 @@ async function openResults(id) {
 
 /* ───────────────────────────────── Чаты ──────────────────────────────── */
 
-/* ───────────────────────────────── Чаты ──────────────────────────────── */
-
 /* Как передать выбранный чат в форму задачи: приоритет у @username (его
    сервер резолвит надёжно по manager.resolve_chat). Если username нет —
    подставляем «id» числом: бэк понимает любой из этих форматов. */
@@ -1008,6 +1430,15 @@ function updateChatBar() {
   syncFloatingPad();
 }
 
+/* Тип чата словами, а не только картинкой: «канал» и «группа» ведут себя
+   по-разному (в канал нужно право публиковать, из группы можно собрать людей),
+   и по одному эмодзи это не читается. */
+function chatKind(chat) {
+  if (chat.is_channel) return { emoji: '📢', label: 'канал' };
+  if (chat.is_group) return { emoji: '👥', label: 'группа' };
+  return { emoji: '💬', label: 'диалог' };
+}
+
 async function loadChats() {
   const holder = $('chatList');
   const account = state.accounts[0];
@@ -1045,13 +1476,15 @@ async function loadChats() {
     // поэтому id чата не «теряется» после фильтра поиска.
     holder.innerHTML = state.chats.map((chat) => {
       const selected = isChatSelected(chat.id);
+      const kind = chatKind(chat);
       return `
         <button class="chat${selected ? ' is-selected' : ''}" data-chat-id="${chat.id}" type="button">
-          <div class="chat__emoji">${chat.is_channel ? '📢' : chat.is_group ? '👥' : '💬'}</div>
+          <div class="chat__emoji">${kind.emoji}</div>
           <div class="chat__body">
             <div class="chat__title">${esc(chat.title)}</div>
             <div class="chat__sub"><code>${chat.id}</code>${chat.username ? ' · @' + esc(chat.username) : ''}</div>
           </div>
+          <span class="chat__kind">${kind.label}</span>
           <span class="chat__check" aria-hidden="true">${selected ? '✓' : ''}</span>
         </button>`;
     }).join('');
@@ -1086,6 +1519,10 @@ function openTaskForSelection(kind) {
   if (command.kind === 'parser') {
     // Парсер собирает участников ВЫБРАННОГО чата — он и есть источник.
     prefill.source = refs[0];
+  } else if (command.kind === 'mailing') {
+    // У рассылки по чатам поля «приёмник» нет: все выбранные чаты — получатели,
+    // даже если выбран один. Иначе форма открывалась бы пустой.
+    prefill.targets = refs.join(', ');
   } else if (command.kind === 'forward') {
     // Пересылка кладёт выбранный чат в приёмник; источник допишет пользователь.
     prefill.target = refs[0];
@@ -1437,6 +1874,13 @@ function fieldHtml(key) {
       ${spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : ''}
     </label>`;
   }
+  if (spec.control === 'check') {
+    return `<label class="field field--check">
+      <input type="checkbox" id="task_${key}">
+      <span>${spec.label}</span>
+      ${spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : ''}
+    </label>`;
+  }
   const type = spec.control === 'number' ? 'number' : 'text';
   return `<label class="field"><span>${spec.label}</span>
     <input type="${type}" id="task_${key}" placeholder="${esc(spec.placeholder || '')}" autocomplete="off">
@@ -1453,6 +1897,7 @@ function fieldValue(key) {
   }
   if (spec.control === 'mode') return state.mode;
   const node = $(`task_${key}`);
+  if (spec.control === 'check') return node ? node.checked : false;
   return node && node.value ? String(node.value).trim() : '';
 }
 
@@ -1562,6 +2007,11 @@ function collectTaskPayload() {
   if (values.interval) body.interval = Number(values.interval) || 0;
   if (values.start) body.start = values.start;
   if (values.end) body.end = values.end;
+  if (values.gap) body.gap = Number(values.gap) || 0;
+  if (values.cycle) body.cycle = Number(values.cycle) || 0;
+  if (values.repeats) body.repeats = Number(values.repeats) || 0;
+  if (values.typing) body.typing = true;
+  if (values.random_pick) body.random_pick = true;
   return { body };
 }
 
@@ -1734,18 +2184,41 @@ async function moveBankDays(direction, button) {
 
 /* ─────────────────────────── Шторка настроек ─────────────────────────── */
 
-function renderSettings() {
-  $('settingsList').innerHTML = SETTINGS.map(
-    (item) => `
-    <button class="setting" data-start="${item.start}">
-      <div class="setting__emoji">${item.emoji}</div>
+/* Одна разметка на «Ещё» и на шторку настроек: разница только в том, куда
+   ведёт пункт — внутрь кабинета (data-tab) или в бота (data-start). */
+function settingRowHtml(item) {
+  const attr = item.tab
+    ? `data-tab-goto="${item.tab}"${item.status ? ` data-tab-status="${item.status}"` : ''}`
+    : `data-start="${item.start}"`;
+  return `
+    <button class="setting" ${attr}>
+      <div class="setting__emoji" aria-hidden="true">${item.emoji}</div>
       <div class="setting__body">
         <div class="setting__title">${esc(item.title)}</div>
         <div class="setting__desc">${esc(item.desc)}</div>
       </div>
-      <div class="setting__chev">›</div>
-    </button>`
-  ).join('');
+      <div class="setting__chev" aria-hidden="true">›</div>
+    </button>`;
+}
+
+function renderSettings() {
+  $('settingsList').innerHTML = SETTINGS.map(settingRowHtml).join('');
+}
+
+/* Экран «Ещё»: сначала разделы кабинета, потом то, что живёт в боте. */
+function renderMore() {
+  const holder = $('moreList');
+  if (!holder) return;
+  holder.innerHTML =
+    MORE_ITEMS.map(settingRowHtml).join('') +
+    '<div class="section-label">в боте</div>' +
+    SETTINGS.map(settingRowHtml).join('');
+  const about = $('aboutLine');
+  if (about) {
+    about.textContent = state.build
+      ? `Кабинет автоматизаций Telegram · сборка ${state.build}`
+      : 'Кабинет автоматизаций Telegram.';
+  }
 }
 
 /* ────────────────────────────── Пустое состояние ─────────────────────── */
@@ -1797,7 +2270,7 @@ function endLoad(holder) {
 function errorHtml(message, retryFn) {
   return `
     <div class="state">
-      <svg class="mascot mascot--md" viewBox="0 0 120 120" aria-hidden="true"><use href="#papa" /></svg>
+      <svg class="mascot mascot--md" viewBox="0 0 120 120" aria-hidden="true"><use href="#crown" /></svg>
       <div class="state__title">Не удалось загрузить</div>
       <div class="state__text">${esc(message)}</div>
       <button class="btn state__retry" data-retry="${retryFn}">Повторить</button>
@@ -1831,36 +2304,88 @@ function bindEvents() {
   document.querySelectorAll('.nav__item').forEach((item) => {
     item.addEventListener('click', () => switchTab(item.dataset.tab));
   });
+  // Корона в центре навигации — то же, что «создать задачу»: главное действие
+  // кабинета должно быть под большим пальцем, а не в глубине экрана.
+  $('crownBtn').addEventListener('click', () => openTaskSheet(null));
+
+  // главная
+  $('homeCreate').addEventListener('click', () => openTaskSheet(null));
+  $('homeTiles').addEventListener('click', (event) => {
+    const tile = event.target.closest('[data-command], [data-goto]');
+    if (!tile) return;
+    if (tile.dataset.goto) switchTab(tile.dataset.goto);
+    else openCommand(tile.dataset.command);
+  });
+  // Карточки задач на «Главной» краткие: снять с паузы можно здесь же,
+  // «открыть» уводит на вкладку с полным набором кнопок. Слушатель делегирован,
+  // потому что содержимое списка перерисовывается на каждом обновлении.
+  $('homeTasks').addEventListener('click', (event) => {
+    const link = event.target.closest('[data-goto]');
+    if (link) {
+      switchTab(link.dataset.goto);
+      return;
+    }
+    const button = event.target.closest('[data-action]');
+    if (!button) return;
+    taskAction(button.dataset.action, button.dataset.id, button);
+  });
+  $('promptForm').addEventListener('submit', (event) => {
+    event.preventDefault();
+    runSmartSearch();
+  });
+  $('promptInput').addEventListener('input', renderPromptHits);
+  $('promptHits').addEventListener('click', (event) => {
+    const hit = event.target.closest('[data-command], [data-goto]');
+    if (!hit) return;
+    if (hit.dataset.goto) switchTab(hit.dataset.goto);
+    else openCommand(hit.dataset.command);
+  });
+  // «смотреть все» и прочие ссылки-переходы по кабинету
+  document.querySelectorAll('[data-goto]').forEach((node) => {
+    if (node.closest('#homeTiles, #promptHits, #homeTasks')) return; // у них свой делегат
+    node.addEventListener('click', () => switchTab(node.dataset.goto));
+  });
+
+  // ещё
+  $('moreList').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-tab-goto], [data-start]');
+    if (!item) return;
+    if (item.dataset.start) {
+      openBot(item.dataset.start);
+      return;
+    }
+    // «Архив задач» ведёт на вкладку задач сразу в нужный статус.
+    if (item.dataset.tabStatus) setTaskStatus(item.dataset.tabStatus);
+    switchTab(item.dataset.tabGoto);
+  });
 
   // команды
   $('commandSearch').addEventListener('input', renderCommands);
+  $('commandTags').addEventListener('click', (event) => {
+    const chip = event.target.closest('.chip');
+    if (!chip) return;
+    const group = chip.dataset.group || null;
+    // Повторный тап по активному чипсу снимает фильтр: так работает вся
+    // остальная фильтрация в кабинете (чипсы чатов), не будем удивлять.
+    state.commandGroup = state.commandGroup === group ? null : group;
+    renderCommands();
+    // Ряд чипсов прокручивается по горизонтали, и выбранный часто остаётся
+    // обрезанным у края. Подтягиваем его в центр — видно, что именно выбрано.
+    // block: 'nearest' держит вертикальную прокрутку страницы на месте.
+    const active = $('commandTags').querySelector('.chip.is-active');
+    if (active && active.scrollIntoView) {
+      active.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+    }
+  });
   $('commandList').addEventListener('click', (event) => {
     const card = event.target.closest('[data-command]');
     if (!card) return;
-    const command = state.commands.find((item) => item.id === card.dataset.command);
-    if (!command) return;
-    if (command.status === 'ready') openTaskSheet(command);
-    else if (command.status === 'setup_required') {
-      toast('Подключение аккаунтов на настройке. Кабинет работает, команды включатся вместе с ним.');
-    } else toast(`${command.title} — выключено в настройках сервиса`);
+    openCommand(card.dataset.command);
   });
 
   // задачи
   document.querySelectorAll('#taskStatus .seg').forEach((seg) => {
-    seg.addEventListener('click', () => {
-      state.taskStatus = seg.dataset.status;
-      document.querySelectorAll('#taskStatus .seg').forEach((item) => {
-        item.classList.toggle('is-active', item === seg);
-      });
-      // Если данные для этого статуса уже подгружены (агрегатор на boot),
-      // показываем их без сети; иначе подгружаем.
-      const cached = state.tasksByStatus[state.taskStatus];
-      if (cached && cached.length) {
-        renderTasks(cached);
-      } else {
-        loadTasks();
-      }
-    });
+    seg.addEventListener('click', () => setTaskStatus(seg.dataset.status));
   });
   $('taskList').addEventListener('click', (event) => {
     const button = event.target.closest('[data-action]');
@@ -1911,6 +2436,8 @@ function bindEvents() {
     }
     if (action === 'broadcast') {
       openTaskForSelection('broadcast');
+    } else if (action === 'mailing') {
+      openTaskForSelection('mailing');
     } else if (action === 'forward') {
       openTaskForSelection('copy_channel');
     } else if (action === 'parser') {
@@ -2015,13 +2542,48 @@ function showDemoBar() {
   document.body.insertBefore(bar, document.body.firstChild);
 }
 
+/* Свежесть бандла. Адрес кабинета несёт метку сборки (?v=…), а /api/health
+   говорит, какая метка сейчас на сервере. Не совпали — значит WebView открыл
+   кабинет по старому адресу и держит старые файлы: уходим на адрес с новой
+   меткой (другой ключ кэша — файлы приедут с сервера).
+
+   Метку сверяем один раз на метку: если перезагрузка почему-то не помогла,
+   второй круг не начинаем, иначе кабинет зациклится вместо того, чтобы
+   открыться хоть как-то. */
+async function reloadIfBuildIsStale() {
+  const params = new URLSearchParams(location.search);
+  state.build = params.get('v') || '';
+  let build = '';
+  try {
+    const response = await fetch('/api/health', { cache: 'no-store' });
+    if (!response.ok) return false;
+    build = (await response.json()).build || '';
+  } catch (error) {
+    return false; // сервер недоступен — это не повод не открывать кабинет
+  }
+  if (!build || params.get('v') === build) return false;
+
+  const key = 'build-reload:' + build;
+  try {
+    if (sessionStorage.getItem(key)) return false;
+    sessionStorage.setItem(key, '1');
+  } catch (error) {
+    // Приватный режим без sessionStorage: одна перезагрузка всё равно нужнее.
+  }
+  params.set('v', build);
+  location.replace(location.pathname + '?' + params.toString() + location.hash);
+  return true;
+}
+
 async function boot() {
+  if (await reloadIfBuildIsStale()) return;
   if (tg) {
     tg.ready();
     tg.expand();
   }
   applyTheme();
   renderSettings();
+  renderMore();
   bindEvents();
   if (DEMO) showDemoBar();
 
@@ -2040,6 +2602,9 @@ async function boot() {
 
     await loadAccounts();
     await loadCommands();
+    // Плитки «быстрого старта» и подсказки поиска живут на каталоге команд,
+    // поэтому «Главную» собираем после него, а не на старте.
+    renderHome();
     // Подгружаем задачи по всем трём статусам параллельно — бейджи команд
     // («N активных · M на паузе») считаются по сумме трёх списков, а не
     // только по текущей вкладке, иначе они врут при первом заходе.

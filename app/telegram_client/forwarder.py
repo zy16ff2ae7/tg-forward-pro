@@ -36,11 +36,20 @@ async def subscription_active(user_id: int) -> bool:
         return await repo.has_active_subscription(session, user_id)
 
 
-async def send_copy(client: Any, target_id: int, message: Any, text: str) -> Any:
-    """Публикует сообщение как своё — без метки «Переслано от»."""
+async def send_copy(
+    client: Any, target_id: int, message: Any, text: str, link_preview: bool = True
+) -> Any:
+    """Публикует сообщение как своё — без метки «Переслано от».
+
+    ``link_preview=False`` убирает блок предпросмотра у ссылок в тексте.
+    Относится только к текстовым сообщениям: у медиа предпросмотра нет, зато у
+    ``send_file`` такого аргумента и вовсе может не быть.
+    """
     media = getattr(message, "media", None)
     if media is None:
-        return await client.send_message(target_id, text or "", parse_mode=None)
+        return await client.send_message(
+            target_id, text or "", parse_mode=None, link_preview=link_preview
+        )
 
     size = getattr(media, "size", None)
     if size is None:

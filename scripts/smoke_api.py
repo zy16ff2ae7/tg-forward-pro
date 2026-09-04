@@ -287,6 +287,35 @@ async def check_static(cab: Cabinet, rep: Report) -> None:
         f"заголовок {headers.get('Cache-Control')!r}",
     )
 
+    # Бандл без метки просит только старая копия index.html из кэша клиента:
+    # ей отдаём не новый код (он не подойдёт к её разметке), а перезагрузку на
+    # адрес с меткой.
+    status, body = await cab.get("/app/app.js", auth=False)
+    loader = str(body)
+    rep.check(
+        "app.js без метки — скрипт-спасатель, а не бандл",
+        status == 200 and "location.replace" in loader and "async function boot()" not in loader,
+        f"статус {status}",
+    )
+    rep.check(
+        "Спасатель знает текущую метку",
+        stamp in loader,
+        "метки в скрипте нет",
+    )
+    status, headers = await cab.get_headers("/app/app.js", auth=False)
+    rep.check(
+        "Спасатель не кэшируется",
+        headers.get("Cache-Control") == "no-store",
+        f"заголовок {headers.get('Cache-Control')!r}",
+    )
+
+    status, body = await cab.get(f"/app/app.js?v={stamp}", auth=False)
+    rep.check(
+        "app.js с меткой — настоящий бандл",
+        status == 200 and "async function boot()" in str(body),
+        f"статус {status}",
+    )
+
 
 async def check_health(cab: Cabinet, rep: Report) -> None:
     """Мониторинг: /api/health открыт без подписи и показывает счётчики очереди."""
@@ -297,6 +326,11 @@ async def check_health(cab: Cabinet, rep: Report) -> None:
     if status != 200 or not isinstance(body, dict):
         return
     rep.check("ok: true", body.get("ok") is True)
+    rep.check(
+        "метка сборки мини-аппа в ответе",
+        body.get("build") == build_stamp(settings.webapp_dir),
+        f"build={body.get('build')!r}",
+    )
     delivery = body.get("delivery") or {}
     expected = {"submitted", "dropped", "sent", "failed", "skipped", "restored", "queued"}
     missing = sorted(expected - set(delivery))
@@ -558,6 +592,120 @@ async def check_task_actions(cab: Cabinet, rep: Report, rule_id: int) -> None:
     rep.check("удаление задачи", status == 200 and (body or {}).get("ok") is True, f"статус {status}")
     status, _ = await cab.delete(f"/api/tasks/{rule_id}")
     rep.check("повторное удаление — 404", status == 404, f"статус {status}")
+
+
+async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) -> None:
+    """Рассылка по чатам и библиотека сообщений: задача вместе с содержимым.
+
+    Рассылка — единственная задача, которая заводится из кабинета не пустой:
+    тексты из формы ложатся в библиотеку, оттуда их берёт планировщик. Поиск
+    чатов подменён заглушкой (в offline-прогоне искать нечем) — проверяем своё:
+    коды ответов, геометрию получателей, счёт работы и саму библиотеку.
+    """
+    rep.section("Рассылка и библиотека")
+
+    status, body = await cab.get("/api/library")
+    rep.check(
+        "GET /api/library — список без ошибки",
+        status == 200 and isinstance((body or {}).get("items"), list),
+        f"статус {status}",
+    )
+
+    status, _ = await cab.post("/api/library", json={"text": "   "})
+    rep.check("запись без текста и без поста — 400", status == 400, f"статус {status}")
+
+    status, body = await cab.post("/api/library", json={"text": "смоук: одно сообщение"})
+    item_id = int(((body or {}).get("item") or {}).get("id") or 0)
+    rep.check("запись добавлена — 201 с id", status == 201 and bool(item_id), f"статус {status}")
+
+    status, body = await cab.get("/api/library")
+    rep.check(
+        "и видна в списке",
+        any(item.get("id") == item_id for item in (body or {}).get("items") or []),
+    )
+
+    status, body = await cab.delete(f"/api/library/{item_id}")
+    rep.check(
+        "удаление записи",
+        status == 200 and (body or {}).get("ok") is True,
+        f"статус {status}",
+    )
+    status, _ = await cab.delete(f"/api/library/{item_id}")
+    rep.check("повторное удаление — 404", status == 404, f"статус {status}")
+
+    # Чаты «находятся» без Telegram: имя запроса и есть чат.
+    chats = {"@smoke-one": -1001, "@smoke-two": -1002}
+
+    async def resolve_chat(_account_id: int, query: str) -> tuple[int, str] | None:
+        found = chats.get(query.strip())
+        return (found, query.strip()) if found else None
+
+    task: dict = {}
+    with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
+        resolve_chat=resolve_chat
+    ):
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "mailing",
+                "account_id": account_id,
+                "targets": list(chats),
+                "message": "первое\nвторое",
+                "gap": 7,
+                "repeats": 2,
+            },
+        )
+        task = (body or {}).get("task") or {}
+        info = task.get("mailing") or {}
+        rep.check(
+            "рассылка создана — 201",
+            status == 201 and task.get("kind") == "mailing",
+            f"статус {status} {(body or {}).get('error') or ''}",
+        )
+        rep.check(
+            "получатели, тексты и пауза — из формы",
+            info.get("recipients") == 2
+            and info.get("messages_count") == 2
+            and info.get("gap_seconds") == 7,
+            f"{info}",
+        )
+        rep.check(
+            "работа измерима: получатели × круги",
+            task.get("progress") == {"done": 0, "total": 4},
+            f"{task.get('progress')}",
+        )
+
+        status, body = await cab.get("/api/library")
+        texts = sorted(str(item.get("text")) for item in (body or {}).get("items") or [])
+        rep.check("тексты из формы легли в библиотеку", texts == ["второе", "первое"], f"{texts}")
+
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "mailing",
+                "account_id": account_id,
+                "targets": ["@нет-такого-чата"],
+                "message": "текст",
+            },
+        )
+        rep.check(
+            "рассылать некуда — 400, а не «чат не найден»",
+            status == 400 and "получател" in str((body or {}).get("error")),
+            f"статус {status}, {(body or {}).get('error')}",
+        )
+
+    # Прибираем за собой: следующие разделы видят кабинет без задач и с пустой
+    # библиотекой — ровно таким, каким его оставил seed().
+    task_id = int(task.get("id") or 0)
+    if task_id:
+        status, _ = await cab.delete(f"/api/tasks/{task_id}")
+        rep.check("рассылка удаляется", status == 200, f"статус {status}")
+    status, body = await cab.get("/api/library")
+    for item in (body or {}).get("items") or []:
+        await cab.delete(f"/api/library/{item.get('id')}")
+    status, body = await cab.get("/api/library")
+    rep.check("библиотека снова пуста", not ((body or {}).get("items") or []), f"{body}")
+    rep.note("поиск чатов подменён заглушкой: Telegram в разделе не участвует")
 
 
 async def check_chats_and_accounts(cab: Cabinet, rep: Report, account_id: int) -> None:
@@ -1083,6 +1231,7 @@ async def run_all(rep: Report) -> None:
             await check_commands(cab, rep)
             await check_tasks(cab, rep, account_id, rule_id)
             await check_task_actions(cab, rep, rule_id)
+            await check_mailing_and_library(cab, rep, account_id)
             await check_chats_and_accounts(cab, rep, account_id)
             await check_account_login(cab, rep)
             await check_subscription(cab, rep, me)

@@ -132,6 +132,22 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
+def _as_bool(value: Any) -> bool:
+    """Галочка из формы: чекбокс приходит и булем, и строкой — принимаем оба."""
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on", "да")
+
+
+def _as_ids(value: Any) -> list[int]:
+    """Список числовых id из формы. Всё нечисловое молча отбрасываем."""
+    result: list[int] = []
+    for item in _as_list(value):
+        if str(item).lstrip("-").isdigit():
+            result.append(int(item))
+    return result
+
+
 def _months_or_fail(raw: Any, default: int) -> int:
     """Срок абонемента из запроса. Поля нет — умолчание, мусор — отказ.
 
@@ -189,7 +205,16 @@ async def health(_request: web.Request) -> web.Response:
     except Exception as exc:  # noqa: BLE001 — health не должен падать из-за БД
         logger.debug("health: не прочитали журнал ожидания: {}", exc)
         delivery["persisted"] = None
-    return _json({"ok": True, "service": "tg-forward", "delivery": delivery})
+    return _json(
+        {
+            "ok": True,
+            "service": "tg-forward",
+            # Метка сборки мини-аппа: по ней кабинет понимает, что держит в
+            # руках старый бандл, и перезагружается сам (см. webapp/app.js).
+            "build": webapp_build.build_stamp(settings.webapp_dir),
+            "delivery": delivery,
+        }
+    )
 
 
 @routes.get("/api/me")
@@ -307,7 +332,15 @@ async def list_tasks(request: web.Request) -> web.Response:
             rules = list(await repo.list_rules(session, user_id, include_archived=False))
             rules = [r for r in rules if r.enabled == (status == "active")]
 
-    return _json({"tasks": [_task_view(rule) for rule in rules]})
+        # Парсер — единственная задача с обозримым концом: собрано из лимита.
+        # Счётчик берём из базы, пока сессия открыта, а не выдумываем на клиенте.
+        collected = {
+            rule.id: await repo.count_collected_items(session, rule.id)
+            for rule in rules
+            if (rule.kind or "forward") == "parser"
+        }
+
+    return _json({"tasks": [_task_view(rule, collected.get(rule.id)) for rule in rules]})
 
 
 @routes.post("/api/tasks")
@@ -399,14 +432,24 @@ async def create_task(request: web.Request) -> web.Response:
     found_target = await _resolve_chat(target, "приёмник")
     found_user = await _resolve_chat(target_user, "пользователя")
 
-    extra_targets: list[int] = []
+    # Получателей держим парами (id, название): рассылке первый из них станет
+    # приёмником правила, и без названия карточка задачи была бы безымянной.
+    extra_pairs: list[tuple[int, str]] = []
     for raw in targets:
         found = await _resolve_chat(str(raw), "получателя")
         if found is not None:
-            extra_targets.append(found[0])
+            extra_pairs.append(found)
+    extra_targets = [pair[0] for pair in extra_pairs]
 
     if errors:
-        return _json({"error": "; ".join(errors)}, status=404)
+        # Рассылке, у которой не нашлось ни одного получателя, отвечает её
+        # собственная ветка — и отвечает 400: это ошибка ввода, а не «чат не
+        # найден». Если часть чатов нашлась, про остальные честно сообщаем здесь.
+        mailing_has_nowhere_to_send = (
+            kind == "mailing" and found_target is None and not extra_pairs
+        )
+        if not mailing_has_nowhere_to_send:
+            return _json({"error": "; ".join(errors)}, status=404)
 
     source_id, source_title = found_source or (0, "")
     target_id, target_title = found_target or (0, "")
@@ -449,6 +492,51 @@ async def create_task(request: web.Request) -> web.Response:
         filters["window_start"] = str(payload.get("start") or "00:00")[:5]
         filters["window_end"] = str(payload.get("end") or "23:59")[:5]
         source_id, source_title = 0, "авто-постинг"
+    elif kind == "mailing":
+        # Рассылка по чатам: свои сообщения по списку получателей, по кругу.
+        # Источник не нужен — ставим 0, иначе входящее сообщение в первом же
+        # чате-получателе «подхватило» бы рассылку как обычную пересылку.
+        chats: list[tuple[int, str]] = []
+        if found_target:
+            chats.append(found_target)
+        chats.extend(extra_pairs)
+        # Повторы убираем: один и тот же чат не должен получить сообщение дважды
+        # за круг. Источник исключаем по той же причине, что и в broadcast.
+        seen: list[tuple[int, str]] = []
+        for pair in chats:
+            if pair[0] and pair[0] != source_id and pair[0] not in [item[0] for item in seen]:
+                seen.append(pair)
+        if not seen:
+            return _json({"error": "Укажите получателей рассылки"}, status=400)
+
+        # Первый чат живёт в target_id (колонка обязательна), остальные — в
+        # настройках: такую же геометрию уже использует «Рассылка» (broadcast).
+        target_id, target_title = seen[0]
+        filters["targets"] = [pair[0] for pair in seen[1:]]
+        filters["gap_seconds"] = max(0, _as_int(payload.get("gap"), 5))
+        filters["gap_jitter"] = max(0, _as_int(payload.get("gap_jitter"), 0))
+        filters["cycle_seconds"] = max(0, _as_int(payload.get("cycle"), 10))
+        filters["cycle_jitter"] = max(0, _as_int(payload.get("cycle_jitter"), 0))
+        filters["repeats"] = max(0, _as_int(payload.get("repeats"), 1))
+        filters["typing"] = _as_bool(payload.get("typing"))
+        filters["random_pick"] = _as_bool(payload.get("random_pick"))
+        filters["link_preview"] = _as_bool(payload.get("link_preview"))
+        source_id, source_title = 0, "рассылка по чатам"
+
+        # Текст из формы кладём в библиотеку: рассылка берёт сообщения оттуда,
+        # и потом их можно пополнять, не пересоздавая задачу.
+        msgs = [line.strip() for line in str(payload.get("message") or "").split("\n") if line.strip()]
+        saved_ids: list[int] = []
+        if msgs:
+            async with SessionLocal() as session:
+                for text in msgs:
+                    item = await repo.add_saved_message(
+                        session, user_id=user_id, title=text[:48], text=text
+                    )
+                    saved_ids.append(item.id)
+                await session.commit()
+        # Явный выбор из библиотеки важнее только что набранного текста.
+        filters["library_ids"] = _as_ids(payload.get("library_ids")) or saved_ids
 
     async with SessionLocal() as session:
         rule = await repo.add_rule(
@@ -498,11 +586,30 @@ async def toggle_task(request: web.Request) -> web.Response:
                 {"error": "Задача в архиве — верните её из архива, чтобы продолжить"},
                 status=409,
             )
+        # Рассылка считает круги по счётчику отправок, поэтому снятая с паузы
+        # задача с исчерпанным числом кругов молча бы ничего не делала. Новое
+        # включение — это новый заход: начинаем круги заново.
+        if not rule.enabled and (rule.kind or "forward") == "mailing" and _mailing_finished(rule):
+            rule.forwarded_count = 0
         rule.enabled = not rule.enabled
         await session.commit()
 
     await manager.refresh_rules()
     return _json({"task": _task_view(rule)})
+
+
+def _mailing_finished(rule) -> bool:
+    """Рассылка сделала все круги, сколько было задано."""
+    from app.telegram_client.filters import FilterConfig
+    from app.telegram_client.jobs import mailing_position
+
+    conf = FilterConfig.from_dict(rule.filters or {})
+    repeats = max(0, int(conf.repeats or 0))
+    if not repeats:
+        return False
+    recipients = len(conf.targets) + (1 if rule.target_id else 0)
+    _, cycle = mailing_position(rule.forwarded_count, recipients)
+    return cycle >= repeats
 
 
 @routes.post("/api/tasks/{task_id}/mode")
@@ -604,6 +711,87 @@ async def task_results(request: web.Request) -> web.Response:
             ],
         }
     )
+
+
+# ─────────────────────── Библиотека сообщений (что рассылать) ─────────────────
+
+
+def _library_view(item) -> dict:
+    """Сохранённое сообщение → вид для кабинета."""
+    text = (item.text or "").strip()
+    return {
+        "id": item.id,
+        "title": item.title or (text[:48] + ("…" if len(text) > 48 else "")),
+        "text": text,
+        "chat_id": int(item.chat_id or 0),
+        "message_id": int(item.message_id or 0),
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+@routes.get("/api/library")
+@require_auth
+async def list_library(request: web.Request) -> web.Response:
+    """Сохранённые сообщения: из них рассылка берёт тексты и посты."""
+    user_id = request[USER_ID_KEY]
+
+    async with SessionLocal() as session:
+        items = list(await repo.list_saved_messages(session, user_id))
+
+    return _json({"items": [_library_view(item) for item in items]})
+
+
+@routes.post("/api/library")
+@require_auth
+async def add_library_item(request: web.Request) -> web.Response:
+    """Кладёт сообщение в библиотеку: свой текст или ссылку на готовый пост."""
+    user_id = request[USER_ID_KEY]
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return _json({"error": "Нужен JSON"}, status=400)
+    if not isinstance(payload, dict):
+        return _json({"error": "Нужен JSON-объект"}, status=400)
+
+    text = str(payload.get("text") or "").strip()
+    chat_id = _as_int(payload.get("chat_id"), 0)
+    message_id = _as_int(payload.get("message_id"), 0)
+    # Пустая запись — это «отправить ничего»: такая в рассылке только мешает.
+    if not text and not (chat_id and message_id):
+        return _json({"error": "Дайте текст сообщения или ссылку на пост"}, status=400)
+
+    async with SessionLocal() as session:
+        item = await repo.add_saved_message(
+            session,
+            user_id=user_id,
+            title=str(payload.get("title") or "").strip()[:128],
+            text=text,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+        await session.commit()
+        view = _library_view(item)
+
+    return _json({"item": view}, status=201)
+
+
+@routes.delete("/api/library/{item_id}")
+@require_auth
+async def delete_library_item(request: web.Request) -> web.Response:
+    """Убирает сообщение из библиотеки. Задачи при этом не падают: рассылка
+    просто берёт то, что осталось."""
+    user_id = request[USER_ID_KEY]
+    item_id = int(request.match_info["item_id"])
+
+    async with SessionLocal() as session:
+        item = await repo.get_saved_message(session, item_id, user_id)
+        if item is None:
+            return _json({"error": "Сообщение не найдено"}, status=404)
+        await repo.delete_saved_message(session, item)
+        await session.commit()
+
+    await manager.refresh_rules()
+    return _json({"ok": True})
 
 
 @routes.delete("/api/tasks/{task_id}")
@@ -889,17 +1077,25 @@ def _pay_link_or_fail(token: str) -> paylink.PayLink:
 
 
 def _pay_html(title: str, message: str) -> str:
-    """Минимальная страница-заглушка: устаревшая ссылка, выключенный контур."""
+    """Минимальная страница-заглушка: устаревшая ссылка, выключенный контур.
+
+    Палитра — как в кабинете и в ``webapp/pay.html``: человек пришёл по ссылке из
+    бота, и даже страница с отказом должна выглядеть нашей, а не чужой.
+    """
     return (
         "<!doctype html><html lang=ru><head><meta charset=utf-8>"
         '<meta name=viewport content="width=device-width,initial-scale=1">'
-        f"<title>{title}</title>"
+        f"<title>ДОЧА · {title}</title>"
         "<style>body{font:16px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;"
         "margin:0;min-height:100vh;display:flex;align-items:center;"
-        "justify-content:center;background:#0f1115;color:#e8eaed}"
+        "justify-content:center;color:#F8EDF7;background:"
+        "radial-gradient(120% 60% at 50% -10%,rgba(255,61,154,.22),transparent 62%),"
+        "linear-gradient(180deg,#0F0618 0%,#0A0510 52%,#060309 100%)}"
         "div{max-width:28rem;padding:2rem;text-align:center}"
-        "h1{font-size:1.25rem;margin:0 0 .75rem}p{margin:0;color:#9aa0a6}</style>"
-        f"</head><body><div><h1>{title}</h1><p>{message}</p></div></body></html>"
+        "b{display:block;margin:0 0 1rem;letter-spacing:.14em;color:#FF3D9A}"
+        "h1{font-size:1.25rem;margin:0 0 .75rem}p{margin:0;color:#B9A0C9}</style>"
+        f"</head><body><div><b>ДОЧА</b><h1>{title}</h1>"
+        f"<p>{message}</p></div></body></html>"
     )
 
 
@@ -1104,10 +1300,14 @@ async def _bot_username() -> str | None:
         return None
 
 
-def _task_view(rule) -> dict:
-    """Правило → вид задачи для мини-аппа."""
+def _task_view(rule, collected: int | None = None) -> dict:
+    """Правило → вид задачи для мини-аппа.
+
+    ``collected`` — сколько записей задача уже собрала (только для парсера,
+    считает вызывающий, пока открыта сессия).
+    """
     from app.telegram_client.filters import FilterConfig
-    from app.telegram_client.jobs import KIND_LABELS, task_title
+    from app.telegram_client.jobs import KIND_LABELS, MAX_PARSER_LIMIT, task_title
 
     kind = rule.kind or "forward"
     view = {
@@ -1123,25 +1323,65 @@ def _task_view(rule) -> dict:
         "delay": rule.delay_seconds,
         "forwarded": rule.forwarded_count,
         "account_id": rule.account_id,
+        # Включённая задача при отключённом аккаунте ничего не делает. Кабинет
+        # обязан показать это метко́й «нет связи», а не бодрым «работает».
+        "account_online": manager.is_online(rule.account_id),
         # Разовые задачи запускаются кнопкой, а не реагируют на сообщения
         "oneshot": kind in ONE_SHOT_KINDS,
         "created_at": rule.created_at.isoformat() if rule.created_at else None,
     }
     # Авто-постер: выносим расписание, чтобы в карточке задачи было видно,
     # как часто и в каком окне он шлёт (delay в секундах неинформативен).
+    conf = FilterConfig.from_dict(rule.filters or {})
     if kind == "poster":
-        f = FilterConfig.from_dict(rule.filters or {})
-        view["interval_min"] = max(1, f.interval_seconds // 60)
-        view["window_start"] = f.window_start
-        view["window_end"] = f.window_end
-        view["messages_count"] = len(f.messages)
+        view["interval_min"] = max(1, conf.interval_seconds // 60)
+        view["window_start"] = conf.window_start
+        view["window_end"] = conf.window_end
+        view["messages_count"] = len(conf.messages)
+
+    # Полоса выполнения. total заполняем ТОЛЬКО там, где «всего» существует в
+    # настройках задачи: у парсера это лимит участников, у автоподписки —
+    # список каналов. Остальные задачи работают, пока их не остановят, — у них
+    # total равен null, и кабинет рисует бегунок без процентов вместо
+    # выдуманной доли.
+    done = int(rule.forwarded_count or 0)
+    total: int | None = None
+    if kind == "parser":
+        done = int(collected or 0)
+        limit = int(conf.limit or 0)
+        total = max(1, min(limit if limit > 0 else 200, MAX_PARSER_LIMIT))
+    elif kind == "autosubscribe" and conf.subscribe_to and not rule.source_id:
+        # С источником список пополняется ссылками из его постов — тогда
+        # «всего» заранее неизвестно.
+        total = len(conf.subscribe_to)
+    elif kind == "mailing":
+        # У рассылки «всего» есть: получатели × число кругов. Без ограничения
+        # кругов (repeats=0) конца нет — тогда и total остаётся null, как у
+        # остальных бесконечных задач.
+        recipients = len(conf.targets) + (1 if rule.target_id else 0)
+        view["mailing"] = {
+            "recipients": recipients,
+            "messages_count": len(conf.library_ids),
+            "gap_seconds": conf.gap_seconds,
+            "cycle_seconds": conf.cycle_seconds,
+            "repeats": conf.repeats,
+            "typing": bool(conf.typing),
+            "random_pick": bool(conf.random_pick),
+        }
+        if conf.repeats > 0 and recipients:
+            total = recipients * int(conf.repeats)
+    view["progress"] = {"done": done, "total": total}
+    if kind == "broadcast":
+        view["targets_count"] = len(conf.targets)
+    if kind == "mailing":
+        view["targets_count"] = len(conf.targets) + (1 if rule.target_id else 0)
     return view
 
 
 # Каталог команд мини-аппа.
 # kind — тип задачи в app.telegram_client.jobs; needs/optional — поля формы,
 # по ним фронтенд собирает шторку создания и проверяет обязательность.
-# group — блок каталога (см. COMMAND_GROUPS ниже): девять команд одним списком
+# group — блок каталога (см. COMMAND_GROUPS ниже): десять команд одним списком
 # читались как свалка, поэтому кабинет раскладывает их по смыслу.
 COMMANDS: list[dict] = [
     {
@@ -1160,12 +1400,15 @@ COMMANDS: list[dict] = [
         "group": "publish",
         "kind": "broadcast",
         "emoji": "📣",
-        "title": "Рассылка по чатам",
+        # «Пересылка», а не «рассылка»: эта задача разносит ЧУЖОЙ пост из
+        # источника, а свои сообщения по чатам шлёт mailing. Два одинаковых
+        # названия в каталоге читались как одна команда-двойник.
+        "title": "Пересылка в несколько чатов",
         "description": "Одно сообщение из источника — в несколько чатов сразу.",
         "status": "ready",
         "needs": ["account", "source", "target", "targets"],
         "optional": [],
-        "hint": "Выберите чаты во вкладке «Чаты» и нажмите «📣 Рассылка» — они станут получателями. Источник: сообщение из него уйдёт во все выбранные чаты.",
+        "hint": "Выберите чаты во вкладке «Чаты» и нажмите «📣 Пост в чаты» — они станут получателями. Источник: сообщение из него уйдёт во все выбранные чаты.",
     },
     {
         "id": "parser",
@@ -1248,6 +1491,18 @@ COMMANDS: list[dict] = [
         "optional": ["interval", "start", "end"],
         "hint": "Чат — куда постить. Сообщений может быть несколько (каждое с новой строки) — уходят по очереди. Интервал в минутах, окно — ЧЧ:ММ.",
     },
+    {
+        "id": "mailing",
+        "group": "publish",
+        "kind": "mailing",
+        "emoji": "📨",
+        "title": "Рассылка по чатам",
+        "description": "Шлёт ваши сообщения по списку чатов: по одному в круг, с паузой между чатами.",
+        "status": "ready",
+        "needs": ["account", "targets", "message"],
+        "optional": ["gap", "cycle", "repeats", "typing", "random_pick"],
+        "hint": "Получатели — через запятую или выбранные чаты во вкладке «Чаты». Сообщения (каждое с новой строки) уходят по очереди: первое — всем, затем второе. Пауза между чатами в секундах, «повторов 0» — крутить бесконечно.",
+    },
 ]
 
 # Блоки каталога в порядке показа. Подписи и порядок живут здесь, а не в
@@ -1294,6 +1549,36 @@ async def _webapp_index(_request: web.Request) -> web.Response:
     return web.Response(
         text=html,
         content_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@routes.get("/app/app.js")
+async def _webapp_bundle(request: web.Request) -> web.Response:
+    """Бандл кабинета. Без метки сборки в адресе — отдаём не его, а спасателя.
+
+    Свежий каркас всегда просит `app.js?v=<метка>`. Запрос без метки (или с
+    чужой) приходит от старой копии `index.html` в кэше клиента: у неё прежняя
+    разметка, и новый код в ней сломается. Такой копии отвечаем скриптом,
+    который перезагружает кабинет по адресу с меткой — там каркас точно
+    свежий, потому что это другой ключ кэша.
+    """
+    bundle = settings.webapp_dir / "app.js"
+    if not bundle.exists():
+        raise web.HTTPNotFound()
+    stamp = webapp_build.build_stamp(settings.webapp_dir)
+    if stamp and request.query.get("v") == stamp:
+        return web.FileResponse(
+            bundle,
+            headers={
+                "Content-Type": "application/javascript; charset=utf-8",
+                "Cache-Control": webapp_build.cache_control_for(True),
+            },
+        )
+    return web.Response(
+        text=webapp_build.stale_shell_loader(stamp),
+        content_type="application/javascript",
+        charset="utf-8",
         headers={"Cache-Control": "no-store"},
     )
 

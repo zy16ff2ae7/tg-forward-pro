@@ -13,6 +13,7 @@ from telethon.errors import (
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     PhoneNumberInvalidError,
+    RPCError,
     SessionPasswordNeededError,
 )
 from telethon.sessions import StringSession
@@ -22,7 +23,11 @@ from app.db.database import SessionLocal, session_scope
 from app.db.models import TelegramAccount
 from app.db import repo
 from app.telegram_client.filters import FilterConfig
-from app.telegram_client.forwarder import deliver, log_delivery_error
+from app.telegram_client.forwarder import (
+    deliver,
+    log_delivery_error,
+    subscription_active,
+)
 from app.telegram_client.jobs import FLOATING_KINDS, MANUAL_ONLY_KINDS, SCHEDULED_KINDS
 from app.telegram_client.queue import DeliveryQueue
 from app.telegram_client.types import RuleSnapshot
@@ -36,6 +41,17 @@ PUBLIC_LOGIN_UNAVAILABLE = (
     "Подключение Telegram-аккаунтов временно недоступно. "
     "Бот и кабинет работают, но шлюз входа по номеру ещё не настроен на стороне сервиса."
 )
+
+# Рассылка по чатам: шаг у неё в секундах (пауза между получателями), поэтому
+# тик планировщика — секунда, а не 20 секунд, как у авто-постера.
+MAILING_TICK_SECONDS = 1.0
+# Как часто переспрашивать базу про подписку: тик каждую секунду, и на каждый
+# проход таскать запрос незачем.
+SUBSCRIPTION_CHECK_TTL = 60.0
+# Паузы после сбоя: пустая библиотека и ошибка отправки лечатся по-разному,
+# но оба случая не должны засыпать журнал сообщением каждую секунду.
+MAILING_EMPTY_PAUSE = 60.0
+MAILING_ERROR_PAUSE = 30.0
 
 
 def _proxy_dict(proxy_url: str | None) -> dict | None:
@@ -79,6 +95,7 @@ def _snapshot(rule) -> RuleSnapshot:
         target_title=rule.target_title or "",
         enabled=bool(rule.enabled),
         archived=bool(rule.archived),
+        forwarded_count=int(rule.forwarded_count or 0),
     )
 
 
@@ -117,6 +134,12 @@ class ClientManager:
         # idx — индекс следующего сообщения, runs — сколько раз отправили.
         self._poster_state: dict[int, dict] = {}
         self._poster_task: asyncio.Task | None = None
+        # Рассылки по чатам — свой список и свой цикл: у них шаг в секундах, а
+        # постер тикает раз в 20 сек и такой темп просто не выдержал бы.
+        self._mailing_rules: list[RuleSnapshot] = []
+        # rule_id -> {"pos", "cycle", "due", "not_before", "typed"}
+        self._mailing_state: dict[int, dict] = {}
+        self._mailing_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._refresh_task: asyncio.Task | None = None
 
@@ -153,16 +176,24 @@ class ClientManager:
     async def sign_in_code(
         self, phone: str, code: str, session_string: str, phone_code_hash: str
     ) -> str:
-        """Вводит код из Telegram. Возвращает обновлённую сессию."""
+        """Вводит код из Telegram. Возвращает обновлённую сессию.
+
+        ``SessionPasswordNeededError`` наружу не глотаем: по нему вызывающий
+        переводит вход на ступень облачного пароля. Раньше здесь на эту ошибку
+        возвращалась сессия — как при успешном входе, и для вызывающего код
+        выглядел принятым целиком. Сессия при этом оставалась неавторизованной,
+        поэтому вход у всех, у кого включён 2FA, падал не на шаге пароля, а на
+        итоговой проверке: ``get_me()`` отдаёт ``None`` → «Не удалось получить
+        данные аккаунта». Отдельную сессию для шага пароля возвращать не нужно —
+        подойдёт та же, что пришла: ключ авторизации и DC при вводе кода не
+        меняются, а SRP-обмен идёт по тому же ключу.
+        """
         client = self._new_client(session_string)
         await client.connect()
         try:
             await client.sign_in(
                 phone=phone, code=code, phone_code_hash=phone_code_hash
             )
-            return client.session.save()
-        except SessionPasswordNeededError:
-            # облачный пароль — просим пользователя во второй ступени
             return client.session.save()
         finally:
             await client.disconnect()
@@ -316,6 +347,8 @@ class ClientManager:
         # могут постить (MTProto готов и хотя бы один поднялся).
         if self._poster_task is None or self._poster_task.done():
             self._poster_task = asyncio.create_task(self._poster_loop())
+        if self._mailing_task is None or self._mailing_task.done():
+            self._mailing_task = asyncio.create_task(self._mailing_loop())
 
         await self._restore_deliveries()
 
@@ -348,6 +381,9 @@ class ClientManager:
         if self._poster_task is not None:
             self._poster_task.cancel()
             self._poster_task = None
+        if self._mailing_task is not None:
+            self._mailing_task.cancel()
+            self._mailing_task = None
         await delivery_queue.stop()
         for account_id in list(self._clients):
             await self.stop_account(account_id)
@@ -500,19 +536,31 @@ class ClientManager:
                 floating.setdefault(rule.account_id, []).append(snapshot)
             else:
                 fresh.setdefault((rule.account_id, rule.source_id), []).append(snapshot)
-        # Авто-постеры собираем отдельно — они живут по расписанию, а не по
-        # входящим сообщениям, поэтому в _rules не попадают (иначе входящее
+        # Авто-постеры и рассылки собираем отдельно — они живут по расписанию, а
+        # не по входящим сообщениям, поэтому в _rules не попадают (иначе входящее
         # сообщение в приёмнике случайно бы «подхватило» постер).
         fresh_posters: list[RuleSnapshot] = []
+        fresh_mailings: list[RuleSnapshot] = []
         for rule in rules:
-            if rule.kind in SCHEDULED_KINDS and rule.enabled and not rule.archived:
-                fresh_posters.append(_snapshot(rule))
+            if rule.kind not in SCHEDULED_KINDS or not rule.enabled or rule.archived:
+                continue
+            snapshot = _snapshot(rule)
+            if rule.kind == "mailing":
+                fresh_mailings.append(snapshot)
+            else:
+                fresh_posters.append(snapshot)
 
         async with self._lock:
             self._rules = fresh
             self._floating_rules = floating
             self._rules_by_id = by_id
             self._poster_rules = fresh_posters
+            self._mailing_rules = fresh_mailings
+            # Правило выключили или удалили — состояние планировщика ему больше
+            # не нужно. Иначе словари растут весь uptime процесса.
+            live = {snapshot.id for snapshot in fresh_mailings}
+            for rule_id in [key for key in self._mailing_state if key not in live]:
+                self._mailing_state.pop(rule_id, None)
 
     # ─────────────────────────── Авто-постер (планировщик) ───────────────────────────
 
@@ -588,6 +636,163 @@ class ClientManager:
             except Exception as exc:  # noqa: BLE001 — не спамим при ошибке
                 logger.warning("Постер #{} не отправил: {}", rule.id, exc)
                 st["last"] = time.time()
+
+    # ───────────────── Рассылка по чатам (планировщик, свой цикл) ─────────────────
+
+    async def _mailing_loop(self) -> None:
+        """Фоновый цикл рассылок: тикает раз в секунду, чтобы держать паузы."""
+        while True:
+            try:
+                await asyncio.sleep(MAILING_TICK_SECONDS)
+                await self._mailing_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — планировщик не должен падать
+                logger.exception("Планировщик рассылок упал: {}", exc)
+
+    async def _mailing_tick(self) -> None:
+        """Один проход: каждой рассылке, которой пора, — по одному сообщению.
+
+        За проход уходит не больше одного сообщения на правило: темп задают
+        паузы (``gap_seconds`` между получателями, ``cycle_seconds`` между
+        кругами), а не скорость цикла. Позиция в списке получателей живёт в
+        состоянии планировщика, но выводится из ``forwarded_count`` — значит
+        после перезапуска процесса рассылка продолжает с того же чата, а не
+        начинает круг заново.
+        """
+        from app.telegram_client.jobs import (
+            load_mailing_library,
+            mailing_gap,
+            mailing_next_due,
+            mailing_pick,
+            mailing_position,
+            mailing_recipients,
+            mailing_send,
+        )
+
+        now = time.time()
+        async with self._lock:
+            rules = list(self._mailing_rules)
+
+        for rule in rules:
+            if not rule.enabled or rule.archived:
+                continue
+            client = self._clients.get(rule.account_id)
+            if client is None or not client.is_connected():
+                continue
+
+            recipients = mailing_recipients(rule)
+            if not recipients:
+                continue
+
+            st = self._mailing_state.setdefault(
+                rule.id,
+                {
+                    "pos": None,
+                    "cycle": 0,
+                    "due": 0.0,
+                    "not_before": 0.0,
+                    "checked": 0.0,
+                    "allowed": False,
+                },
+            )
+            # not_before — пауза после FloodWait или сбоя; due — плановое время
+            # следующей отправки (0 означает «ещё не отправляли»).
+            if now < st["not_before"] or (st["due"] and now < st["due"]):
+                continue
+
+            if now - st["checked"] >= SUBSCRIPTION_CHECK_TTL:
+                st["checked"] = now
+                st["allowed"] = await subscription_active(rule.user_id)
+            if not st["allowed"]:
+                continue
+
+            if st["pos"] is None:
+                st["pos"], st["cycle"] = mailing_position(
+                    rule.forwarded_count, len(recipients)
+                )
+
+            repeats = max(0, int(rule.filters.repeats or 0))
+            if repeats and st["cycle"] >= repeats:
+                await self._finish_mailing(rule, st["cycle"])
+                continue
+
+            target_id = recipients[st["pos"] % len(recipients)]
+            try:
+                items = await load_mailing_library(rule.user_id, rule.filters.library_ids)
+                item = mailing_pick(
+                    items,
+                    st["cycle"] * len(recipients) + st["pos"],
+                    random_pick=bool(rule.filters.random_pick),
+                )
+                if item is None:
+                    st["not_before"] = now + MAILING_EMPTY_PAUSE
+                    logger.warning(
+                        "Рассылка #{}: в библиотеке нет сообщений — пауза {} сек",
+                        rule.id,
+                        int(MAILING_EMPTY_PAUSE),
+                    )
+                    continue
+                await mailing_send(client, rule, item, target_id)
+            except FloodWaitError as exc:
+                # Telegram явно сказал, сколько ждать, — слушаемся, иначе на
+                # следующем тике тот же отказ и поток предупреждений в журнале.
+                wait = int(getattr(exc, "seconds", 30)) + 1
+                st["not_before"] = time.time() + wait
+                logger.warning("Рассылка #{}: Telegram просит подождать {} сек", rule.id, wait)
+                continue
+            except RPCError as exc:
+                logger.warning("Рассылка #{}: не ушло в {}: {}", rule.id, target_id, exc)
+                st["not_before"] = time.time() + MAILING_ERROR_PAUSE
+                continue
+            except Exception as exc:  # noqa: BLE001 — одна рассылка не роняет цикл
+                logger.warning(
+                    "Рассылка #{}: сбой отправки в {}: {}: {}",
+                    rule.id,
+                    target_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                st["not_before"] = time.time() + MAILING_ERROR_PAUSE
+                continue
+
+            st["pos"] += 1
+            cycle_closed = st["pos"] >= len(recipients)
+            if cycle_closed:
+                st["pos"] = 0
+                st["cycle"] += 1
+            st["due"] = mailing_next_due(
+                st["due"],
+                time.time(),
+                mailing_gap(rule.filters, cycle=cycle_closed),
+            )
+
+            async with session_scope() as session:
+                await repo.bump_forwarded(session, rule.id)
+                await repo.log_forward(
+                    session,
+                    rule_id=rule.id,
+                    user_id=rule.user_id,
+                    # У рассылки нет входящего сообщения: это она его создаёт.
+                    source_msg_id=0,
+                    target_msg_id=int(target_id) or None,
+                    status="ok",
+                )
+            logger.debug("Рассылка #{}: отправлено в {}", rule.id, target_id)
+
+    async def _finish_mailing(self, rule: RuleSnapshot, cycles: int) -> None:
+        """Останавливает рассылку, сделавшую заданное число кругов.
+
+        Задача остаётся в списке, но снятой с паузы не считается: «работает» на
+        карточке было бы враньём. Снять паузу можно вручную — тогда прогресс
+        обнуляется (см. ``/api/tasks/{id}/toggle``).
+        """
+        logger.info("Рассылка #{}: сделала {} круг(ов) — останавливаю", rule.id, cycles)
+        async with session_scope() as session:
+            db_rule = await repo.get_rule(session, rule.id, rule.user_id)
+            if db_rule is not None:
+                db_rule.enabled = False
+        await self.refresh_rules()
 
     def rules_for(self, account_id: int, chat_id: int) -> list[RuleSnapshot]:
         return self._rules.get((account_id, chat_id), [])

@@ -4,50 +4,98 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>Оплата абонемента</title>
+<title>ДОЧА · Оплата абонемента</title>
 <style>
-  :root { color-scheme: dark; }
+  /* Палитра один в один с кабинетом (webapp/styles.css). Страница живёт вне
+     Telegram и стилей кабинета не подключает: её открывают в обычном браузере,
+     где нет ни темы клиента, ни его шрифтов — поэтому всё своё, внутри файла. */
+  :root {
+    color-scheme: dark;
+    --bg: #0A0510;
+    --card: #180C22;
+    --text: #F8EDF7;
+    --muted: #B9A0C9;
+    --line: rgba(255, 130, 205, 0.16);
+    --accent: #FF3D9A;
+    --accent-2: #C31E9B;
+    --violet: #A855F7;
+    --pink: #FFC2E2;
+  }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 1.5rem 1rem 3rem;
+    margin: 0; padding: 1.5rem 1rem 3rem; min-height: 100vh;
     font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #0f1115; color: #e8eaed;
+    color: var(--text);
+    background:
+      radial-gradient(120% 60% at 50% -10%, rgba(255, 61, 154, 0.22), transparent 62%),
+      radial-gradient(90% 50% at 100% 8%, rgba(168, 85, 247, 0.16), transparent 60%),
+      linear-gradient(180deg, #0F0618 0%, #0A0510 52%, #060309 100%);
+    background-attachment: fixed;
   }
   main { max-width: 30rem; margin: 0 auto; }
+  .brand { display: flex; align-items: center; gap: .55rem; margin: 0 0 1.1rem; }
+  .brand svg { width: 34px; height: 34px; flex: none;
+               filter: drop-shadow(0 0 10px rgba(255, 61, 154, 0.55)); }
+  .brand b { font-size: 1.05rem; letter-spacing: .12em; }
   h1 { font-size: 1.35rem; margin: 0 0 .35rem; }
-  .lead { color: #9aa0a6; margin: 0 0 1.5rem; font-size: .95rem; }
+  .lead { color: var(--muted); margin: 0 0 1.5rem; font-size: .95rem; }
   fieldset { border: 0; padding: 0; margin: 0 0 1.5rem; }
   legend { padding: 0 0 .6rem; font-size: .8rem; letter-spacing: .04em;
-           text-transform: uppercase; color: #9aa0a6; }
+           text-transform: uppercase; color: var(--muted); }
   .grid { display: grid; gap: .5rem; grid-template-columns: repeat(2, 1fr); }
   .choice input { position: absolute; opacity: 0; pointer-events: none; }
   .choice span {
     display: block; padding: .7rem .5rem; text-align: center; cursor: pointer;
-    border: 1px solid #2b2f36; border-radius: .7rem; background: #16191f;
+    border: 1px solid var(--line); border-radius: 14px; background: var(--card);
+    transition: border-color .15s, background .15s, box-shadow .15s;
   }
-  .choice input:checked + span { border-color: #4c8dff; background: #1b2333; }
-  .choice input:focus-visible + span { outline: 2px solid #4c8dff; outline-offset: 2px; }
-  .choice small { display: block; color: #9aa0a6; font-size: .8rem; }
+  .choice input:checked + span {
+    border-color: var(--accent); background: rgba(255, 61, 154, 0.14);
+    box-shadow: 0 0 18px rgba(255, 61, 154, 0.28);
+  }
+  .choice input:focus-visible + span { outline: 2px solid var(--violet); outline-offset: 2px; }
+  .choice small { display: block; color: var(--muted); font-size: .8rem; }
   button {
-    width: 100%; padding: .9rem 1rem; font: inherit; font-weight: 600;
-    color: #fff; background: #2f6fed; border: 0; border-radius: .7rem; cursor: pointer;
+    width: 100%; padding: .9rem 1rem; font: inherit; font-weight: 700;
+    color: #fff; border: 0; border-radius: 14px; cursor: pointer;
+    background: linear-gradient(135deg, #FF4FA6 0%, #C31E9B 100%);
+    box-shadow: 0 0 26px rgba(255, 61, 154, 0.34);
   }
-  button[disabled] { opacity: .55; cursor: default; }
-  .note { margin: 1rem 0 0; font-size: .85rem; color: #9aa0a6; }
-  .box { margin: 1.5rem 0 0; padding: 1rem; border: 1px solid #2b2f36;
-         border-radius: .7rem; background: #16191f; }
+  button[disabled] { opacity: .55; cursor: default; box-shadow: none; }
+  .note { margin: 1rem 0 0; font-size: .85rem; color: var(--muted); }
+  .box { margin: 1.5rem 0 0; padding: 1rem; border: 1px solid var(--line);
+         border-radius: 18px; background: var(--card); }
   .box h2 { font-size: 1rem; margin: 0 0 .6rem; }
   .row { display: flex; justify-content: space-between; gap: .75rem; padding: .3rem 0; }
   .row b { font-variant-numeric: tabular-nums; }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-         font-size: .85rem; word-break: break-all; }
-  .error { color: #ff8080; }
-  a { color: #6ea8ff; }
+         font-size: .85rem; word-break: break-all; color: var(--pink); }
+  .error { color: #FB7185; }
+  a { color: var(--pink); }
   [hidden] { display: none !important; }
 </style>
 </head>
 <body>
 <main>
+  <!-- Знак бренда — та же корона, что в кабинете (webapp/index.html), только
+       вписанная в страницу: человек попадает сюда по ссылке из бота и должен
+       сразу видеть, что оплата на нашем сервисе, а не на чужом. -->
+  <div class="brand">
+    <svg viewBox="0 0 120 120" aria-hidden="true">
+      <defs>
+        <linearGradient id="payCrown" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#FFFFFF" />
+          <stop offset="100%" stop-color="#FFA6D6" />
+        </linearGradient>
+      </defs>
+      <path d="M28 86V48l16 14 16-28 16 28 16-14v38z" fill="url(#payCrown)" />
+      <rect x="26" y="84" width="68" height="15" rx="5.5" fill="url(#payCrown)" />
+      <circle cx="28" cy="45" r="5.4" fill="#A855F7" />
+      <circle cx="60" cy="31" r="6.2" fill="#22D3EE" />
+      <circle cx="92" cy="45" r="5.4" fill="#A855F7" />
+    </svg>
+    <b>ДОЧА</b>
+  </div>
   <h1>Оплата абонемента</h1>
   <p class="lead">
     Страница сервиса вне Telegram. Внутри бота абонемент продаётся за звёзды,

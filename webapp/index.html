@@ -3,61 +3,50 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#04120D">
-  <title>PAPA · Кабинет автопересылки</title>
+  <meta name="theme-color" content="#0A0510">
+  <title>ДОЧА · Кабинет автоматизаций</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <!-- ── Маскот: Папа, ночной портье ──
-       Один <symbol> на всё: логотип в шапке, заставка загрузки, пустые состояния.
-       Анимации живут в CSS, чтобы их можно было отключить prefers-reduced-motion. -->
+  <!-- ── Знак бренда: корона ──
+       Один <symbol> на всё: заставка, шапка, герой-блок, кнопка в центре
+       навигации и пустые состояния. Анимации живут в CSS, чтобы их снимал
+       prefers-reduced-motion. -->
   <svg class="sprite" aria-hidden="true" focusable="false">
     <defs>
-      <radialGradient id="papaGlow">
-        <stop offset="0%" stop-color="#F5D98A" stop-opacity="0.55" />
-        <stop offset="100%" stop-color="#F5D98A" stop-opacity="0" />
+      <linearGradient id="crownGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="#FFFFFF" />
+        <stop offset="100%" stop-color="#FFA6D6" />
+      </linearGradient>
+      <radialGradient id="crownHalo">
+        <stop offset="0%" stop-color="#FF3D9A" stop-opacity="0.55" />
+        <stop offset="100%" stop-color="#FF3D9A" stop-opacity="0" />
       </radialGradient>
     </defs>
-    <symbol id="papa" viewBox="0 0 120 120">
-      <path d="M12 116V58L60 16l48 42v58z" fill="rgba(16,185,129,0.09)"
-            stroke="rgba(198,166,104,0.35)" stroke-width="1.2" />
-      <circle class="papa__glow" cx="28" cy="81" r="21" fill="url(#papaGlow)" />
-      <circle cx="60" cy="66" r="23" fill="#0E2C20" stroke="rgba(198,166,104,0.55)" stroke-width="1.4" />
-      <path d="M38 52a22 22 0 0 1 44 0z" fill="#0A2118" stroke="rgba(198,166,104,0.6)" stroke-width="1.3" />
-      <rect x="33" y="50" width="54" height="6" rx="1.5" fill="#123527"
-            stroke="rgba(198,166,104,0.6)" stroke-width="1.1" />
-      <text class="papa__mono" x="60" y="43" text-anchor="middle" font-size="14"
-            font-weight="700" fill="#E8D09C" font-family="Georgia, 'Times New Roman', serif">P</text>
-      <g class="papa__eyes" fill="#E8D09C">
-        <ellipse cx="52" cy="65" rx="2.6" ry="3.2" />
-        <ellipse cx="68" cy="65" rx="2.6" ry="3.2" />
-      </g>
-      <path d="M45 79q7-6 15-1 8-5 15 1" fill="none" stroke="#C6A668"
-            stroke-width="2.4" stroke-linecap="round" />
-      <path d="M54 85q6 4 12 0" fill="none" stroke="rgba(232,208,156,0.75)"
-            stroke-width="1.6" stroke-linecap="round" />
-      <path d="M28 68v-5" stroke="rgba(198,166,104,0.8)" stroke-width="1.2" />
-      <circle class="papa__lantern" cx="28" cy="80" r="5" fill="#F5D98A" />
-      <path d="M23.5 74h9M23.5 86h9" stroke="rgba(198,166,104,0.9)" stroke-width="1.4" />
-      <g class="papa__bob">
-        <rect x="80" y="80" width="22" height="14" rx="1" transform="rotate(-8 91 87)"
-              fill="#0A2118" stroke="rgba(198,166,104,0.7)" stroke-width="1.2" />
-        <path d="M82.5 82.5l8.5 6.5 8.5-6.5" transform="rotate(-8 91 87)" fill="none"
-              stroke="rgba(198,166,104,0.6)" stroke-width="1" />
-      </g>
-      <g class="papa__bob2">
-        <rect x="84" y="71" width="20" height="12" rx="1" transform="rotate(6 94 77)"
-              fill="#123527" stroke="rgba(198,166,104,0.55)" stroke-width="1.1" />
+    <symbol id="crown" viewBox="0 0 120 120">
+      <circle class="crown__glow" cx="60" cy="62" r="42" fill="url(#crownHalo)" />
+      <path d="M28 86V48l16 14 16-28 16 28 16-14v38z" fill="url(#crownGrad)"
+            stroke="rgba(120,10,80,0.32)" stroke-width="1.4" stroke-linejoin="round" />
+      <rect x="26" y="84" width="68" height="15" rx="5.5" fill="url(#crownGrad)"
+            stroke="rgba(120,10,80,0.32)" stroke-width="1.4" />
+      <circle cx="28" cy="45" r="5.4" fill="#A855F7" />
+      <circle cx="60" cy="31" r="6.2" fill="#22D3EE" />
+      <circle cx="92" cy="45" r="5.4" fill="#A855F7" />
+      <circle cx="44" cy="91.5" r="3.2" fill="#C31E9B" opacity="0.75" />
+      <circle cx="60" cy="91.5" r="4" fill="#C31E9B" opacity="0.85" />
+      <circle cx="76" cy="91.5" r="3.2" fill="#C31E9B" opacity="0.75" />
+      <g class="crown__spark" fill="#FFE3F2">
+        <path d="M104 24l1.8 5.2 5.2 1.8-5.2 1.8L104 38l-1.8-5.2-5.2-1.8 5.2-1.8z" />
+        <path d="M17 30l1.3 3.7 3.7 1.3-3.7 1.3L17 40l-1.3-3.7-3.7-1.3 3.7-1.3z" />
       </g>
     </symbol>
   </svg>
-
   <!-- Заставка первой загрузки мини-аппа -->
   <div class="boot" id="boot" role="status" aria-live="polite">
-    <svg class="mascot mascot--lg" viewBox="0 0 120 120" aria-hidden="true"><use href="#papa" /></svg>
-    <div class="boot__title">PAPA</div>
-    <div class="boot__sub">ночной портье · открываю кабинет</div>
+    <svg class="mascot mascot--lg" viewBox="0 0 120 120" aria-hidden="true"><use href="#crown" /></svg>
+    <div class="boot__title">ДОЧА</div>
+    <div class="boot__sub">открываю кабинет</div>
     <div class="boot__bar"><span></span></div>
   </div>
 
@@ -65,29 +54,68 @@
   <header class="header">
     <div class="header__left">
       <svg class="mascot mascot--logo" viewBox="0 0 120 120" role="img"
-           aria-label="Папа, ночной портье"><use href="#papa" /></svg>
+           aria-label="ДОЧА"><use href="#crown" /></svg>
       <div>
-        <div class="header__title" data-text="Кабинет">Кабинет</div>
-        <div class="header__sub" id="headerSub">автопересылка</div>
+        <div class="header__title">ДОЧА</div>
+        <div class="header__sub" id="headerSub">кабинет автоматизаций</div>
       </div>
     </div>
     <button class="icon-btn" id="settingsBtn" aria-label="Настройки">⚙️</button>
   </header>
 
-  <!-- Контент -->
   <main class="content">
+    <!-- ── Вкладка: Главная ── -->
+    <section class="tab" id="tab-home" aria-label="Главная">
+      <!-- Картинку кладут в webapp/assets/hero.webp и включают через
+           --hero-image (см. .hero__art). Пока файла нет — блок живёт на
+           градиентах, без «битой картинки» и без пустого места. -->
+      <div class="hero">
+        <div class="hero__art" aria-hidden="true"></div>
+        <div class="hero__body">
+          <div class="hero__mark">
+            <svg viewBox="0 0 120 120" aria-hidden="true"><use href="#crown" /></svg>
+            <div class="hero__name">ДОЧА</div>
+          </div>
+          <div class="hero__tag">папина дочка на связи</div>
+          <div class="hero__online"><i aria-hidden="true"></i><b id="heroStatus">кабинет открыт</b></div>
+        </div>
+      </div>
+
+      <!-- Умный поиск по командам: разбор фразы локальный, без внешних AI. -->
+      <form class="prompt" id="promptForm" autocomplete="off">
+        <input type="text" id="promptInput" placeholder="Что сделаем сегодня?"
+               aria-label="Что сделаем сегодня">
+        <button class="prompt__go" type="submit" aria-label="Подобрать команду">➜</button>
+      </form>
+      <div class="prompt-hits" id="promptHits"></div>
+      <div class="section-label">быстрый старт</div>
+      <div class="tiles" id="homeTiles"></div>
+
+      <div class="row-head">
+        <div class="row-head__title">текущие задачи</div>
+        <button class="row-head__link" type="button" data-goto="tasks">смотреть все</button>
+      </div>
+      <div class="list" id="homeTasks"></div>
+
+      <button class="btn btn--primary btn--block btn--big cta" id="homeCreate">создать задачу</button>
+    </section>
     <!-- ── Вкладка: Команды ── -->
-    <section class="tab" id="tab-commands" aria-label="Команды">
+    <section class="tab hidden" id="tab-commands" aria-label="Команды">
+      <div class="screen__title">Команды</div>
+      <div class="screen__sub">Готовые сценарии: выберите — дочка сама соберёт задачу.</div>
       <div class="search">
         <span class="search__icon" aria-hidden="true">🔍</span>
         <input type="text" id="commandSearch" placeholder="Поиск команды"
                autocomplete="off" aria-label="Поиск команды">
       </div>
+      <div class="chips" id="commandTags" role="tablist" aria-label="Группы команд"></div>
       <div class="cards" id="commandList"></div>
     </section>
 
     <!-- ── Вкладка: Задачи ── -->
     <section class="tab hidden" id="tab-tasks" aria-label="Задачи">
+      <div class="screen__title">Задачи</div>
+      <div class="screen__sub" id="taskSummary">Что уже работает и что стоит на паузе.</div>
       <div class="segmented" id="taskStatus" role="tablist" aria-label="Статус задач">
         <button class="seg is-active" data-status="active" role="tab" aria-selected="true">Активные</button>
         <button class="seg" data-status="paused" role="tab" aria-selected="false">На паузе</button>
@@ -104,20 +132,21 @@
     -->
     <button class="fab hidden" id="addTaskBtn" aria-hidden="true">＋ Запустить задачу</button>
 
-    <!-- ── Вкладка: Чаты ── -->
+    <!-- ── Вкладка: Чаты (шаг мастера и раздел «Ещё») ── -->
     <section class="tab hidden" id="tab-chats" aria-label="Чаты">
+      <div class="screen__title">Чаты</div>
+      <div class="screen__sub">Отметьте, куда работать. Можно несколько — для рассылки сразу в группу чатов.</div>
       <div class="search">
         <span class="search__icon" aria-hidden="true">🔍</span>
         <input type="text" id="chatSearch" placeholder="Название, тема или @username"
                autocomplete="off" aria-label="Поиск чата">
       </div>
-      <div class="chats-hint">
-        Нажмите на чаты, чтобы выбрать. Можно несколько — для рассылки сразу в несколько чатов.
-      </div>
       <div class="chips" id="chatTags"></div>
+      <div class="chats-hint">
+        Нажмите на чаты, чтобы выбрать — снизу появится панель действий.
+      </div>
       <div class="list" id="chatList"></div>
     </section>
-
     <!-- Панель действий над выбранными чатами вынесена из #tab-chats по той же
          причине, что и FAB: `position: fixed` внутри вкладки считался от самой
          вкладки, и панель зависала посреди списка, закрывая чаты.
@@ -128,16 +157,19 @@
         <span class="chat-bar__sum" id="chatBarSummary"></span>
       </div>
       <div class="chat-bar__btns">
-        <button class="btn btn--primary" data-chat-action="broadcast" title="Рассылка в выбранные чаты">📣 Рассылка</button>
+        <button class="btn btn--primary" data-chat-action="mailing" title="Свои сообщения по выбранным чатам, по кругу">📨 Рассылка</button>
+        <button class="btn" data-chat-action="broadcast" title="Один пост из источника — во все выбранные чаты">📣 Пост в чаты</button>
         <button class="btn" data-chat-action="forward" title="Переслать в выбранный чат">🔁 Пересылка</button>
         <button class="btn" data-chat-action="poster" title="Авто-постинг в выбранный чат">📤 Авто-постинг</button>
         <button class="btn" data-chat-action="parser" title="Спарсить аудиторию выбранного чата">🕵️ Парсер</button>
         <button class="btn chat-bar__clear" data-chat-action="clear" title="Сбросить выбор">✕</button>
       </div>
     </div>
-
-    <!-- ── Вкладка: Аккаунты ── -->
+    <!-- ── Вкладка: Аккаунты и подписка (открывается из «Ещё») ── -->
     <section class="tab hidden" id="tab-accounts" aria-label="Аккаунты">
+      <div class="screen__title">Аккаунты</div>
+      <div class="screen__sub">Подписка живёт в копилке днями, аккаунты подключаются здесь же.</div>
+
       <div class="section-label">подписка</div>
       <div class="card card--sub">
         <div class="sub__top">
@@ -172,23 +204,41 @@
       <button class="card card--add" id="addAccountBtn">＋ Добавить аккаунт</button>
       <div class="list" id="accountList"></div>
     </section>
+
+    <!-- ── Вкладка: Ещё ── -->
+    <section class="tab hidden" id="tab-more" aria-label="Ещё">
+      <div class="screen__title">Ещё</div>
+      <div class="screen__sub">Всё, что не нужно каждый день, но должно быть под рукой.</div>
+      <div class="settings" id="moreList"></div>
+      <div class="section-label">о кабинете</div>
+      <div class="card">
+        <div class="card__title">ДОЧА</div>
+        <div class="card__desc" id="aboutLine">Кабинет автоматизаций Telegram.</div>
+      </div>
+    </section>
   </main>
-
-  <!-- Нижняя навигация -->
+  <!-- Нижняя навигация: пять слотов, в центре корона — «создать задачу» -->
   <nav class="nav" aria-label="Разделы кабинета">
-    <button class="nav__item is-active" data-tab="commands" aria-current="page">
+    <button class="nav__item is-active" data-tab="home" aria-current="page">
+      <span aria-hidden="true">🏠</span><i>Главная</i></button>
+    <button class="nav__item" data-tab="commands">
       <span aria-hidden="true">🪄</span><i>Команды</i></button>
-    <button class="nav__item" data-tab="tasks"><span aria-hidden="true">✅</span><i>Задачи</i></button>
-    <button class="nav__item" data-tab="chats"><span aria-hidden="true">💬</span><i>Чаты</i></button>
-    <button class="nav__item" data-tab="accounts"><span aria-hidden="true">👤</span><i>Аккаунты</i></button>
+    <div class="nav__crown">
+      <button id="crownBtn" aria-label="Создать задачу">
+        <svg viewBox="0 0 120 120" aria-hidden="true"><use href="#crown" /></svg>
+      </button>
+    </div>
+    <button class="nav__item" data-tab="tasks">
+      <span aria-hidden="true">✅</span><i>Задачи</i></button>
+    <button class="nav__item" data-tab="more">
+      <span aria-hidden="true">☰</span><i>Ещё</i></button>
   </nav>
-
   <!-- Панель настроек -->
   <div class="sheet" id="settingsSheet" role="dialog" aria-modal="true" aria-label="Настройки">
     <div class="sheet__backdrop" data-close></div>
     <div class="sheet__panel">
       <div class="sheet__head">
-        <div class="sheet__title">НАСТРОЙКИ</div>
+        <div class="sheet__title">Настройки</div>
         <button class="icon-btn" data-close aria-label="Закрыть">✕</button>
       </div>
       <div class="settings" id="settingsList"></div>
@@ -224,7 +274,6 @@
       <div class="results" id="resultsBody"></div>
     </div>
   </div>
-
   <!-- Подключение аккаунта: номер → код из Telegram → облачный пароль 2FA.
        Вход проходит здесь целиком. Раньше кнопка «Добавить аккаунт» умела
        единственное — открыть чат с ботом, и человек уходил из кабинета на

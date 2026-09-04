@@ -27,6 +27,9 @@ from dataclasses import dataclass
 
 from loguru import logger
 from telethon.errors import (
+    ApiIdInvalidError,
+    ApiIdPublishedFloodError,
+    FloodWaitError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     PhoneNumberBannedError,
@@ -184,6 +187,38 @@ async def start(user_id: int, phone_raw: str) -> LoginStep:
         raise ValidationError("Telegram не знает такой номер. Проверьте и введите заново.") from None
     except PhoneNumberBannedError:
         raise ValidationError("Этот номер заблокирован в Telegram. Подключите другой.") from None
+    except ApiIdPublishedFloodError:
+        # Отказ не человеку, а сервису: ключи api_id/api_hash взяты из
+        # официального клиента, и Telegram не даёт входить по опубликованной
+        # паре. Номер тут ни при чём, менять его бессмысленно.
+        logger.error(
+            "Вход #{}: Telegram отказал — ключи API опубликованы. Нужны свои "
+            "API_ID/API_HASH с my.telegram.org/apps",
+            user_id,
+        )
+        raise FeatureUnavailable(
+            "Подключение аккаунтов сейчас невозможно: у сервиса публичные ключи "
+            "Telegram API. Владельцу — получить свои api_id и api_hash на "
+            "my.telegram.org/apps и прописать в .env.",
+            feature="account_login",
+            status="api_keys_public",
+        ) from None
+    except ApiIdInvalidError:
+        logger.error("Вход #{}: Telegram не принял API_ID/API_HASH сервиса", user_id)
+        raise FeatureUnavailable(
+            "Подключение аккаунтов сейчас невозможно: Telegram не принял ключи "
+            "API сервиса. Владельцу — проверить API_ID и API_HASH в .env.",
+            feature="account_login",
+            status="api_keys_invalid",
+        ) from None
+    except FloodWaitError as exc:
+        # Точный срок ожидания важнее фразы «попробуйте позже»: иначе человек
+        # долбит кнопку и продлевает лимит.
+        wait = int(getattr(exc, "seconds", 0) or 0)
+        human = f"{wait // 60} мин" if wait >= 60 else f"{wait} сек"
+        raise ConflictError(
+            f"Telegram просит подождать {human} перед новым запросом кода на этот номер."
+        ) from None
     except Exception as exc:  # noqa: BLE001 — текст ошибки нужен человеку
         logger.exception("Не удалось отправить код на {}", phone)
         raise ConflictError(f"Не удалось отправить код: {type(exc).__name__}") from exc

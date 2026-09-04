@@ -14,6 +14,8 @@ from datetime import timedelta
 
 import pytest
 from telethon.errors import (
+    ApiIdPublishedFloodError,
+    FloodWaitError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     PhoneNumberBannedError,
@@ -246,6 +248,36 @@ async def test_start_explains_telegram_refusal(gateway, user, error, expected):
 
     assert expected in info.value.message
     assert await _pending(user) is None  # незавершённого входа не осталось
+
+
+async def test_start_blames_service_keys_not_the_phone(gateway, user):
+    """Опубликованные api_id/api_hash — беда сервиса, а не номера.
+
+    Текст про «проверьте номер» здесь врал бы: человек сменит номер, получит тот
+    же отказ и уйдёт. Отвечаем как о недоступной возможности (кабинет на 503
+    закрывает шторку входа) и подсказываем владельцу, что делать.
+    """
+    gateway.send_error = ApiIdPublishedFloodError(request=None)
+
+    with pytest.raises(FeatureUnavailable) as info:
+        await accounts_login.start(user, PHONE)
+
+    assert "my.telegram.org" in info.value.message
+    assert info.value.feature_status == "api_keys_public"
+    assert gateway.sent == []
+    assert await _pending(user) is None
+
+
+async def test_start_reports_exact_flood_wait(gateway, user):
+    """Срок ожидания называем: «попробуйте позже» превращается в долбёж кнопки."""
+    gateway.send_error = FloodWaitError(request=None)
+    gateway.send_error.seconds = 300
+
+    with pytest.raises(ConflictError) as info:
+        await accounts_login.start(user, PHONE)
+
+    assert "5 мин" in info.value.message
+    assert await _pending(user) is None
 
 # ─────────────────────────────── шаг 2: код ───────────────────────────────────
 
@@ -656,3 +688,59 @@ async def test_delete_account_endpoint_removes_session(client, auth_headers, gat
     # Повторное удаление и мусор в пути — 404, а не 500.
     assert (await client.delete(f"/api/accounts/{account_id}", headers=auth_headers)).status == 404
     assert (await client.delete("/api/accounts/мусор", headers=auth_headers)).status == 404
+
+
+# ── Контракт настоящего шлюза ────────────────────────────────────────────────
+# Всё выше проверено на FakeGateway, а он ловит SessionPasswordNeededError из
+# sign_in_code. Настоящий ClientManager эту ошибку однажды глотал и возвращал
+# сессию, как при удачном входе: сценарий считал код принятым целиком, шаг с
+# облачным паролем не наступал никогда, а неавторизованная сессия падала на
+# итоговой проверке — «Аккаунт не подтверждён: Не удалось получить данные
+# аккаунта». Фальшивый шлюз такого не покажет, поэтому контракт закреплён здесь.
+
+
+class FakeTelethonClient:
+    """Клиент Telethon без сети: отвечает на sign_in тем, что попросил тест."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.connected = False
+        self.disconnected = False
+        self.session = type("FakeSession", (), {"save": staticmethod(lambda: SIGNED)})()
+
+    async def connect(self) -> None:
+        self.connected = True
+
+    async def sign_in(self, **kwargs) -> None:
+        if self.error is not None:
+            raise self.error
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+
+
+async def test_gateway_lets_2fa_request_through(monkeypatch) -> None:
+    """Требование облачного пароля обязано дойти до сценария, а не пропасть."""
+    client = FakeTelethonClient(SessionPasswordNeededError(request=None))
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="": client)
+
+    with pytest.raises(SessionPasswordNeededError):
+        await manager.sign_in_code(
+            phone=PHONE, code="11111", session_string=SESSION, phone_code_hash="hash"
+        )
+
+    # Соединение закрывается и на ошибке: иначе висит сокет на каждый вход.
+    assert client.disconnected
+
+
+async def test_gateway_returns_session_when_code_is_enough(monkeypatch) -> None:
+    """Без 2FA шлюз отдаёт сохранённую сессию — её сценарий и записывает."""
+    client = FakeTelethonClient()
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="": client)
+
+    saved = await manager.sign_in_code(
+        phone=PHONE, code="11111", session_string=SESSION, phone_code_hash="hash"
+    )
+
+    assert saved == SIGNED
+    assert client.connected and client.disconnected
