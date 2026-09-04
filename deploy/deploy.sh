@@ -26,6 +26,7 @@ rsync -av --delete \
   --exclude 'venv' \
   --exclude '__pycache__' \
   --exclude '.pytest_cache' \
+  --exclude '.DS_Store' \
   --exclude 'data/*' \
   --exclude 'logs/*' \
   --exclude '.env' \
