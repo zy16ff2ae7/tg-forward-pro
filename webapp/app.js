@@ -40,6 +40,12 @@ const state = {
   selectedChats: [],       // объекты выбранных чатов (полные, не только id) —
                            // иначе при поиске выборка «исчезает» с экрана,
                            // и действия над выбранным работать перестают.
+  // Шторка выбора: чаты для поля формы (mode 'chats') или сохранённые
+  // сообщения для рассылки (mode 'library'). Одна шторка на оба случая —
+  // список с отметками и поиском у них одинаковый.
+  picker: { mode: 'chats', key: null, multi: false, chosen: [], chats: [] },
+  library: [],             // сохранённые сообщения (/api/library)
+  libraryPick: [],         // id сообщений, выбранных в форме рассылки
   features: {
     account_login_enabled: true,
     account_login_status: 'ready',
@@ -50,12 +56,25 @@ const state = {
    Порядок полей в шторке задаёт сама команда, а не этот словарь. */
 const FIELD_SPEC = {
   account: { label: 'Аккаунт', control: 'select' },
-  source: { label: 'Источник', placeholder: '@channel или ссылка t.me/...' },
-  target: { label: 'Приёмник', placeholder: '@my_channel или ссылка' },
+  // pick — у поля есть кнопка «выбрать чат»: 'one' ставит один чат, 'many'
+  // собирает список через запятую. Руками вписать тоже можно: поле обычное.
+  source: {
+    label: 'Источник',
+    placeholder: '@channel или ссылка t.me/...',
+    note: 'кнопка «выбрать» покажет чаты аккаунта',
+    pick: 'one',
+  },
+  target: {
+    label: 'Приёмник',
+    placeholder: '@my_channel или ссылка',
+    note: 'кнопка «выбрать» покажет чаты аккаунта',
+    pick: 'one',
+  },
   targets: {
     label: 'Получатели',
     placeholder: '@chan1, @chan2, t.me/+invite',
-    note: 'через запятую',
+    note: 'через запятую или кнопкой «выбрать»',
+    pick: 'many',
   },
   target_user: { label: 'За кем следим', placeholder: '@username или ссылка на профиль' },
   keywords: {
@@ -70,6 +89,7 @@ const FIELD_SPEC = {
     label: 'Сообщение',
     control: 'textarea',
     placeholder: 'Текст для постинга. Несколько сообщений — каждое с новой строки, уходят по очереди.',
+    note: 'каждая строка — отдельное сообщение',
   },
   interval: { label: 'Интервал (мин)', control: 'number', placeholder: '2', note: 'минимум 1 минута' },
   start: { label: 'Начало (ЧЧ:ММ)', placeholder: '00:00' },
@@ -159,8 +179,6 @@ const SMART_FALLBACK = ['copy_channel', 'broadcast', 'poster'];
 
 const SETTINGS = [
   { emoji: '👥', title: 'Рефералы', desc: 'Ссылка, зеркала и выплаты', start: 'referrals' },
-  { emoji: '💬', title: 'Сообщения', desc: 'Сохранённые тексты, медиа и репосты', start: 'messages' },
-  { emoji: '📚', title: 'Библиотека сообщений', desc: 'Публикации из вашего приватного канала', start: 'library' },
   { emoji: '🌐', title: 'Язык', desc: 'Русский', start: 'language' },
   { emoji: '📖', title: 'Гайды', desc: 'Инструкции по основным сценариям', start: 'guides' },
   { emoji: '🛟', title: 'Ресурсы', desc: 'Чат, канал и поддержка', start: 'resources' },
@@ -171,6 +189,7 @@ const SETTINGS = [
 const MORE_ITEMS = [
   { emoji: '👤', title: 'Аккаунты и подписка', desc: 'Номера, копилка дней, оплата', tab: 'accounts' },
   { emoji: '💬', title: 'Чаты', desc: 'Выбрать чаты и запустить задачу по ним', tab: 'chats' },
+  { emoji: '📚', title: 'Библиотека сообщений', desc: 'Тексты, которые уходят в рассылку', tab: 'library' },
   { emoji: '📦', title: 'Архив задач', desc: 'Завершённые и остановленные', tab: 'tasks', status: 'done' },
 ];
 
@@ -239,11 +258,11 @@ const DEMO_COMMANDS = [
   { id: 'broadcast', group: 'publish', kind: 'broadcast', emoji: '📣', title: 'Пересылка в несколько чатов', status: 'ready',
     needs: ['account', 'source', 'target', 'targets'], optional: [],
     description: 'Одно сообщение из источника — в несколько чатов сразу.',
-    hint: 'Выберите чаты во вкладке «Чаты» и нажмите «📣 Пост в чаты» — они станут получателями. Источник: сообщение из него уйдёт во все выбранные чаты.' },
+    hint: 'Источник — откуда берём пост, получатели — куда он уйдёт. Чаты отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты».' },
   { id: 'parser', group: 'audience', kind: 'parser', emoji: '🕵️', title: 'Парсер аудитории', status: 'ready',
     needs: ['account', 'source'], optional: ['limit'],
     description: 'Собирает участников чужого чата в список по вашей команде.',
-    hint: 'Выберите чат во вкладке «Чаты» и нажмите «🕵️ Парсер» — он станет источником. Запускается сразу, результат — кнопкой «Результаты».' },
+    hint: 'Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Запускается сразу, результат — кнопкой «Результаты».' },
   { id: 'autosubscribe', group: 'audience', kind: 'autosubscribe', emoji: '🤝', title: 'Автоподписка', status: 'ready',
     needs: ['account', 'targets'], optional: ['source'],
     description: 'Вступает в каналы из списка и подхватывает ссылки из источника.',
@@ -264,11 +283,11 @@ const DEMO_COMMANDS = [
   { id: 'poster', group: 'publish', kind: 'poster', emoji: '📤', title: 'Авто-постинг', status: 'ready',
     needs: ['account', 'target', 'message'], optional: ['interval', 'start', 'end'],
     description: 'Шлёт ваше сообщение в чат каждые N минут в заданном окне времени.',
-    hint: 'Чат — куда постить. Сообщений может быть несколько (каждое с новой строки) — уходят по очереди. Интервал в минутах, окно — ЧЧ:ММ.' },
+    hint: 'Приёмник — куда постить, кнопка «выбрать» покажет чаты аккаунта. Сообщений может быть несколько (каждое с новой строки) — уходят по очереди. Интервал в минутах, окно — ЧЧ:ММ.' },
   { id: 'mailing', group: 'publish', kind: 'mailing', emoji: '📨', title: 'Рассылка по чатам', status: 'ready',
     needs: ['account', 'targets', 'message'], optional: ['gap', 'cycle', 'repeats', 'typing', 'random_pick'],
     description: 'Шлёт ваши сообщения по списку чатов: по одному в круг, с паузой между чатами.',
-    hint: 'Получатели — через запятую или выбранные чаты во вкладке «Чаты». Сообщения (каждое с новой строки) уходят по очереди: первое — всем, затем второе. Пауза между чатами в секундах, «повторов 0» — крутить бесконечно.' },
+    hint: 'Получателей отмечайте кнопкой «выбрать» — или заранее во вкладке «Чаты». Сообщения наберите здесь либо возьмите из библиотеки: уходят по очереди, первое — всем, затем второе. Пауза между чатами в секундах, «кругов 0» — крутить без конца.' },
 ];
 
 const DEMO_FEATURES = { account_login_enabled: true, account_login_status: 'ready' };
@@ -348,9 +367,9 @@ function demoAccounts() {
 }
 
 const DEMO_CHATS = [
-  { id: 1001, title: 'Новости театра', is_channel: true, is_group: false },
-  { id: 1002, title: 'Афиша', is_channel: true, is_group: false },
-  { id: 1003, title: 'Мой канал', is_channel: true, is_group: false },
+  { id: 1001, title: 'Новости театра', username: 'teatr_news', is_channel: true, is_group: false },
+  { id: 1002, title: 'Афиша', username: 'afisha_demo', is_channel: true, is_group: false },
+  { id: 1003, title: 'Мой канал', username: 'my_demo_channel', is_channel: true, is_group: false },
   { id: 1004, title: 'Зеркало афиши', is_channel: true, is_group: false },
   { id: 1005, title: 'Подборки', is_channel: false, is_group: false },
   { id: 1006, title: 'Команда (чат)', is_channel: false, is_group: true },
@@ -360,6 +379,41 @@ function demoChats(path) {
   const query = (new URLSearchParams(path.split('?')[1] || '').get('q') || '').toLowerCase();
   const chats = query ? DEMO_CHATS.filter((c) => c.title.toLowerCase().includes(query)) : DEMO_CHATS;
   return { chats, total: chats.length, online: true };
+}
+
+/* Библиотека сообщений в демо: живёт в памяти страницы, как и задачи. */
+const DEMO_LIBRARY = {
+  nextId: 3,
+  items: [
+    { id: 2, title: 'Приглашение на спектакль', text: 'Приглашаем на премьеру! Билеты по ссылке в описании.', chat_id: 0, message_id: 0, created_at: '2026-09-03T18:10:00' },
+    { id: 1, title: 'Короткое напоминание', text: 'Напоминаем: показ сегодня в 19:00.', chat_id: 0, message_id: 0, created_at: '2026-09-02T09:30:00' },
+  ],
+};
+
+function demoLibrary(clean, options, method) {
+  if (method === 'POST') {
+    const body = JSON.parse(options.body || '{}');
+    const text = String(body.text || '').trim();
+    if (!text) demoFail(400, 'Дайте текст сообщения или ссылку на пост');
+    const item = {
+      id: DEMO_LIBRARY.nextId++,
+      title: (body.title || text).slice(0, 48),
+      text,
+      chat_id: 0,
+      message_id: 0,
+      created_at: new Date().toISOString(),
+    };
+    DEMO_LIBRARY.items.unshift(item);
+    return { item };
+  }
+  if (method === 'DELETE') {
+    const id = Number(clean.split('/')[3]);
+    const idx = DEMO_LIBRARY.items.findIndex((item) => item.id === id);
+    if (idx < 0) demoFail(404, 'Сообщение не найдено');
+    DEMO_LIBRARY.items.splice(idx, 1);
+    return { ok: true };
+  }
+  return { items: DEMO_LIBRARY.items };
 }
 
 function demoTasks(path) {
@@ -555,6 +609,9 @@ function demoApi(path, options = {}) {
     return { ok: true, phone: removed.phone };
   }
   if (clean === '/api/chats') return demoChats(path);
+  if (clean === '/api/library' || clean.startsWith('/api/library/')) {
+    return demoLibrary(clean, options, method);
+  }
 
   if (clean === '/api/subscription/bank') {
     const body = JSON.parse(options.body || '{}');
@@ -641,12 +698,12 @@ function applyTheme() {
 
 /* ────────────────────────────── Навигация ────────────────────────────── */
 
-const TABS = ['home', 'commands', 'tasks', 'chats', 'accounts', 'more'];
+const TABS = ['home', 'commands', 'tasks', 'chats', 'accounts', 'library', 'more'];
 
-/* В навигации пять слотов, а экранов шесть: «Чаты» и «Аккаунты» открываются из
-   «Ещё» и из мастера задач. Пока открыт такой экран, подсвечиваем «Ещё» —
-   иначе панель выглядит так, будто мы никуда не переходили. */
-const NAV_FOR_TAB = { chats: 'more', accounts: 'more' };
+/* В навигации пять слотов, а экранов больше: «Чаты», «Аккаунты» и «Библиотека»
+   открываются из «Ещё» и из мастера задач. Пока открыт такой экран, подсвечиваем
+   «Ещё» — иначе панель выглядит так, будто мы никуда не переходили. */
+const NAV_FOR_TAB = { chats: 'more', accounts: 'more', library: 'more' };
 
 function switchTab(name) {
   const tab = TABS.includes(name) ? name : 'home';
@@ -673,6 +730,7 @@ function switchTab(name) {
   if (tab === 'tasks') loadTasks();
   if (tab === 'chats') loadChats();
   if (tab === 'accounts') loadAccounts();
+  if (tab === 'library') loadLibrary();
   // Прокрутка у документа общая: без сброса новый экран открывается с середины.
   window.scrollTo({ top: 0, behavior: 'auto' });
 }
@@ -1540,6 +1598,116 @@ function renderChatTags() {
   ).join('');
 }
 
+/* ─────────────────────── Библиотека сообщений ────────────────────────── */
+
+/* Тексты, которые рассылает «Рассылка по чатам». Экран кабинета вместо двух
+   пунктов настроек («Сообщения» и «Библиотека сообщений»), которые лишь
+   открывали бота и читались как одно и то же. */
+
+async function loadLibrary() {
+  const holder = $('libraryList');
+  beginLoad(holder, 'plain', 3);
+  try {
+    const data = await api('/api/library');
+    endLoad(holder);
+    state.library = data.items || [];
+    renderLibrary();
+  } catch (error) {
+    failLoad(holder, error, 'loadLibrary');
+  }
+}
+
+function libraryPreview(item, max = 90) {
+  const text = (item.text || '').replace(/\s+/g, ' ').trim();
+  if (text) return text.length > max ? `${text.slice(0, max)}…` : text;
+  // Пост из канала лежит ссылкой (chat_id + message_id), своего текста у него нет.
+  return item.message_id ? `готовый пост · ${item.chat_id}/${item.message_id}` : 'пустое сообщение';
+}
+
+/* Две строки записи библиотеки. Заголовок у сохранённых из формы — это начало
+   того же текста, и печатать одну строку дважды незачем: вторую показываем
+   только когда заголовок — настоящее имя, а не обрезок текста. */
+function libraryLines(item, max = 90) {
+  const preview = libraryPreview(item, max);
+  const title = (item.title || '').trim();
+  const sameThing = !title || preview === title || preview.startsWith(title);
+  return sameThing ? { head: preview, sub: '' } : { head: title, sub: preview };
+}
+
+function renderLibrary() {
+  const holder = $('libraryList');
+  const label = $('libraryLabel');
+  if (label) {
+    label.textContent = state.library.length
+      ? `сохранённые · ${state.library.length}`
+      : 'сохранённые';
+  }
+  if (!state.library.length) {
+    holder.innerHTML = emptyHtml(
+      '📚',
+      'Библиотека пуста',
+      'Добавьте первый текст — он появится в выборе сообщений у рассылки.'
+    );
+    return;
+  }
+  holder.innerHTML = state.library.map((item) => {
+    const { head, sub } = libraryLines(item);
+    return `
+    <div class="lib">
+      <div class="lib__body">
+        <div class="lib__title">${esc(head)}</div>
+        ${sub ? `<div class="lib__text">${esc(sub)}</div>` : ''}
+      </div>
+      <button class="lib__del" data-action="delete-library" data-id="${item.id}"
+              aria-label="Удалить сообщение" title="Удалить из библиотеки">🗑</button>
+    </div>`;
+  }).join('');
+}
+
+/* Каждая строка — отдельное сообщение: так же читает многострочный ввод
+   рассылка, и человеку не приходится жать «сохранить» по разу на текст. */
+async function addLibraryItems(button) {
+  const field = $('libraryText');
+  const lines = String(field.value || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) {
+    toast('Напишите текст сообщения');
+    field.focus();
+    return;
+  }
+  try {
+    await withLoading(button, async () => {
+      for (const text of lines) {
+        await api('/api/library', {
+          method: 'POST',
+          body: JSON.stringify({ text, title: text.slice(0, 48) }),
+        });
+      }
+    });
+    field.value = '';
+    toast(lines.length === 1 ? 'Сообщение сохранено' : `Сохранено сообщений: ${lines.length}`);
+    await loadLibrary();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function deleteLibraryItem(id, button) {
+  const agreed = await confirmAction('Убрать сообщение из библиотеки? Задачи не остановятся — рассылка возьмёт то, что осталось.');
+  if (!agreed) return;
+  try {
+    await withLoading(button, () => api(`/api/library/${id}`, { method: 'DELETE' }));
+    // Выбор в открытой форме тоже чистим: id больше не существует.
+    state.libraryPick = state.libraryPick.filter((item) => String(item) !== String(id));
+    renderLibraryPicks();
+    await loadLibrary();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 /* ─────────────────────────────── Аккаунты ────────────────────────────── */
 
 async function loadAccounts() {
@@ -1869,9 +2037,19 @@ function fieldHtml(key) {
       </div></div>`;
   }
   if (spec.control === 'textarea') {
+    // Рассылка берёт тексты из библиотеки, поэтому у её поля есть кнопка
+    // выбора: перепечатывать сохранённое не нужно. Другим командам библиотека
+    // не положена — они читают только это поле.
+    const fromLibrary = key === 'message'
+      && state.activeCommand
+      && state.activeCommand.kind === 'mailing';
     return `<label class="field"><span>${spec.label}</span>
       <textarea id="task_${key}" rows="4" placeholder="${esc(spec.placeholder || '')}"></textarea>
       ${spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : ''}
+      ${fromLibrary ? `<div class="field__aside">
+        <button type="button" class="btn btn--pick" data-pick-library="1">📚 из библиотеки</button>
+      </div>
+      <div class="picks" id="libraryPicks"></div>` : ''}
     </label>`;
   }
   if (spec.control === 'check') {
@@ -1882,9 +2060,24 @@ function fieldHtml(key) {
     </label>`;
   }
   const type = spec.control === 'number' ? 'number' : 'text';
+  const input = `<input type="${type}" id="task_${key}"
+      placeholder="${esc(spec.placeholder || '')}" autocomplete="off">`;
+  const note = spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : '';
+  // Поле с выбором чата: рядом с ним кнопка, которая открывает список чатов
+  // аккаунта. Раньше единственным способом было вписать @username или id.
+  if (spec.pick) {
+    return `<label class="field"><span>${spec.label}</span>
+      <div class="field__row">
+        ${input}
+        <button type="button" class="btn btn--pick" data-pick="${key}"
+                data-multi="${spec.pick === 'many' ? '1' : ''}">💬 выбрать</button>
+      </div>
+      ${note}
+    </label>`;
+  }
   return `<label class="field"><span>${spec.label}</span>
-    <input type="${type}" id="task_${key}" placeholder="${esc(spec.placeholder || '')}" autocomplete="off">
-    ${spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : ''}
+    ${input}
+    ${note}
   </label>`;
 }
 
@@ -1925,6 +2118,9 @@ function openTaskSheet(command, prefill) {
     || state.commands.find((item) => item.id === 'copy_channel')
     || { id: 'copy_channel', kind: 'forward', title: 'Копирование канала', emoji: '🔁', needs: ['account', 'source', 'target'], optional: ['mode'] };
   state.mode = 'copy';
+  // Выбор из библиотеки живёт ровно одну форму: чужой выбор в новой задаче
+  // молча отправил бы не те сообщения.
+  state.libraryPick = [];
 
   $('taskSheetTitle').textContent = `${state.activeCommand.emoji || ''} ${state.activeCommand.title}`.trim();
   $('taskSheetLead').textContent = state.activeCommand.description || '';
@@ -1972,10 +2168,259 @@ function bindSheetFields() {
   });
 }
 
+/* ─────────────── Выбор мышкой: чаты и сообщения для поля ─────────────── */
+
+/* Кнопка «💬 выбрать» у полей источника, приёмника и получателей и кнопка
+   «📚 из библиотеки» у поля сообщения. До этого чат в форме можно было только
+   вписать руками — @username или числовой id, — и задача падала на любой
+   опечатке. Шторка одна на оба случая: список с отметками и поиск у них
+   одинаковые, а два почти одинаковых экрана расходятся при первой же правке.
+   Чаты берём те же, что на вкладке «Чаты»: /api/chats того аккаунта, который
+   выбран в самой форме. */
+
+/* Аккаунт для списка чатов: тот, что стоит в форме. Селект может быть ещё
+   пустым (аккаунт один и не онлайн) — тогда берём первый известный. */
+function pickerAccount() {
+  const select = $('taskAccount');
+  const id = select ? Number(select.value) : 0;
+  return state.accounts.find((item) => item.id === id) || state.accounts[0] || null;
+}
+
+function openFieldPicker(key, multi) {
+  if (!pickerAccount()) {
+    toast('Сначала подключите аккаунт');
+    return;
+  }
+  // Уже вписанное руками не теряем: разбираем поле на ссылки и отмечаем их.
+  const current = splitList(fieldValue(key));
+  state.picker = {
+    mode: 'chats',
+    key,
+    multi: Boolean(multi),
+    chosen: multi ? current : current.slice(0, 1),
+    chats: [],
+  };
+  $('pickerTitle').textContent = multi ? 'Выбор чатов' : 'Выбор чата';
+  $('pickerSearch').value = '';
+  renderPickerFooter();
+  $('pickerSheet').classList.add('is-open');
+  loadPickerChats();
+}
+
+/* Сообщения для рассылки. Отмеченные уходят в задачу ссылками на библиотеку:
+   пополнили библиотеку — рассылка подхватит новое, пересоздавать не нужно. */
+function openLibraryPicker() {
+  state.picker = {
+    mode: 'library',
+    key: 'message',
+    multi: true,
+    chosen: state.libraryPick.map(String),
+    chats: [],
+  };
+  $('pickerTitle').textContent = 'Сообщения из библиотеки';
+  $('pickerSearch').value = '';
+  renderPickerFooter();
+  $('pickerSheet').classList.add('is-open');
+  loadPickerLibrary();
+}
+
+/* Подсказка и кнопка внизу шторки. Один чат встаёт в поле сразу по нажатию,
+   поэтому кнопка «Готово» там лишняя — прячем, чтобы не искать её глазами. */
+function renderPickerFooter() {
+  const { mode, multi, chosen, key } = state.picker;
+  const label = (FIELD_SPEC[key] || {}).label || 'Поле';
+  const apply = $('pickerApply');
+  if (mode === 'library') {
+    $('pickerLead').textContent =
+      `Отметьте сообщения — рассылка отправит их по очереди. Отмечено: ${chosen.length}.`;
+  } else {
+    $('pickerLead').textContent = multi
+      ? `${label}: отмечайте чаты — уйдут в поле через запятую. Отмечено: ${chosen.length}.`
+      : `${label}: нажмите чат — он встанет в поле, шторка закроется.`;
+  }
+  apply.hidden = !multi;
+  apply.textContent = chosen.length ? `Готово · ${chosen.length}` : 'Готово';
+}
+
+/* Поиск в шторке: чаты ищет сервер, библиотеку фильтруем на месте — она
+   маленькая и уже загружена целиком. */
+function pickerReload() {
+  if (state.picker.mode === 'library') renderPickerList();
+  else loadPickerChats();
+}
+
+async function loadPickerChats() {
+  const holder = $('pickerList');
+  const account = pickerAccount();
+  if (!account) {
+    holder.innerHTML = emptyHtml('👤', 'Нет аккаунта', 'Подключите аккаунт во вкладке «Аккаунты».');
+    return;
+  }
+  const query = encodeURIComponent($('pickerSearch').value || '');
+  beginLoad(holder, 'plain', 4);
+  try {
+    const data = await api(`/api/chats?account_id=${account.id}&q=${query}`);
+    endLoad(holder);
+    state.picker.chats = data.chats || [];
+    if (!data.online) {
+      holder.innerHTML = emptyHtml('📴', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте — список чатов читает он.');
+      return;
+    }
+    renderPickerList();
+  } catch (error) {
+    failLoad(holder, error, 'loadPickerChats');
+  }
+}
+
+async function loadPickerLibrary() {
+  const holder = $('pickerList');
+  beginLoad(holder, 'plain', 3);
+  try {
+    const data = await api('/api/library');
+    endLoad(holder);
+    state.library = data.items || [];
+    renderPickerList();
+  } catch (error) {
+    failLoad(holder, error, 'loadPickerLibrary');
+  }
+}
+
+function renderPickerList() {
+  if (state.picker.mode === 'library') {
+    renderPickerLibrary();
+    return;
+  }
+  const holder = $('pickerList');
+  const chats = state.picker.chats;
+  if (!chats.length) {
+    holder.innerHTML = emptyHtml('💬', 'Ничего не найдено', 'Измените запрос — или впишите @username прямо в поле.');
+    return;
+  }
+  holder.innerHTML = chats.map((chat) => {
+    const ref = chatToRef(chat);
+    const kind = chatKind(chat);
+    const on = state.picker.chosen.includes(ref);
+    return `
+      <button type="button" class="chat${on ? ' is-selected' : ''}" data-pick-ref="${esc(ref)}">
+        <div class="chat__emoji">${kind.emoji}</div>
+        <div class="chat__body">
+          <div class="chat__title">${esc(chatTitle(chat))}</div>
+          <div class="chat__sub"><code>${esc(ref)}</code></div>
+        </div>
+        <span class="chat__kind">${kind.label}</span>
+        ${pickerMarkHtml(on)}
+      </button>`;
+  }).join('');
+}
+
+/* Отметка справа. Когда чат нужен один, пустая рамка врёт: она обещает выбор
+   пачкой, а нажатие сразу закрывает шторку — поэтому там шеврон «внутрь». */
+function pickerMarkHtml(on) {
+  if (!state.picker.multi) return '<span class="chat__go" aria-hidden="true">›</span>';
+  return `<span class="chat__check" aria-hidden="true">${on ? '✓' : ''}</span>`;
+}
+
+function renderPickerLibrary() {
+  const holder = $('pickerList');
+  const query = String($('pickerSearch').value || '').trim().toLowerCase();
+  const items = state.library.filter((item) =>
+    !query || `${item.title || ''} ${item.text || ''}`.toLowerCase().includes(query)
+  );
+  if (!items.length) {
+    holder.innerHTML = state.library.length
+      ? emptyHtml('📚', 'Ничего не найдено', 'Измените запрос.')
+      : emptyHtml('📚', 'Библиотека пуста', 'Наберите текст в поле «Сообщение» — он уйдёт в рассылку и сохранится сам.');
+    return;
+  }
+  holder.innerHTML = items.map((item) => {
+    const on = state.picker.chosen.includes(String(item.id));
+    const { head, sub } = libraryLines(item, 60);
+    return `
+      <button type="button" class="chat${on ? ' is-selected' : ''}" data-pick-ref="${item.id}">
+        <div class="chat__emoji">📄</div>
+        <div class="chat__body">
+          <div class="chat__title">${esc(head)}</div>
+          ${sub ? `<div class="chat__sub">${esc(sub)}</div>` : ''}
+        </div>
+        ${pickerMarkHtml(on)}
+      </button>`;
+  }).join('');
+}
+
+function togglePickerRef(ref) {
+  if (!ref) return;
+  const picker = state.picker;
+  if (!picker.multi) {
+    picker.chosen = [ref];
+    applyPicker();
+    return;
+  }
+  const idx = picker.chosen.indexOf(ref);
+  if (idx >= 0) picker.chosen.splice(idx, 1);
+  else picker.chosen.push(ref);
+  markPickerRow(ref, idx < 0);
+  renderPickerFooter();
+}
+
+/* Отметку рисуем на месте, а не перерисовкой всего списка: перерисовка сбивает
+   прокрутку в начало, и на длинном списке чатов каждая отметка отбрасывала
+   человека к первому чату. */
+function markPickerRow(ref, on) {
+  const row = [...$('pickerList').querySelectorAll('[data-pick-ref]')]
+    .find((node) => node.dataset.pickRef === String(ref));
+  if (!row) {
+    renderPickerList();
+    return;
+  }
+  row.classList.toggle('is-selected', on);
+  const mark = row.querySelector('.chat__check');
+  if (mark) mark.textContent = on ? '✓' : '';
+}
+
+function applyPicker() {
+  const { mode, key, chosen } = state.picker;
+  if (mode === 'library') {
+    state.libraryPick = chosen.map(Number).filter(Boolean);
+    renderLibraryPicks();
+    closePicker();
+    return;
+  }
+  const node = key ? $(`task_${key}`) : null;
+  if (node) node.value = chosen.join(', ');
+  closePicker();
+}
+
+/* Отмеченные сообщения рядом с полем: видно, что уйдёт, и можно снять по одному
+   не открывая шторку заново. */
+function renderLibraryPicks() {
+  const holder = $('libraryPicks');
+  if (!holder) return;
+  if (!state.libraryPick.length) {
+    holder.innerHTML = '';
+    return;
+  }
+  const chips = state.libraryPick.map((id) => {
+    const item = state.library.find((row) => Number(row.id) === Number(id));
+    const title = item ? (item.title || libraryPreview(item, 40)) : `сообщение #${id}`;
+    return `<span class="pick"><span class="pick__t">${esc(title)}</span><button type="button" class="pick__x"
+      data-library-drop="${id}" aria-label="Убрать сообщение">✕</button></span>`;
+  }).join('');
+  holder.innerHTML =
+    '<i class="field__note">уйдут из библиотеки — поле выше можно оставить пустым</i>' + chips;
+}
+
+/* Своя кнопка закрытия: общий обработчик [data-close] гасит все шторки сразу
+   и увёл бы вместе с выбором саму форму задачи. */
+function closePicker() {
+  $('pickerSheet').classList.remove('is-open');
+  state.picker = { mode: 'chats', key: null, multi: false, chosen: [], chats: [] };
+}
+
 function closeSheets() {
   const loginWasOpen = $('loginSheet').classList.contains('is-open');
   document.querySelectorAll('.sheet').forEach((sheet) => sheet.classList.remove('is-open'));
   state.activeCommand = null;
+  state.picker = { mode: 'chats', key: null, multi: false, chosen: [], chats: [] };
   // Закрыли шторку на середине входа — в списке должна появиться карточка
   // «Продолжить вход»: шаг никуда не делся, он лежит в БД на сервере.
   if (loginWasOpen && state.login.stage !== 'phone') loadAccounts();
@@ -1990,7 +2435,9 @@ function collectTaskPayload() {
   });
 
   const missing = command.needs
-    .filter((key) => !values[key])
+    // Сообщение можно не набирать, если выбрано из библиотеки: рассылка возьмёт
+    // тексты оттуда, и требовать копию того же текста в поле незачем.
+    .filter((key) => !values[key] && !(key === 'message' && state.libraryPick.length))
     .map((key) => (FIELD_SPEC[key] ? FIELD_SPEC[key].label.toLowerCase() : key));
   if (missing.length) return { error: 'Заполните: ' + missing.join(', ') };
 
@@ -2012,6 +2459,8 @@ function collectTaskPayload() {
   if (values.repeats) body.repeats = Number(values.repeats) || 0;
   if (values.typing) body.typing = true;
   if (values.random_pick) body.random_pick = true;
+  // Явный выбор из библиотеки важнее набранного текста — так же считает сервер.
+  if (state.libraryPick.length) body.library_ids = state.libraryPick;
   return { body };
 }
 
@@ -2521,6 +2970,53 @@ function bindEvents() {
   // форма задачи: поля и переключатель режима собираются при каждом открытии
   // шторки (у каждой команды свой набор), поэтому слушатели вешаются в bindSheetFields
   $('taskSubmit').addEventListener('click', submitTask);
+
+  // выбор чата мышкой: кнопка «💬 выбрать» живёт в пересобираемой разметке
+  // полей, поэтому слушатель делегированный — на контейнер.
+  $('taskFields').addEventListener('click', (event) => {
+    // Кнопки лежат внутри <label>: без preventDefault клик заодно уходит в
+    // поле и на телефоне выскакивает клавиатура поверх списка.
+    const library = event.target.closest('[data-pick-library]');
+    if (library) {
+      event.preventDefault();
+      openLibraryPicker();
+      return;
+    }
+    const drop = event.target.closest('[data-library-drop]');
+    if (drop) {
+      event.preventDefault();
+      const id = Number(drop.dataset.libraryDrop);
+      state.libraryPick = state.libraryPick.filter((item) => Number(item) !== id);
+      renderLibraryPicks();
+      return;
+    }
+    const button = event.target.closest('[data-pick]');
+    if (!button) return;
+    event.preventDefault();
+    openFieldPicker(button.dataset.pick, button.dataset.multi === '1');
+  });
+  $('pickerList').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-pick-ref]');
+    if (!item) return;
+    togglePickerRef(item.dataset.pickRef);
+  });
+  $('pickerApply').addEventListener('click', applyPicker);
+  let pickerTimer = null;
+  $('pickerSearch').addEventListener('input', () => {
+    clearTimeout(pickerTimer);
+    pickerTimer = setTimeout(pickerReload, 350);
+  });
+  document.querySelectorAll('[data-picker-close]').forEach((node) => {
+    node.addEventListener('click', closePicker);
+  });
+
+  // библиотека сообщений
+  $('libraryAdd').addEventListener('click', (event) => addLibraryItems(event.currentTarget));
+  $('libraryList').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-action="delete-library"]');
+    if (!button) return;
+    deleteLibraryItem(button.dataset.id, button);
+  });
 
   // «Повторить» в состоянии ошибки. Один delegated-слушатель на весь документ:
   // блоки ошибки пересоздаются при каждой отрисовке, и вешать слушателя на

@@ -411,6 +411,53 @@ async def test_mailing_from_the_cabinet_fills_the_library(
     assert sorted(item["text"] for item in library["items"]) == ["второе", "первое"]
 
 
+async def test_mailing_takes_the_chosen_library_without_retyping_the_text(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Сообщения выбраны в библиотеке — второй раз набирать их в форме незачем."""
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    chosen = []
+    for text in ("афиша", "напоминание"):
+        created = await client.post("/api/library", json={"text": text}, headers=auth_headers)
+        chosen.append((await created.json())["item"]["id"])
+
+    response = await client.post(
+        "/api/tasks",
+        json={
+            "command": "mailing",
+            "account_id": account_id,
+            "targets": ["@a"],
+            "library_ids": chosen,
+        },
+        headers=auth_headers,
+    )
+
+    assert response.status == 201, await response.text()
+    task = (await response.json())["task"]
+    assert task["mailing"]["messages_count"] == len(chosen)
+    # Библиотека не растёт от самого факта запуска задачи: копий текста не появилось.
+    library = await (await client.get("/api/library", headers=auth_headers)).json()
+    assert len(library["items"]) == len(chosen)
+
+
+async def test_mailing_without_text_and_without_library_is_400(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Нечего рассылать — просим текст, а не создаём молчаливую задачу."""
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+
+    response = await client.post(
+        "/api/tasks",
+        json={"command": "mailing", "account_id": account_id, "targets": ["@a"]},
+        headers=auth_headers,
+    )
+
+    assert response.status == 400
+    assert "сообщение" in (await response.json())["error"]
+
+
 async def test_mailing_without_recipients_is_400(
     client, auth_headers, create_account, login_open, resolved_chats
 ):

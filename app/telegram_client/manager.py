@@ -422,6 +422,10 @@ class ClientManager:
                 {
                     "id": dialog.id,
                     "title": title,
+                    # Ник отдаём кабинету: по нему чат подписан в списке, и выбор
+                    # мышью уезжает в задачу как @username, а не «голым» id —
+                    # такую ссылку resolve_chat находит и без списка диалогов.
+                    "username": getattr(entity, "username", None) or "",
                     "is_channel": bool(getattr(entity, "broadcast", False)),
                     "is_group": bool(getattr(entity, "megagroup", False)),
                 }

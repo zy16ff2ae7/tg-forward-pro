@@ -679,6 +679,31 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
         texts = sorted(str(item.get("text")) for item in (body or {}).get("items") or [])
         rep.check("тексты из формы легли в библиотеку", texts == ["второе", "первое"], f"{texts}")
 
+        # Кабинет умеет не перепечатывать сохранённое: отмеченные в библиотеке
+        # сообщения уходят в задачу ссылками (library_ids), а поле «Сообщение»
+        # остаётся пустым. Проверяем, что такая задача заводится и знает, сколько
+        # у неё текстов.
+        lib_ids = [int(item.get("id") or 0) for item in (body or {}).get("items") or []]
+        status, from_lib = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "mailing",
+                "account_id": account_id,
+                "targets": ["@smoke-one"],
+                "library_ids": lib_ids,
+            },
+        )
+        lib_task = (from_lib or {}).get("task") or {}
+        lib_info = lib_task.get("mailing") or {}
+        rep.check(
+            "рассылка из библиотеки — без текста в форме",
+            status == 201 and lib_info.get("messages_count") == len(lib_ids),
+            f"статус {status}, {lib_info}",
+        )
+        lib_task_id = int(lib_task.get("id") or 0)
+        if lib_task_id:
+            await cab.delete(f"/api/tasks/{lib_task_id}")
+
         status, body = await cab.post(
             "/api/tasks",
             json={

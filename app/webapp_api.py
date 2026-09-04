@@ -388,7 +388,11 @@ async def create_task(request: web.Request) -> web.Response:
     if "targets" in needs and not targets:
         missing.append("получателей")
     if "message" in needs and not str(payload.get("message") or "").strip():
-        missing.append("сообщение")
+        # Рассылке текст в форме не нужен, если сообщения выбраны из библиотеки:
+        # оттуда их и берёт планировщик, а копия того же текста в поле только
+        # плодила бы дубли записей.
+        if not (kind == "mailing" and _as_ids(payload.get("library_ids"))):
+            missing.append("сообщение")
     if missing:
         return _json({"error": "Укажите: " + ", ".join(missing)}, status=400)
 
@@ -839,7 +843,14 @@ async def list_chats(request: web.Request) -> web.Response:
 
     dialogs = list(await manager.list_dialogs(account_id, limit=200))
     if query:
-        dialogs = [d for d in dialogs if query in d["title"].lower()]
+        # Ищем и по названию, и по нику: в кабинете поле так и подписано
+        # («Название, тема или @username»), а раньше ник не искался вовсе.
+        needle = query.lstrip("@")
+        dialogs = [
+            d
+            for d in dialogs
+            if needle in d["title"].lower() or needle in str(d.get("username") or "").lower()
+        ]
 
     return _json({"chats": dialogs, "total": len(dialogs), "online": manager.is_online(account_id)})
 
@@ -1408,7 +1419,7 @@ COMMANDS: list[dict] = [
         "status": "ready",
         "needs": ["account", "source", "target", "targets"],
         "optional": [],
-        "hint": "Выберите чаты во вкладке «Чаты» и нажмите «📣 Пост в чаты» — они станут получателями. Источник: сообщение из него уйдёт во все выбранные чаты.",
+        "hint": "Источник — откуда берём пост, получатели — куда он уйдёт. Чаты отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты».",
     },
     {
         "id": "parser",
@@ -1420,7 +1431,7 @@ COMMANDS: list[dict] = [
         "status": "ready",
         "needs": ["account", "source"],
         "optional": ["limit"],
-        "hint": "Выберите чат во вкладке «Чаты» и нажмите «🕵️ Парсер» — он станет источником. Запускается сразу, результат — кнопкой «Результаты».",
+        "hint": "Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Запускается сразу, результат — кнопкой «Результаты».",
     },
     {
         "id": "autosubscribe",
@@ -1489,7 +1500,7 @@ COMMANDS: list[dict] = [
         "status": "ready",
         "needs": ["account", "target", "message"],
         "optional": ["interval", "start", "end"],
-        "hint": "Чат — куда постить. Сообщений может быть несколько (каждое с новой строки) — уходят по очереди. Интервал в минутах, окно — ЧЧ:ММ.",
+        "hint": "Приёмник — куда постить, кнопка «выбрать» покажет чаты аккаунта. Сообщений может быть несколько (каждое с новой строки) — уходят по очереди. Интервал в минутах, окно — ЧЧ:ММ.",
     },
     {
         "id": "mailing",
@@ -1501,7 +1512,7 @@ COMMANDS: list[dict] = [
         "status": "ready",
         "needs": ["account", "targets", "message"],
         "optional": ["gap", "cycle", "repeats", "typing", "random_pick"],
-        "hint": "Получатели — через запятую или выбранные чаты во вкладке «Чаты». Сообщения (каждое с новой строки) уходят по очереди: первое — всем, затем второе. Пауза между чатами в секундах, «повторов 0» — крутить бесконечно.",
+        "hint": "Получателей отмечайте кнопкой «выбрать» — или заранее во вкладке «Чаты». Сообщения наберите здесь либо возьмите из библиотеки: уходят по очереди, первое — всем, затем второе. Пауза между чатами в секундах, «кругов 0» — крутить без конца.",
     },
 ]
 

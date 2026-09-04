@@ -205,6 +205,28 @@
       <div class="list" id="accountList"></div>
     </section>
 
+    <!-- ── Вкладка: Библиотека сообщений (открывается из «Ещё») ──
+         Раньше «Сообщения» и «Библиотека сообщений» были двумя пунктами
+         настроек, и оба всего лишь открывали бота. Теперь это один экран
+         кабинета поверх /api/library: из него берёт тексты рассылка. -->
+    <section class="tab hidden" id="tab-library" aria-label="Библиотека сообщений">
+      <div class="screen__title">Библиотека сообщений</div>
+      <div class="screen__sub">Тексты, которые рассылает «Рассылка по чатам». Сохранили один раз — дальше выбираете мышкой в любой задаче.</div>
+
+      <div class="card">
+        <label class="field">
+          <span>Новое сообщение</span>
+          <textarea id="libraryText" rows="3"
+                    placeholder="Текст сообщения. Каждая строка — отдельное сообщение."></textarea>
+          <i class="field__note">пустые строки пропускаем</i>
+        </label>
+        <button class="btn btn--primary btn--block" id="libraryAdd">＋ Сохранить в библиотеку</button>
+      </div>
+
+      <div class="section-label" id="libraryLabel">сохранённые</div>
+      <div class="list" id="libraryList"></div>
+    </section>
+
     <!-- ── Вкладка: Ещё ── -->
     <section class="tab hidden" id="tab-more" aria-label="Ещё">
       <div class="screen__title">Ещё</div>
@@ -274,6 +296,30 @@
       <div class="results" id="resultsBody"></div>
     </div>
   </div>
+  <!-- Выбор чата мышкой для любого поля задачи: печатать @username или id
+       руками больше не нужно. Открывается поверх шторки задачи, поэтому свои
+       кнопки закрытия (data-picker-close): общий обработчик [data-close]
+       гасит все шторки сразу и увёл бы вместе с собой саму форму. -->
+  <div class="sheet sheet--over" id="pickerSheet" role="dialog" aria-modal="true" aria-label="Выбор чата">
+    <div class="sheet__backdrop" data-picker-close></div>
+    <div class="sheet__panel">
+      <div class="sheet__head">
+        <div class="sheet__title" id="pickerTitle">Выбор чата</div>
+        <button class="icon-btn" data-picker-close aria-label="Закрыть">✕</button>
+      </div>
+      <div class="form">
+        <div class="search">
+          <span class="search__icon" aria-hidden="true">🔍</span>
+          <input type="text" id="pickerSearch" placeholder="Название или @username"
+                 autocomplete="off" aria-label="Поиск чата">
+        </div>
+        <div class="sheet__lead" id="pickerLead"></div>
+        <div class="list" id="pickerList"></div>
+        <button class="btn btn--primary btn--block" id="pickerApply">Готово</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Подключение аккаунта: номер → код из Telegram → облачный пароль 2FA.
        Вход проходит здесь целиком. Раньше кнопка «Добавить аккаунт» умела
        единственное — открыть чат с ботом, и человек уходил из кабинета на
