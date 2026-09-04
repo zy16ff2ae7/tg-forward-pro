@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from datetime import timedelta
+from pathlib import Path
 
-from app.config import settings
-from app.db import repo
-from app.db.database import SessionLocal, dispose_db, init_db
-from app.security import decrypt_session, encrypt_session
-from app.telegram_client.filters import (
+# Запускают этот файл путём (`python scripts/smoke_test.py`), а тогда в sys.path
+# попадает только сама папка scripts/ — без корня проекта импорт `app` падает
+# с ModuleNotFoundError. Так же поступает scripts/smoke_api.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from app.config import settings  # noqa: E402 — только после правки sys.path
+from app.db import repo  # noqa: E402
+from app.db.database import SessionLocal, dispose_db, init_db  # noqa: E402
+from app.security import decrypt_session, encrypt_session  # noqa: E402
+from app.telegram_client.filters import (  # noqa: E402
     FilterConfig,
     default_filters,
     parse_words,
