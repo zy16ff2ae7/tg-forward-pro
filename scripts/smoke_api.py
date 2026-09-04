@@ -461,6 +461,27 @@ async def check_commands(cab: Cabinet, rep: Report) -> None:
         f"без блока: {unknown}" if unknown else "",
     )
 
+    # Четыре задачи «в чаты» внешне похожи, и в каталоге их путали. Различает их
+    # только текст карточки: название, описание и метки в подвале.
+    twins = [
+        item
+        for item in items
+        if item.get("id") in ("copy_channel", "broadcast", "poster", "mailing")
+    ]
+    rep.check(
+        "четыре задачи «в чаты» читаются как разные",
+        len(twins) == 4
+        and len({item.get("title") for item in twins}) == 4
+        and len({item.get("description") for item in twins}) == 4
+        and len({tuple(item.get("tags") or ()) for item in twins}) == 4,
+        f"{[item.get('title') for item in twins]}",
+    )
+    rep.check(
+        "у каждой команды есть метки отличий (не больше трёх)",
+        all(item.get("tags") and len(item["tags"]) <= 3 for item in items),
+        f"{[item.get('id') for item in items if not item.get('tags')]}",
+    )
+
 
 async def check_tasks(cab: Cabinet, rep: Report, account_id: int, rule_id: int) -> None:
     """Задачи: список, создание, пауза, режим, архив, результаты, удаление."""
@@ -595,7 +616,7 @@ async def check_task_actions(cab: Cabinet, rep: Report, rule_id: int) -> None:
 
 
 async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) -> None:
-    """Рассылка по чатам и библиотека сообщений: задача вместе с содержимым.
+    """Рассылка по очереди и библиотека сообщений: задача вместе с содержимым.
 
     Рассылка — единственная задача, которая заводится из кабинета не пустой:
     тексты из формы ложатся в библиотеку, оттуда их берёт планировщик. Поиск
@@ -664,7 +685,8 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
                 "command": "mailing",
                 "account_id": account_id,
                 "targets": list(chats),
-                "message": "первое\nвторое",
+                # Пустая строка делит сообщения, одиночный перенос — нет.
+                "message": "первое\n\nвторое",
                 "gap": 7,
                 "repeats": 2,
             },
@@ -693,10 +715,43 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
         texts = sorted(str(item.get("text")) for item in (body or {}).get("items") or [])
         rep.check("тексты из формы легли в библиотеку", texts == ["второе", "первое"], f"{texts}")
 
+        # Многострочный текст — одно сообщение: прайс, объявление в три ряда.
+        # Раньше резали по каждому переносу, и прайс уходил построчно.
+        price = "Приму 1 код,момент\n4000 - 552\nПриму 1 код,момент\n4500 - 585"
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "mailing",
+                "account_id": account_id,
+                "targets": ["@smoke-one"],
+                "message": price,
+            },
+        )
+        multiline = (body or {}).get("task") or {}
+        rep.check(
+            "прайс в четыре строки — одно сообщение, а не четыре",
+            status == 201 and (multiline.get("mailing") or {}).get("messages_count") == 1,
+            f"статус {status}, {(multiline.get('mailing') or {}).get('messages_count')}",
+        )
+        status, body = await cab.get("/api/library")
+        saved = [item for item in (body or {}).get("items") or [] if item.get("text") == price]
+        rep.check(
+            "переносы сохранены, а в заголовке — первая строка",
+            bool(saved) and saved[0].get("title") == "Приму 1 код,момент",
+            f"{[item.get('title') for item in saved]}",
+        )
+        multiline_id = int(multiline.get("id") or 0)
+        if multiline_id:
+            await cab.delete(f"/api/tasks/{multiline_id}")
+        for item in saved:
+            await cab.delete(f"/api/library/{int(item.get('id') or 0)}")
+
         # Кабинет умеет не перепечатывать сохранённое: отмеченные в библиотеке
         # сообщения уходят в задачу ссылками (library_ids), а поле «Сообщение»
         # остаётся пустым. Проверяем, что такая задача заводится и знает, сколько
-        # у неё текстов.
+        # у неё текстов. Список берём свежий: выше библиотеку успели пополнить и
+        # почистить, и ссылка на удалённую запись сбила бы счёт.
+        status, body = await cab.get("/api/library")
         lib_ids = [int(item.get("id") or 0) for item in (body or {}).get("items") or []]
         status, from_lib = await cab.post(
             "/api/tasks",
@@ -778,7 +833,7 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
         )
         poster = (body or {}).get("task") or {}
         rep.check(
-            f"авто-постинг на {len(many)} чатов — 201",
+            f"постинг по расписанию на {len(many)} чатов — 201",
             status == 201 and poster.get("targets_count") == len(many),
             f"статус {status}, {(body or {}).get('error') or poster.get('targets_count')}",
         )

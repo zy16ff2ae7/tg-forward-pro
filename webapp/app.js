@@ -88,8 +88,8 @@ const FIELD_SPEC = {
   message: {
     label: 'Сообщение',
     control: 'textarea',
-    placeholder: 'Текст для постинга. Несколько сообщений — каждое с новой строки, уходят по очереди.',
-    note: 'каждая строка — отдельное сообщение',
+    placeholder: 'Текст сообщения — переносы строк сохраняются.\n\nПустая строка = второе сообщение.',
+    note: 'пустая строка делит сообщения, простой перенос — нет',
   },
   interval: { label: 'Интервал (мин)', control: 'number', placeholder: '2', note: 'минимум 1 минута' },
   start: { label: 'Начало (ЧЧ:ММ)', placeholder: '00:00' },
@@ -149,7 +149,7 @@ const kindEmoji = (kind) => KIND_EMOJI[kind] || '⚙️';
    Подписи короткие: на 390 px в четыре столбца длинное название не влезает.
    Двух «пересылок» и двух «рассылок» здесь быть не должно — плитки называются
    так же, как задачи в каталоге: копия канала, один пост во все чаты,
-   авто-постинг и рассылка своих сообщений. */
+   постинг по расписанию и рассылка по очереди. */
 const TILES = [
   { id: 'copy_channel', name: 'Копия' },
   { id: 'broadcast', name: 'В чаты' },
@@ -250,7 +250,8 @@ const DEMO_STATE = {
 /* Демо-каталог повторяет COMMANDS и COMMAND_GROUPS из app/webapp_api.py:
    в демо-режиме кабинет должен выглядеть точно так же, как с сервером. */
 const DEMO_COMMAND_GROUPS = [
-  { id: 'publish', title: 'пересылка и публикация' },
+  { id: 'publish', title: 'чужие посты' },
+  { id: 'own', title: 'свои сообщения' },
   { id: 'audience', title: 'аудитория' },
   { id: 'inbox', title: 'входящее' },
   { id: 'moderation', title: 'модерация' },
@@ -259,40 +260,50 @@ const DEMO_COMMAND_GROUPS = [
 const DEMO_COMMANDS = [
   { id: 'copy_channel', group: 'publish', kind: 'forward', emoji: '🔁', title: 'Копирование канала', status: 'ready',
     needs: ['account', 'source', 'target'], optional: ['mode'],
-    description: 'Копирует новые публикации между каналами с заменами текста.' },
+    description: 'Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.',
+    tags: ['чужие посты', 'один канал → один'] },
   { id: 'broadcast', group: 'publish', kind: 'broadcast', emoji: '📣', title: 'Пересылка в несколько чатов', status: 'ready',
     needs: ['account', 'source', 'targets'], optional: [],
-    description: 'Одно сообщение из источника — в несколько чатов сразу.',
-    hint: 'Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу.' },
+    description: 'Тот же канал — сразу в десятки чатов: пост из источника уходит во все выбранные одним залпом, как только вышел.',
+    hint: 'Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу. Свой текст здесь не нужен: уходит то, что вышло в источнике.',
+    tags: ['чужие посты', 'все чаты разом', 'по факту поста'] },
   { id: 'parser', group: 'audience', kind: 'parser', emoji: '🕵️', title: 'Парсер аудитории', status: 'ready',
     needs: ['account', 'source'], optional: ['limit'],
     description: 'Собирает участников чужого чата в список по вашей команде.',
-    hint: 'Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Запускается сразу, результат — кнопкой «Результаты».' },
+    hint: 'Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Запускается сразу, результат — кнопкой «Результаты».',
+    tags: ['список участников', 'запуск вручную'] },
   { id: 'autosubscribe', group: 'audience', kind: 'autosubscribe', emoji: '🤝', title: 'Автоподписка', status: 'ready',
     needs: ['account', 'targets'], optional: ['source'],
     description: 'Вступает в каналы из списка и подхватывает ссылки из источника.',
-    hint: 'Каналы — через запятую: @chan1, t.me/+invite.' },
+    hint: 'Каналы — через запятую: @chan1, t.me/+invite.',
+    tags: ['вступает сама', 'ссылки из источника'] },
   { id: 'checks', group: 'inbox', kind: 'checks', emoji: '🧾', title: 'Ловец чеков', status: 'ready',
     needs: ['account', 'source', 'target'], optional: ['keywords'],
-    description: 'Ловит чеки и подарочные ссылки в чатах и складывает в одно место.' },
+    description: 'Ловит чеки и подарочные ссылки в чатах и складывает в одно место.',
+    tags: ['чеки и подарки', 'в один чат'] },
   { id: 'dialogs', group: 'inbox', kind: 'dialogs', emoji: '💬', title: 'Уведомления из диалогов', status: 'ready',
     needs: ['account', 'target'], optional: ['keywords'],
     description: 'Присылает входящие личные сообщения в выбранный чат.',
-    hint: 'Источник не нужен: задача слушает все личные диалоги аккаунта.' },
+    hint: 'Источник не нужен: задача слушает все личные диалоги аккаунта.',
+    tags: ['личные сообщения', 'источник не нужен'] },
   { id: 'baiting', group: 'moderation', kind: 'baiting', emoji: '🎣', title: 'Байтинг', status: 'ready',
     needs: ['account', 'source', 'target_user'], optional: ['reaction'],
-    description: 'Ставит реакцию на сообщения выбранного человека в общем чате.' },
+    description: 'Ставит реакцию на сообщения выбранного человека в общем чате.',
+    tags: ['один человек', 'реакция'] },
   { id: 'mute', group: 'moderation', kind: 'mute', emoji: '🔇', title: 'Мут', status: 'ready',
     needs: ['account', 'source', 'target_user'], optional: ['keywords'],
-    description: 'Удаляет сообщения выбранного человека в чате, где вы администратор.' },
-  { id: 'poster', group: 'publish', kind: 'poster', emoji: '📤', title: 'Авто-постинг', status: 'ready',
+    description: 'Удаляет сообщения выбранного человека в чате, где вы администратор.',
+    tags: ['один человек', 'нужны права админа'] },
+  { id: 'poster', group: 'own', kind: 'poster', emoji: '📤', title: 'Постинг по расписанию', status: 'ready',
     needs: ['account', 'targets', 'message'], optional: ['interval', 'start', 'end'],
-    description: 'Шлёт ваше сообщение в выбранные чаты каждые N минут в заданном окне времени.',
-    hint: 'Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Сообщений тоже может быть несколько (каждое с новой строки) — за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ.' },
-  { id: 'mailing', group: 'publish', kind: 'mailing', emoji: '📨', title: 'Рассылка по чатам', status: 'ready',
+    description: 'Ваше объявление висит в чатах постоянно: сам шлёт его во все выбранные каждые N минут, пока открыто окно времени.',
+    hint: 'Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Переносы строк внутри сообщения сохраняются как есть — прайс уйдёт целиком. Нужно второе сообщение — отделите его пустой строкой: за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ.',
+    tags: ['ваш текст', 'каждые N минут', 'окно времени'] },
+  { id: 'mailing', group: 'own', kind: 'mailing', emoji: '📨', title: 'Рассылка по очереди', status: 'ready',
     needs: ['account', 'targets', 'message'], optional: ['gap', 'cycle', 'repeats', 'typing', 'random_pick'],
-    description: 'Шлёт ваши сообщения по списку чатов: по одному в круг, с паузой между чатами.',
-    hint: 'Получателей отмечайте кнопкой «выбрать» — или заранее во вкладке «Чаты». Сообщения наберите здесь либо возьмите из библиотеки: уходят по очереди, первое — всем, затем второе. Пауза между чатами в секундах, «кругов 0» — крутить без конца.' },
+    description: 'Обход чатов по одному: чат — пауза — следующий, и так круг за кругом. Текст берётся здесь или из библиотеки.',
+    hint: 'Получателей отмечайте кнопкой «выбрать» — или заранее во вкладке «Чаты». Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, а пустая строка делит текст на два сообщения — уходят по очереди, первое всем, затем второе. Пауза между чатами в секундах, «кругов 0» — крутить без конца.',
+    tags: ['ваш текст', 'по одному чату', 'пауза и круги'] },
 ];
 
 const DEMO_FEATURES = { account_login_enabled: true, account_login_status: 'ready' };
@@ -420,7 +431,7 @@ function demoLibrary(clean, options, method) {
     if (!text) demoFail(400, 'Дайте текст сообщения или ссылку на пост');
     const item = {
       id: DEMO_LIBRARY.nextId++,
-      title: (body.title || text).slice(0, 48),
+      title: messageTitle(body.title || text),
       text,
       chat_id: 0,
       message_id: 0,
@@ -497,7 +508,7 @@ function demoTaskTitle(body, command) {
       const chats = demoChatList(body, command.kind);
       const many = chats.length > 1 ? `${chats.length} чат.` : (chats[0] || '');
       if (command.kind === 'broadcast') return `Пересылка: ${body.source} → ${many}`;
-      const name = command.kind === 'poster' ? 'Авто-постинг' : 'Рассылка по чатам';
+      const name = command.kind === 'poster' ? 'Постинг по расписанию' : 'Рассылка по очереди';
       if (!chats.length) return name;
       return chats.length > 1 ? `${name}: ${many}` : `${name} → ${many}`;
     }
@@ -639,19 +650,19 @@ function demoApi(path, options = {}) {
     // Дальше демо повторяет _task_view: счёт чатов у всех задач «в несколько
     // чатов», расписание у постинга, паузы и круги у рассылки. Иначе в демо на
     // карточке не видно того, что показывает сервер.
-    const lines = String(body.message || '').split('\n').filter((item) => item.trim()).length;
+    const msgs = splitMessages(body.message).length;
     if (['broadcast', 'poster', 'mailing'].includes(kind)) task.targets_count = chats.length;
     if (kind === 'poster') {
       task.interval_min = Number(body.interval) || 2;
       task.window_start = body.start || '00:00';
       task.window_end = body.end || '23:59';
-      task.messages_count = lines;
+      task.messages_count = msgs;
     }
     if (kind === 'mailing') {
       const repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
       task.mailing = {
         recipients: chats.length,
-        messages_count: (body.library_ids || []).length || lines,
+        messages_count: (body.library_ids || []).length || msgs,
         gap_seconds: Number(body.gap) || 5,
         cycle_seconds: Number(body.cycle) || 10,
         repeats,
@@ -1083,6 +1094,13 @@ function commandCardHtml(command) {
   // «На настройке» — карточка остаётся видимой, но реагирует тостом.
   const clickable = command.status === 'ready';
   const tag = `card--cmd${clickable ? '' : ' card--cmd--locked'}`;
+  // Метки — то, чем команда отличается от соседней по списку (чей текст, как
+  // расходится, когда срабатывает). Без них четыре команды «в несколько чатов»
+  // читались как одна и та же. Сервер их может не прислать (старый бэкенд) —
+  // тогда подвал остаётся со одним статусом, как раньше.
+  const tags = (command.tags || [])
+    .map((item) => `<span class="cmd__tag">${esc(item)}</span>`)
+    .join('');
   return `
     <button class="${tag}" data-command="${command.id}">
       <div class="cmd__ico ${icoClass(command.kind)}" aria-hidden="true">${command.emoji}</div>
@@ -1093,6 +1111,7 @@ function commandCardHtml(command) {
           <span class="status status--${meta.kind}">
             <span class="status__dot" aria-hidden="true"></span>${esc(meta.label)}
           </span>
+          ${tags}
         </div>
       </div>
       <span class="cmd__chevron" aria-hidden="true">›</span>
@@ -1676,7 +1695,7 @@ function renderChatTags() {
 
 /* ─────────────────────── Библиотека сообщений ────────────────────────── */
 
-/* Тексты, которые рассылает «Рассылка по чатам». Экран кабинета вместо двух
+/* Тексты, которые шлёт «Рассылка по очереди». Экран кабинета вместо двух
    пунктов настроек («Сообщения» и «Библиотека сообщений»), которые лишь
    открывали бота и читались как одно и то же. */
 
@@ -1740,34 +1759,50 @@ function renderLibrary() {
   }).join('');
 }
 
-/* Каждая строка — отдельное сообщение: так же читает многострочный ввод
-   рассылка, и человеку не приходится жать «сохранить» по разу на текст. */
+/* Сохранить набранное в библиотеку. Сообщения делит пустая строка — как и в
+   форме задачи: многострочный текст (прайс, объявление в два абзаца) остаётся
+   одной записью, а несколько текстов можно сохранить за один раз. */
 async function addLibraryItems(button) {
   const field = $('libraryText');
-  const lines = String(field.value || '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (!lines.length) {
+  const blocks = splitMessages(field.value);
+  if (!blocks.length) {
     toast('Напишите текст сообщения');
     field.focus();
     return;
   }
   try {
     await withLoading(button, async () => {
-      for (const text of lines) {
+      for (const text of blocks) {
         await api('/api/library', {
           method: 'POST',
-          body: JSON.stringify({ text, title: text.slice(0, 48) }),
+          body: JSON.stringify({ text }),
         });
       }
     });
     field.value = '';
-    toast(lines.length === 1 ? 'Сообщение сохранено' : `Сохранено сообщений: ${lines.length}`);
+    renderLibraryDraft();
+    toast(blocks.length === 1 ? 'Сообщение сохранено' : `Сохранено сообщений: ${blocks.length}`);
     await loadLibrary();
   } catch (error) {
     toast(error.message);
   }
+}
+
+/* Счёт под полем библиотеки: столько записей появится, если нажать «сохранить».
+   Без него правило «делит пустая строка» приходится проверять на результате. */
+function renderLibraryDraft() {
+  const holder = $('libraryDraft');
+  if (!holder) return;
+  const blocks = splitMessages(($('libraryText') || {}).value);
+  holder.hidden = !blocks.length;
+  if (!blocks.length) {
+    holder.innerHTML = '';
+    return;
+  }
+  const heads = blocks.slice(0, 2).map((block) => messageTitle(block, 24));
+  const tail = blocks.length > 2 ? ` и ещё ${blocks.length - 2}` : '';
+  holder.innerHTML = `<b>${blocks.length} ${messageWord(blocks.length)}</b>
+    <span>${esc(heads.join(' · ') + tail)}</span>`;
 }
 
 async function deleteLibraryItem(id, button) {
@@ -2119,8 +2154,14 @@ function fieldHtml(key) {
     const fromLibrary = key === 'message'
       && state.activeCommand
       && state.activeCommand.kind === 'mailing';
+    // Под «Сообщением» — счёт: сколько сообщений уйдёт и с чего начинается
+    // каждое. Правило «сообщения делит пустая строка» на глаз не проверить, а
+    // ошибка дорогая: набранный прайс уходил десятком отдельных отправок.
+    const counter = key === 'message'
+      ? `<div class="field__count" id="count_${key}" hidden></div>` : '';
     return `<label class="field"><span>${spec.label}</span>
       <textarea id="task_${key}" rows="4" placeholder="${esc(spec.placeholder || '')}"></textarea>
+      ${counter}
       ${spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : ''}
       ${fromLibrary ? `<div class="field__aside">
         <button type="button" class="btn btn--pick" data-pick-library="1">📚 из библиотеки</button>
@@ -2182,6 +2223,34 @@ function splitList(value) {
     .filter(Boolean);
 }
 
+/* Текст из поля «Сообщение» → сообщения. Делит их пустая строка — так же, как
+   на сервере (`_split_messages`). По одному переносу строки резать нельзя:
+   прайс или объявление в два абзаца — это одно сообщение, а не десять. */
+function splitMessages(value) {
+  return String(value || '')
+    .replace(/\r\n?/g, '\n')
+    .split(/\n[ \t]*\n+/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+}
+
+/* Имя сообщения в списке библиотеки — его первая строка (так же считает
+   сервер). Многострочный заголовок в одну строку списка не влезает. */
+function messageTitle(text, limit = 48) {
+  const head = String(text || '').split('\n').map((line) => line.trim()).find(Boolean) || '';
+  return head.length > limit ? `${head.slice(0, limit)}…` : head;
+}
+
+/* «1 сообщение» / «2 сообщения» / «5 сообщений». */
+function messageWord(n) {
+  const tail = n % 100;
+  if (tail >= 11 && tail <= 14) return 'сообщений';
+  const last = n % 10;
+  if (last === 1) return 'сообщение';
+  if (last >= 2 && last <= 4) return 'сообщения';
+  return 'сообщений';
+}
+
 /* «1 чат» / «2 чата» / «5 чатов»: счёт читают глазами, и «5 чат» выглядит
    недоделкой. */
 function chatWord(n) {
@@ -2199,6 +2268,10 @@ function chatWord(n) {
 function renderFieldCount(key) {
   const holder = $(`count_${key}`);
   if (!holder) return;
+  if (key === 'message') {
+    renderMessageCount(holder);
+    return;
+  }
   const refs = splitList(fieldValue(key));
   holder.hidden = !refs.length;
   if (!refs.length) {
@@ -2209,6 +2282,24 @@ function renderFieldCount(key) {
   holder.innerHTML = `<b>${refs.length} ${chatWord(refs.length)}</b>
     <span>${esc(refs.length > 2 ? `${head} и ещё ${refs.length - 2}` : head)}</span>
     <button type="button" data-count-clear="${key}">очистить</button>`;
+}
+
+/* Итог под «Сообщением»: сколько сообщений уйдёт и с чего начинается каждое.
+   Кнопки «очистить» здесь нет намеренно: набранный текст стереть одним
+   промахом — потеря, а ссылки в поле чатов набираются мышкой заново. */
+function renderMessageCount(holder) {
+  const blocks = splitMessages(fieldValue('message'));
+  holder.hidden = !blocks.length;
+  if (!blocks.length) {
+    holder.innerHTML = '';
+    return;
+  }
+  const heads = blocks.slice(0, 2).map((block) => messageTitle(block, 24));
+  const tail = blocks.length > 2 ? ` и ещё ${blocks.length - 2}` : '';
+  const single = blocks.length === 1 && blocks[0].includes('\n')
+    ? ' · переносы строк сохранятся' : '';
+  holder.innerHTML = `<b>${blocks.length} ${messageWord(blocks.length)}</b>
+    <span>${esc(blocks.length === 1 ? heads[0] + single : heads.join(' · ') + tail)}</span>`;
 }
 
 /* Все итоги формы разом: поля пересобираются под каждую команду, поэтому
@@ -3185,6 +3276,9 @@ function bindEvents() {
 
   // библиотека сообщений
   $('libraryAdd').addEventListener('click', (event) => addLibraryItems(event.currentTarget));
+  // Счёт под полем библиотеки живой: правило «делит пустая строка» видно сразу,
+  // а не после сохранения десятка лишних записей.
+  $('libraryText').addEventListener('input', renderLibraryDraft);
   $('libraryList').addEventListener('click', (event) => {
     const button = event.target.closest('[data-action="delete-library"]');
     if (!button) return;

@@ -57,8 +57,10 @@ KIND_LABELS: dict[str, str] = {
     "checks": "ловец чеков",
     "parser": "парсер аудитории",
     "autosubscribe": "автоподписка",
-    "poster": "авто-постинг",
-    "mailing": "рассылка по чатам",
+    # Постинг и рассылка обе шлют ваш текст по чатам, поэтому в ярлык вынесено
+    # отличие: у постинга расписание, у рассылки обход чатов по одному.
+    "poster": "постинг по расписанию",
+    "mailing": "рассылка по очереди",
 }
 
 # Ссылки на подарки и чеки, которые ищет «ловец чеков»
@@ -121,13 +123,13 @@ def task_title(rule: Any) -> str:
     if kind == "poster":
         total = len(chat_recipients(rule))
         if total > 1:
-            return f"Авто-постинг: {total} чат."
-        return f"Авто-постинг → {target}" if target else "Авто-постинг"
+            return f"Постинг по расписанию: {total} чат."
+        return f"Постинг по расписанию → {target}" if target else "Постинг по расписанию"
     if kind == "mailing":
         total = len(chat_recipients(rule))
         if total > 1:
-            return f"Рассылка по чатам: {total} чат."
-        return f"Рассылка по чатам → {target}" if target else "Рассылка по чатам"
+            return f"Рассылка по очереди: {total} чат."
+        return f"Рассылка по очереди → {target}" if target else "Рассылка по очереди"
     return f"{source} → {target}"
 
 

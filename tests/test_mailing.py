@@ -400,7 +400,9 @@ async def test_mailing_from_the_cabinet_fills_the_library(
             "command": "mailing",
             "account_id": account_id,
             "targets": ["@a", "@b"],
-            "message": "первое\nвторое",
+            # Пустая строка — граница сообщений. Одиночный перенос её не делает,
+            # см. test_line_breaks_inside_a_message_stay_in_one_message.
+            "message": "первое\n\nвторое",
             "gap": 7,
             "repeats": 2,
         },
@@ -418,6 +420,40 @@ async def test_mailing_from_the_cabinet_fills_the_library(
 
     library = await (await client.get("/api/library", headers=auth_headers)).json()
     assert sorted(item["text"] for item in library["items"]) == ["второе", "первое"]
+
+
+async def test_line_breaks_inside_a_message_stay_in_one_message(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Многострочный текст — одно сообщение, а не строчка на отправку.
+
+    Так его и пишут люди: прайс, объявление в два-три ряда. Раньше резали по
+    каждому переносу, и прайс из четырёх строк уходил четырьмя сообщениями —
+    ровно то, чего человек не хотел. Граница сообщений теперь пустая строка.
+    """
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    price = "Приму 1 код,момент\n4000 - 552\nПриму 1 код,момент\n4500 - 585"
+
+    response = await client.post(
+        "/api/tasks",
+        json={
+            "command": "mailing",
+            "account_id": account_id,
+            "targets": ["@a"],
+            "message": price,
+        },
+        headers=auth_headers,
+    )
+
+    assert response.status == 201, await response.text()
+    assert (await response.json())["task"]["mailing"]["messages_count"] == 1
+
+    library = await (await client.get("/api/library", headers=auth_headers)).json()
+    assert [item["text"] for item in library["items"]] == [price]
+    # Заголовок записи — первая строка, а не «Приму 1 код,момент\n4000…» целиком:
+    # в списке библиотеки нужна одна строка, по которой текст узнают.
+    assert library["items"][0]["title"] == "Приму 1 код,момент"
 
 
 async def test_mailing_takes_the_chosen_library_without_retyping_the_text(

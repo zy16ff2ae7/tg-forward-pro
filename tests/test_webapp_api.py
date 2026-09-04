@@ -236,6 +236,81 @@ async def test_every_command_belongs_to_a_known_group(client, auth_headers):
     assert missing == []
 
 
+async def test_commands_that_go_to_many_chats_do_not_read_alike(client, auth_headers):
+    """Четыре «в несколько чатов» должны читаться как четыре разные задачи.
+
+    Пересылка, копия канала, постинг и рассылка внешне похожи — все шлют что-то
+    в чаты, — и в каталоге их путали («кажется это всё одно и то же»). Отличие
+    держится на трёх вещах: своё название, своё описание и свои метки в подвале
+    карточки. Совпадение любой из них снова слепит две задачи в одну.
+    """
+    body = await (await client.get("/api/commands", headers=auth_headers)).json()
+    twins = [
+        item
+        for item in body["commands"]
+        if item["id"] in ("copy_channel", "broadcast", "poster", "mailing")
+    ]
+
+    assert len(twins) == 4
+    assert len({item["title"] for item in twins}) == 4
+    assert len({item["description"] for item in twins}) == 4
+    # Метки берутся парами-тройками, и хотя бы одна у каждой пары своя.
+    marks = {item["id"]: set(item["tags"]) for item in twins}
+    for left in marks:
+        for right in marks:
+            if left < right:
+                assert marks[left] != marks[right], f"{left} и {right} помечены одинаково"
+
+
+async def test_every_command_carries_its_marks(client, auth_headers):
+    """Метки — часть карточки, а не украшение: без них не видно, чем задачи разные."""
+    body = await (await client.get("/api/commands", headers=auth_headers)).json()
+
+    for item in body["commands"]:
+        tags = item.get("tags")
+        assert tags, f"у команды {item['id']} нет меток"
+        assert all(isinstance(tag, str) and tag.strip() for tag in tags)
+        # Три метки — предел: на 390 px четвёртая уводит подвал в третью строку.
+        assert len(tags) <= 3, f"у команды {item['id']} слишком много меток"
+
+
+# ─────────────────────── текст формы → отдельные сообщения ────────────────────
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("одно", ["одно"]),
+        # Главный случай: прайс в четыре строки — одно сообщение.
+        ("4000 - 552\n4500 - 585", ["4000 - 552\n4500 - 585"]),
+        ("первое\n\nвторое", ["первое", "второе"]),
+        # Пустых строк может быть сколько угодно, и в них бывают пробелы.
+        ("первое\n\n\n  \nвторое", ["первое", "второе"]),
+        # Перевод строки из Windows-буфера тоже граница, а не мусор в тексте.
+        ("первое\r\n\r\nвторое", ["первое", "второе"]),
+        ("  \n\n  ", []),
+        ("", []),
+        (None, []),
+    ],
+)
+def test_form_text_splits_on_empty_lines_only(raw, expected):
+    """Границу сообщений ставит пустая строка, одиночный перенос — нет."""
+    from app.webapp_api import _split_messages
+
+    assert _split_messages(raw) == expected
+
+
+def test_message_title_is_the_first_line():
+    """Заголовок записи — первая строка: в списке библиотеки нужна одна строка."""
+    from app.webapp_api import _message_title
+
+    assert _message_title("Приму 1 код\n4000 - 552") == "Приму 1 код"
+    assert _message_title("\n\n  вторая строка первая") == "вторая строка первая"
+    assert _message_title("я" * 60).endswith("…")
+    assert len(_message_title("я" * 60)) == 49
+    assert _message_title("") == ""
+
+
 
 # ──────────────────────────────── оплата Stars ────────────────────────────────
 

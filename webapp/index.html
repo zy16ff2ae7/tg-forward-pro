@@ -160,7 +160,7 @@
         <button class="btn btn--primary" data-chat-action="mailing" title="Свои сообщения по выбранным чатам, по кругу">📨 Рассылка</button>
         <button class="btn" data-chat-action="broadcast" title="Один пост из источника — во все выбранные чаты">📣 Пост в чаты</button>
         <button class="btn" data-chat-action="forward" title="Переслать в выбранный чат">🔁 Пересылка</button>
-        <button class="btn" data-chat-action="poster" title="Авто-постинг во все выбранные чаты">📤 Авто-постинг</button>
+        <button class="btn" data-chat-action="poster" title="Своё сообщение во все выбранные чаты каждые N минут">📤 Постинг</button>
         <button class="btn" data-chat-action="parser" title="Спарсить аудиторию выбранного чата">🕵️ Парсер</button>
         <button class="btn chat-bar__clear" data-chat-action="clear" title="Сбросить выбор">✕</button>
       </div>
@@ -211,14 +211,15 @@
          кабинета поверх /api/library: из него берёт тексты рассылка. -->
     <section class="tab hidden" id="tab-library" aria-label="Библиотека сообщений">
       <div class="screen__title">Библиотека сообщений</div>
-      <div class="screen__sub">Тексты, которые рассылает «Рассылка по чатам». Сохранили один раз — дальше выбираете мышкой в любой задаче.</div>
+      <div class="screen__sub">Тексты, которые шлёт «Рассылка по очереди». Сохранили один раз — дальше выбираете мышкой в любой задаче.</div>
 
       <div class="card">
         <label class="field">
           <span>Новое сообщение</span>
           <textarea id="libraryText" rows="3"
-                    placeholder="Текст сообщения. Каждая строка — отдельное сообщение."></textarea>
-          <i class="field__note">пустые строки пропускаем</i>
+                    placeholder="Текст сообщения — переносы строк сохраняются.&#10;&#10;Пустая строка = второе сообщение."></textarea>
+          <div class="field__count" id="libraryDraft" hidden></div>
+          <i class="field__note">пустая строка делит сообщения, простой перенос — нет</i>
         </label>
         <button class="btn btn--primary btn--block" id="libraryAdd">＋ Сохранить в библиотеку</button>
       </div>

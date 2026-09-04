@@ -424,7 +424,40 @@ async def test_poster_still_takes_a_single_target_field(
     assert response.status == 201, await response.text()
     task = (await response.json())["task"]
     assert task["targets_count"] == 1
-    assert task["title"] == "Авто-постинг → @ch-1"
+    assert task["title"] == "Постинг по расписанию → @ch-1"
+
+
+async def test_poster_keeps_a_multiline_message_whole(
+    client, auth_headers, create_account, login_open, many_chats_resolved
+):
+    """Прайс в четыре строки — одно сообщение постинга, а не четыре.
+
+    Отдельные сообщения задаются пустой строкой: круг берёт по одному, поэтому
+    разбитый по переносам прайс уходил бы четырьмя кругами по кусочку.
+    """
+    from app.db.database import SessionLocal
+
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    price = "Приму 1 код,момент\n4000 - 552\nПриму 1 код,момент\n4500 - 585"
+
+    response = await client.post(
+        "/api/tasks",
+        json={
+            "command": "poster",
+            "account_id": account_id,
+            "targets": ["@ch-1", "@ch-2"],
+            "message": f"{price}\n\nвторое сообщение",
+        },
+        headers=auth_headers,
+    )
+
+    assert response.status == 201, await response.text()
+    rule_id = (await response.json())["task"]["id"]
+    async with SessionLocal() as session:
+        rule = await session.get(Rule, rule_id)
+        assert rule is not None
+        assert rule.filters["messages"] == [price, "второе сообщение"]
 
 
 async def test_broadcast_takes_the_whole_chat_list(
@@ -561,6 +594,66 @@ async def test_missing_chats_are_reported_in_one_short_line(
     assert "и ещё 2" in error
     # Длинное перечисление в кабинете не читается — держим строку короткой.
     assert len(error) < 120
+
+
+@pytest.fixture
+def one_shot_stubbed(monkeypatch):
+    """Задачи «по запросу» в тестах не ходят в Telegram: запуск подменён."""
+
+    async def fake_run_task_now(rule):
+        return {"ok": True, "kind": getattr(rule, "kind", "")}
+
+    monkeypatch.setattr(manager, "run_task_now", fake_run_task_now)
+
+
+async def test_autosubscribe_takes_channels_the_account_has_not_joined_yet(
+    client, auth_headers, create_account, login_open, many_chats_resolved, one_shot_stubbed
+):
+    """Канал, которого нет в диалогах, — это норма для автоподписки, а не 404.
+
+    Задача существует ровно для того, чтобы в такой канал вступить: до вступления
+    его нет в диалогах аккаунта, а ссылку-приглашение t.me/+… не разрешает вообще
+    никто. Раньше кабинет отвечал «Не нашёл чаты» на то, что и просили сделать.
+    """
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    refs = ["@ch-1", "@nowhere", "t.me/+invite"]
+
+    response = await client.post(
+        "/api/tasks",
+        json={"command": "autosubscribe", "account_id": account_id, "targets": refs},
+        headers=auth_headers,
+    )
+
+    assert response.status == 201, await response.text()
+    rule_id = (await response.json())["task"]["id"]
+    async with session_scope() as session:
+        rule = await repo.get_rule(session, rule_id, TEST_USER_ID)
+        assert rule is not None
+        # Ссылки уходят задаче как есть: разбирает их уже run_autosubscribe.
+        assert rule.filters["subscribe_to"] == refs
+
+
+async def test_autosubscribe_still_needs_access_to_its_source(
+    client, auth_headers, create_account, login_open, many_chats_resolved, one_shot_stubbed
+):
+    """Источник ссылок — другое дело: из него читают посты, без доступа никак."""
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+
+    response = await client.post(
+        "/api/tasks",
+        json={
+            "command": "autosubscribe",
+            "account_id": account_id,
+            "source": "@closed-chat",
+            "targets": ["@ch-1"],
+        },
+        headers=auth_headers,
+    )
+
+    assert response.status == 404
+    assert "источник" in (await response.json())["error"]
 
 
 async def test_chats_list_is_not_cut(client, auth_headers, create_account, monkeypatch):
