@@ -600,7 +600,9 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
     Рассылка — единственная задача, которая заводится из кабинета не пустой:
     тексты из формы ложатся в библиотеку, оттуда их берёт планировщик. Поиск
     чатов подменён заглушкой (в offline-прогоне искать нечем) — проверяем своё:
-    коды ответов, геометрию получателей, счёт работы и саму библиотеку.
+    коды ответов, геометрию получателей, счёт работы и саму библиотеку. Здесь же
+    проходят постинг и пересылка в чаты: список чатов у всех трёх задач один и
+    тот же код, и ломаться он будет сразу у всех.
     """
     rep.section("Рассылка и библиотека")
 
@@ -633,16 +635,28 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
     status, _ = await cab.delete(f"/api/library/{item_id}")
     rep.check("повторное удаление — 404", status == 404, f"статус {status}")
 
-    # Чаты «находятся» без Telegram: имя запроса и есть чат.
+    # Чаты «находятся» без Telegram: имя запроса и есть чат. Кабинет ищет их
+    # пачкой — одним вызовом на все ссылки задачи, его и подменяем.
     chats = {"@smoke-one": -1001, "@smoke-two": -1002}
+    # Массовка для проверки «в бесконечное число чатов»: столько получателей
+    # мышкой не набирают, зато видно, что ни счёт, ни ответ не упираются в предел.
+    many = {f"@smoke-many-{n}": -2000 - n for n in range(250)}
+    sweeps = 0
 
-    async def resolve_chat(_account_id: int, query: str) -> tuple[int, str] | None:
-        found = chats.get(query.strip())
-        return (found, query.strip()) if found else None
+    async def resolve_many(_account_id: int, queries) -> dict[str, tuple[int, str]]:
+        nonlocal sweeps
+        sweeps += 1
+        found: dict[str, tuple[int, str]] = {}
+        for raw in queries:
+            key = str(raw or "").strip()
+            chat_id = chats.get(key) or many.get(key)
+            if chat_id:
+                found[key] = (chat_id, key)
+        return found
 
     task: dict = {}
     with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
-        resolve_chat=resolve_chat
+        resolve_many=resolve_many
     ):
         status, body = await cab.post(
             "/api/tasks",
@@ -719,6 +733,185 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
             f"статус {status}, {(body or {}).get('error')}",
         )
 
+        # ── Много чатов: предела числу получателей нет ──
+        before = sweeps
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "mailing",
+                "account_id": account_id,
+                "targets": list(many),
+                "message": "массовая",
+                "repeats": 1,
+            },
+        )
+        big = (body or {}).get("task") or {}
+        rep.check(
+            f"рассылка на {len(many)} чатов — 201",
+            status == 201 and (big.get("mailing") or {}).get("recipients") == len(many),
+            f"статус {status}, {(body or {}).get('error') or (big.get('mailing') or {})}",
+        )
+        rep.check(
+            "все чаты попали в задачу: счёт и работа сходятся",
+            big.get("targets_count") == len(many)
+            and (big.get("progress") or {}).get("total") == len(many),
+            f"{big.get('targets_count')} / {big.get('progress')}",
+        )
+        rep.check(
+            "чаты найдены одним обходом, а не по одному",
+            sweeps - before == 1,
+            f"обходов: {sweeps - before}",
+        )
+        big_id = int(big.get("id") or 0)
+        if big_id:
+            await cab.delete(f"/api/tasks/{big_id}")
+
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "poster",
+                "account_id": account_id,
+                "targets": list(many),
+                "message": "постим всем",
+                "interval": 5,
+            },
+        )
+        poster = (body or {}).get("task") or {}
+        rep.check(
+            f"авто-постинг на {len(many)} чатов — 201",
+            status == 201 and poster.get("targets_count") == len(many),
+            f"статус {status}, {(body or {}).get('error') or poster.get('targets_count')}",
+        )
+        rep.check(
+            "в заголовке — счёт чатов, а не одно имя",
+            "250" in str(poster.get("title")),
+            f"{poster.get('title')}",
+        )
+        poster_id = int(poster.get("id") or 0)
+        if poster_id:
+            await cab.delete(f"/api/tasks/{poster_id}")
+
+        # Одиночное поле «приёмник» постинг обязан принимать по-прежнему: с ним
+        # приходят задачи из бота и старые ссылки на форму.
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "poster",
+                "account_id": account_id,
+                "target": "@smoke-one",
+                "message": "постим в один",
+            },
+        )
+        one = (body or {}).get("task") or {}
+        rep.check(
+            "постинг с одним приёмником — по-прежнему 201",
+            status == 201 and one.get("targets_count") == 1,
+            f"статус {status}, {(body or {}).get('error') or one.get('targets_count')}",
+        )
+        one_id = int(one.get("id") or 0)
+        if one_id:
+            await cab.delete(f"/api/tasks/{one_id}")
+
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "poster",
+                "account_id": account_id,
+                "targets": ["@smoke-one", "@нет-1", "@нет-2", "@нет-3", "@нет-4", "@нет-5"],
+                "message": "текст",
+            },
+        )
+        rep.check(
+            "ненайденные чаты — одной короткой строкой со счётом",
+            status == 404
+            and "(5)" in str((body or {}).get("error"))
+            and "и ещё 2" in str((body or {}).get("error")),
+            f"статус {status}, {(body or {}).get('error')}",
+        )
+
+        # ── Пересылка в чаты: тот же список, что у постинга и рассылки ──
+        # Отдельного поля «приёмник» у неё больше нет: чаты — один список, и
+        # первый из них становится главным. Проверяем счёт (он раньше шёл по
+        # настройкам и терял первый чат) и то, что источник не попал в получатели.
+        before = sweeps
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "broadcast",
+                "account_id": account_id,
+                "source": "@smoke-one",
+                "targets": list(many),
+            },
+        )
+        cast = (body or {}).get("task") or {}
+        rep.check(
+            f"пересылка в {len(many)} чатов — 201",
+            status == 201 and cast.get("targets_count") == len(many),
+            f"статус {status}, {(body or {}).get('error') or cast.get('targets_count')}",
+        )
+        rep.check(
+            "в заголовке пересылки — счёт чатов",
+            "250" in str(cast.get("title")),
+            f"{cast.get('title')}",
+        )
+        rep.check(
+            "источник и чаты найдены одним обходом",
+            sweeps - before == 1,
+            f"обходов: {sweeps - before}",
+        )
+        cast_id = int(cast.get("id") or 0)
+        if cast_id:
+            await cab.delete(f"/api/tasks/{cast_id}")
+
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "broadcast",
+                "account_id": account_id,
+                "source": "@smoke-one",
+                "targets": ["@smoke-one", "@smoke-two"],
+            },
+        )
+        back = (body or {}).get("task") or {}
+        rep.check(
+            "источник в списке чатов не превращается в пересылку самому себе",
+            status == 201 and back.get("targets_count") == 1,
+            f"статус {status}, {(body or {}).get('error') or back.get('targets_count')}",
+        )
+        back_id = int(back.get("id") or 0)
+        if back_id:
+            await cab.delete(f"/api/tasks/{back_id}")
+
+        # Одиночный «приёмник» пересылка принимает по-прежнему: так её создаёт бот.
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "broadcast",
+                "account_id": account_id,
+                "source": "@smoke-one",
+                "target": "@smoke-two",
+            },
+        )
+        old = (body or {}).get("task") or {}
+        rep.check(
+            "пересылка с одним приёмником — по-прежнему 201",
+            status == 201 and old.get("targets_count") == 1,
+            f"статус {status}, {(body or {}).get('error') or old.get('targets_count')}",
+        )
+        old_id = int(old.get("id") or 0)
+        if old_id:
+            await cab.delete(f"/api/tasks/{old_id}")
+
+        status, body = await cab.post(
+            "/api/tasks",
+            json={"command": "broadcast", "account_id": account_id, "source": "@smoke-one"},
+        )
+        rep.check(
+            "пересылка без чатов — 400 и словом «чаты», а не «получателей»",
+            status == 400 and "чаты" in str((body or {}).get("error")),
+            f"статус {status}, {(body or {}).get('error')}",
+        )
+
     # Прибираем за собой: следующие разделы видят кабинет без задач и с пустой
     # библиотекой — ровно таким, каким его оставил seed().
     task_id = int(task.get("id") or 0)
@@ -760,6 +953,38 @@ async def check_chats_and_accounts(cab: Cabinet, rep: Report, account_id: int) -
         status == 200 and "не найден" in str((body or {}).get("note", "")).lower(),
         f"статус {status}",
     )
+
+    # Список чатов не обрезан: задачи ходят в любое их число, и чат, которого нет
+    # в списке, нельзя выбрать мышкой. Диалоги подменяем — Telegram тут не участвует.
+    dialogs = [
+        {"id": -3000 - n, "title": f"смоук-чат {n}", "username": None, "kind": "group"}
+        for n in range(300)
+    ]
+
+    async def list_dialogs(_account_id: int, limit: int = 0):
+        return dialogs[:limit] if limit > 0 else list(dialogs)
+
+    with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
+        list_dialogs=list_dialogs
+    ):
+        status, body = await cab.get(f"/api/chats?account_id={account_id}")
+        rep.check(
+            f"чаты отдаются все {len(dialogs)}, без обрезки",
+            status == 200 and (body or {}).get("total") == len(dialogs),
+            f"статус {status}, всего {(body or {}).get('total')}",
+        )
+        status, body = await cab.get(f"/api/chats?account_id={account_id}&limit=10")
+        rep.check(
+            "короткая витрина по limit — по-прежнему работает",
+            status == 200 and (body or {}).get("total") == 10,
+            f"всего {(body or {}).get('total')}",
+        )
+        status, body = await cab.get(f"/api/chats?account_id={account_id}&q=чат 299")
+        rep.check(
+            "поиск достаёт чат из хвоста списка",
+            status == 200 and (body or {}).get("total") == 1,
+            f"нашлось {(body or {}).get('total')}",
+        )
 
     status, body = await cab.get("/api/accounts")
     if not rep.check("GET /api/accounts — 200", status == 200, f"статус {status}"):

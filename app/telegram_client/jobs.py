@@ -48,7 +48,9 @@ COLLECTING_KINDS: tuple[str, ...] = ONE_SHOT_KINDS + ("checks",)
 
 KIND_LABELS: dict[str, str] = {
     "forward": "пересылка",
-    "broadcast": "рассылка",
+    # «пересылка в чаты», а не «рассылка»: свои сообщения по чатам шлёт mailing,
+    # и два одинаковых слова в списке задач читались как одна команда-двойник.
+    "broadcast": "пересылка в чаты",
     "baiting": "байтинг",
     "mute": "мут",
     "dialogs": "уведомления из диалогов",
@@ -106,17 +108,23 @@ def task_title(rule: Any) -> str:
     if kind == "checks":
         return f"Ловец чеков: {source} → {target}"
     if kind == "broadcast":
-        extra = len(filters.get("targets") or [])
-        return f"Рассылка: {source} → {target}" + (f" (+{extra})" if extra else "")
+        total = len(chat_recipients(rule))
+        if total > 1:
+            return f"Пересылка: {source} → {total} чат."
+        return f"Пересылка: {source} → {target}"
     if kind in ("baiting", "mute"):
         watched = int(filters.get("target_user_id") or 0)
         head = "Байтинг в" if kind == "baiting" else "Мут в"
         return f"{head} {source}" + (f" · за {watched}" if watched else "")
+    # Постинг и рассылка идут в любое число чатов, поэтому в заголовке — счёт,
+    # а имя чата показываем только когда он один: перечислять двести имён некуда.
     if kind == "poster":
-        return f"Авто-постинг → {target}"
+        total = len(chat_recipients(rule))
+        if total > 1:
+            return f"Авто-постинг: {total} чат."
+        return f"Авто-постинг → {target}" if target else "Авто-постинг"
     if kind == "mailing":
-        extra = len(filters.get("targets") or [])
-        total = extra + (1 if getattr(rule, "target_id", 0) else 0)
+        total = len(chat_recipients(rule))
         if total > 1:
             return f"Рассылка по чатам: {total} чат."
         return f"Рассылка по чатам → {target}" if target else "Рассылка по чатам"
@@ -204,15 +212,38 @@ def _sender_matches(rule: RuleSnapshot, message: Any) -> bool:
 # ─────────────────────────────────── Задачи ──────────────────────────────────
 
 
-def _broadcast_targets(rule: RuleSnapshot) -> list[int]:
-    """Кому уходит рассылка: приёмник правила плюс доп. получатели."""
+def _conf_value(config: Any, name: str, default: Any) -> Any:
+    """Настройка и из FilterConfig, и из «сырого» словаря правила.
+
+    Снимок правила несёт FilterConfig, а строка БД — обычный JSON-словарь.
+    Считалкам нужно одно и то же значение, и вторая копия расчёта под словарь
+    рано или поздно расходится с первой.
+    """
+    value = config.get(name, default) if isinstance(config, dict) else getattr(config, name, default)
+    return default if value is None else value
+
+
+def chat_recipients(rule: Any) -> list[int]:
+    """Все чаты задачи: приёмник правила плюс дополнительные из настроек.
+
+    Одна геометрия на все задачи «в несколько чатов» — пересылку (broadcast),
+    авто-постинг и рассылку: первый чат живёт в обязательной колонке
+    ``target_id``, остальные — в ``filters.targets``. Числа их не ограничивает:
+    сколько чатов человек отметил, столько и вернётся.
+
+    Повторы убираем (иначе один чат получил бы сообщение дважды за круг), а
+    источник исключаем — пересылать пост в тот же канал, откуда он взят, значит
+    зациклить задачу. Принимает и снимок правила, и строку БД.
+    """
+    extra = _conf_value(getattr(rule, "filters", None), "targets", []) or []
+    source_id = int(getattr(rule, "source_id", 0) or 0)
     seen: list[int] = []
-    for candidate in [rule.target_id, *(rule.filters.targets or [])]:
+    for candidate in [getattr(rule, "target_id", 0), *extra]:
         try:
             value = int(candidate)
         except (TypeError, ValueError):
             continue
-        if value and value != rule.source_id and value not in seen:
+        if value and value != source_id and value not in seen:
             seen.append(value)
     return seen
 
@@ -225,15 +256,25 @@ def _broadcast_targets(rule: RuleSnapshot) -> list[int]:
 MAILING_MIN_GAP = 1  # быстрее секунды между чатами Telegram всё равно не даст
 MAILING_MAX_GAP = 7 * 24 * 3600  # неделя: дальше это уже не «пауза», а ошибка ввода
 
+# ── Авто-постинг (kind="poster"): темп обхода чатов ──
+#
+# Постер шлёт своё сообщение сразу во все выбранные чаты, а чатов может быть
+# сколько угодно. Поэтому круг идёт не залпом: за один тик уходит не больше
+# POSTER_BATCH сообщений, между чатами держится пауза, а весь проход
+# планировщика ограничен POSTER_TICK_BUDGET — иначе одна задача с сотней чатов
+# заняла бы цикл целиком и остальные постеры стояли бы в очереди.
+POSTER_CHAT_GAP = 2.0
+POSTER_BATCH = 8
+POSTER_TICK_BUDGET = 15.0
 
-def mailing_recipients(rule: RuleSnapshot) -> list[int]:
-    """Получатели рассылки: приёмник правила плюс дополнительные чаты.
 
-    Та же геометрия, что у broadcast: первый чат живёт в ``target_id`` (колонка
-    обязательная), остальные — в ``filters.targets``. Повторы убираем, иначе
-    один чат получил бы сообщение дважды за круг.
+def mailing_recipients(rule: Any) -> list[int]:
+    """Получатели рассылки — те же чаты задачи, что у пересылки и постинга.
+
+    Отдельное имя оставлено ради читаемости планировщика: «получатели рассылки»
+    там понятнее, чем общий ``chat_recipients``. Расчёт один — см. выше.
     """
-    return _broadcast_targets(rule)
+    return chat_recipients(rule)
 
 
 def mailing_gap(config: FilterConfig, *, cycle: bool = False) -> float:
@@ -362,7 +403,7 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
 
 async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
     """Одно сообщение из источника уходит в несколько чатов."""
-    targets = _broadcast_targets(rule)
+    targets = chat_recipients(rule)
     if not targets:
         await record_error(rule, message, "У рассылки нет получателей")
         return

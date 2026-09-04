@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 from urllib.parse import urlparse
 
 from loguru import logger
@@ -53,6 +53,13 @@ SUBSCRIPTION_CHECK_TTL = 60.0
 MAILING_EMPTY_PAUSE = 60.0
 MAILING_ERROR_PAUSE = 30.0
 
+# Список диалогов аккаунта живёт в памяти минуту. Один обход диалогов — это
+# запрос за запросом к Telegram, а кабинет спрашивает чаты часто: список во
+# вкладке «Чаты», шторка выбора, поиск в ней, и потом ещё раз при сохранении
+# задачи, где надо найти каждый отмеченный чат. Без кэша выбор двухсот чатов
+# мышкой означал бы двести обходов подряд — это верный FloodWait.
+DIALOGS_CACHE_TTL = 60.0
+
 
 def _proxy_dict(proxy_url: str | None) -> dict | None:
     """Превращает строку вида socks5://user:pass@host:port в словарь для Telethon."""
@@ -99,6 +106,19 @@ def _snapshot(rule) -> RuleSnapshot:
     )
 
 
+def _normalize_ref(query: str) -> str:
+    """Ссылка на чат → то, по чему его можно искать.
+
+    Принимает «@name», «t.me/name», «https://t.me/c/123/45?single» и числовой id,
+    отдаёт «name» либо «123». Разбор один на все пути поиска: раньше он жил
+    внутри resolve_chat, и поиск пачкой повторил бы его второй копией.
+    """
+    raw = (query or "").strip()
+    if "t.me/" in raw.lower():
+        raw = raw.split("t.me/", 1)[1].split("/")[0].split("?")[0]
+    return raw.lstrip("@").strip()
+
+
 def _hhmm_to_sec(value: str) -> int:
     """«ЧЧ:ММ» → секунды от начала суток. Невалидное значение → 0."""
     try:
@@ -140,6 +160,10 @@ class ClientManager:
         # rule_id -> {"pos", "cycle", "due", "not_before", "typed"}
         self._mailing_state: dict[int, dict] = {}
         self._mailing_task: asyncio.Task | None = None
+        # account_id -> (когда собрали, все диалоги аккаунта). Кэш на минуту:
+        # см. DIALOGS_CACHE_TTL — без него выбор чатов пачкой означал бы обход
+        # диалогов на каждый отмеченный чат.
+        self._dialogs_cache: dict[int, tuple[float, list[dict[str, Any]]]] = {}
         self._lock = asyncio.Lock()
         self._refresh_task: asyncio.Task | None = None
 
@@ -299,6 +323,9 @@ class ClientManager:
     async def stop_account(self, account_id: int) -> None:
         async with self._lock:
             client = self._clients.pop(account_id, None)
+            # Чаты остановленного аккаунта — уже не его чаты: следующий вход
+            # должен увидеть свежий список, а не тот, что лежал в кэше.
+            self._dialogs_cache.pop(account_id, None)
         if client is not None:
             try:
                 await client.disconnect()
@@ -407,15 +434,29 @@ class ClientManager:
         """
         return delivery_queue.stats()
 
-    async def list_dialogs(self, account_id: int, limit: int = 30) -> list[dict[str, Any]]:
-        """Список чатов аккаунта: для выбора источника и приёмника."""
+    async def list_dialogs(self, account_id: int, limit: int = 0) -> list[dict[str, Any]]:
+        """Чаты аккаунта: для выбора источника, приёмника и получателей.
+
+        ``limit <= 0`` — отдать все чаты, сколько их у аккаунта есть. Именно это
+        нужно кабинету: постить и рассылать можно в любое число чатов, а список,
+        обрезанный на двухсотом, молча прятал бы остальные — человек не находил
+        чат поиском и считал, что задача его «не видит».
+
+        Полный обход кладём в кэш на ``DIALOGS_CACHE_TTL``: один обход — это
+        череда запросов к Telegram, а спрашивают список часто.
+        """
         if not settings.mtproto_ready:
             return []
         client = self._clients.get(account_id)
         if client is None:
             return []
+
+        cached = self._dialogs_cache.get(account_id)
+        if cached is not None and time.time() - cached[0] < DIALOGS_CACHE_TTL:
+            return cached[1][:limit] if limit > 0 else list(cached[1])
+
         result: list[dict[str, Any]] = []
-        async for dialog in client.iter_dialogs(limit=limit):
+        async for dialog in client.iter_dialogs(limit=limit if limit > 0 else None):
             entity = dialog.entity
             title = getattr(entity, "title", None) or getattr(entity, "first_name", None) or "Без имени"
             result.append(
@@ -430,84 +471,116 @@ class ClientManager:
                     "is_group": bool(getattr(entity, "megagroup", False)),
                 }
             )
+        # В кэш идёт только полный обход: обрезанным списком потом ответили бы на
+        # запрос «все чаты», и часть чатов пропала бы на целую минуту.
+        if limit <= 0:
+            self._dialogs_cache[account_id] = (time.time(), list(result))
         return result
+
+    def forget_dialogs(self, account_id: int | None = None) -> None:
+        """Забыть кэш чатов: вступили в новый чат — он должен появиться сразу."""
+        if account_id is None:
+            self._dialogs_cache.clear()
+        else:
+            self._dialogs_cache.pop(account_id, None)
 
     async def resolve_chat(self, account_id: int, query: str) -> tuple[int, str] | None:
         """Находит чат по @username, ссылке t.me, числовому id или названию.
 
-        Возвращает (id, название). Числовой id (в т.ч. отрицательный id канала)
-        резолвится по списку диалогов аккаунта — именно это нужно для выбора
-        чатов мышью в мини-аппе, где chatToRef отдаёт «голый» id без username.
+        Возвращает (id, название). Один запрос — частный случай пачки, поэтому
+        поиск живёт в ``resolve_many``: иначе две копии разбора ссылок разошлись
+        бы при первой же правке.
+        """
+        found = await self.resolve_many(account_id, [query])
+        return found.get((query or "").strip())
+
+    async def resolve_many(
+        self, account_id: int, queries: Sequence[str]
+    ) -> dict[str, tuple[int, str]]:
+        """Находит сразу все чаты из списка: {запрос → (id, название)}.
+
+        Ключ ответа — исходный запрос со снятыми пробелами, чтобы вызывающий
+        сразу видел, что именно не нашлось. Ненайденных в ответе просто нет.
+
+        Смысл пачки — один обход диалогов на весь список вместо обхода на каждую
+        ссылку. Задача «постить в 200 чатов» иначе стоила бы 200 обходов подряд
+        при сохранении: минуты ожидания в кабинете и FloodWait в конце. Порядок
+        поиска: сначала указатель по диалогам (там уже лежат все чаты аккаунта,
+        и его строим один раз), и только для незнакомых ссылок — запрос к
+        Telegram по одной.
         """
         if not settings.mtproto_ready:
-            return None
+            return {}
         client = self._clients.get(account_id)
         if client is None:
-            return None
-        query = (query or "").strip()
-        if not query:
-            return None
+            return {}
 
-        # нормализуем: ссылки t.me/c/... и t.me/..., а также ведущий @
-        raw = query
-        low = raw.lower()
-        if "t.me/" in low:
-            raw = raw.split("t.me/", 1)[1].split("/")[0].split("?")[0]
-        raw = raw.lstrip("@")
-        raw = raw.strip()
-        if not raw:
-            return None
+        wanted: list[tuple[str, str, int | None]] = []
+        for raw_query in queries:
+            key = (raw_query or "").strip()
+            ref = _normalize_ref(key)
+            if not key or not ref:
+                continue
+            wanted.append((key, ref, int(ref) if ref.lstrip("-").isdigit() else None))
+        if not wanted:
+            return {}
 
-        # числовой id (голые id чатов/каналов/пользователей, в т.ч. отрицательные)
-        numeric_id: int | None = None
-        if raw.lstrip("-").isdigit():
-            numeric_id = int(raw)
+        found: dict[str, tuple[int, str]] = {}
+        dialogs = await self.list_dialogs(account_id)
+        by_id = {int(chat["id"]): chat for chat in dialogs}
+        by_username = {
+            str(chat["username"]).lower(): chat for chat in dialogs if chat.get("username")
+        }
+        by_title = {str(chat["title"]).strip().lower(): chat for chat in dialogs if chat.get("title")}
 
-        # 1) username / ссылка — резолвим напрямую через API
-        if numeric_id is None:
-            try:
-                entity = await client.get_entity(raw)
-                title = (
-                    getattr(entity, "title", None)
-                    or getattr(entity, "first_name", None)
-                    or str(getattr(entity, "id", "?"))
+        rest: list[tuple[str, str, int | None]] = []
+        for key, ref, numeric in wanted:
+            chat = by_id.get(numeric) if numeric is not None else by_username.get(ref.lower())
+            if chat is None and numeric is None:
+                chat = by_title.get(ref.lower())
+            if chat is not None:
+                found[key] = (int(chat["id"]), str(chat["title"]))
+            else:
+                rest.append((key, ref, numeric))
+
+        for key, ref, numeric in rest:
+            pair = await self._resolve_by_api(client, ref, numeric)
+            if pair is None and numeric is None:
+                # Последняя попытка — часть названия: так чат ищут словами
+                # («афиша»), когда ни ника, ни id под рукой нет.
+                match = next(
+                    (chat for chat in dialogs if ref.lower() in str(chat["title"]).lower()), None
                 )
-                return int(getattr(entity, "id")), title
-            except Exception:  # noqa: BLE001
-                pass  # дальше ищем по диалогам
+                if match is not None:
+                    pair = (int(match["id"]), str(match["title"]))
+            if pair is not None:
+                found[key] = pair
+        return found
 
-        # 2) ищем среди диалогов: сначала точное совпадение по id, затем по названию
-        async for dialog in client.iter_dialogs(limit=200):
-            entity = dialog.entity
+    async def _resolve_by_api(
+        self, client: TelegramClient, ref: str, numeric: int | None
+    ) -> tuple[int, str] | None:
+        """Спрашивает Telegram про один чат: по нику или по числовому id.
+
+        Нужно для чатов, которых нет в списке диалогов: аккаунт может иметь
+        доступ к каналу (быть участником или админом), но чат не попадает в
+        недавние — тогда только прямой запрос и находит его.
+        """
+        candidates: list[Any] = [ref] if numeric is None else [numeric]
+        if numeric is not None and numeric < 0:
+            # id канала ходит как -100<channel_id>; PeerChannel ждёт channel_id
+            candidates.append(numeric + 1000000000000)
+        for candidate in candidates:
+            try:
+                entity = await client.get_entity(candidate)
+            except Exception:  # noqa: BLE001 — не нашлось: пробуем следующий вид ссылки
+                continue
             title = (
                 getattr(entity, "title", None)
                 or getattr(entity, "first_name", None)
-                or "Без имени"
+                or str(getattr(entity, "id", "?"))
             )
-            if numeric_id is not None and int(dialog.id) == numeric_id:
-                return int(dialog.id), title
-            if raw and raw.lower() in title.lower():
-                return int(dialog.id), title
-
-        # 3) канал/чат по числовому id, даже если он не в последних диалогах.
-        #    Аккаунт может иметь доступ (быть участником/админом), но чат не
-        #    попадает в список недавних — тогда резолвим напрямую через API.
-        if numeric_id is not None:
-            candidates = [numeric_id]
-            if numeric_id < 0:
-                # id канала ходит как -100<channel_id>; PeerChannel ждёт channel_id
-                candidates.append(numeric_id + 1000000000000)
-            for cand in candidates:
-                try:
-                    entity = await client.get_entity(cand)
-                    title = (
-                        getattr(entity, "title", None)
-                        or getattr(entity, "first_name", None)
-                        or str(getattr(entity, "id", "?"))
-                    )
-                    return int(getattr(entity, "id")), title
-                except Exception:  # noqa: BLE001
-                    continue
+            return int(getattr(entity, "id")), title
         return None
 
     # ─────────────────────────────── Кэш правил ───────────────────────────────
@@ -580,9 +653,26 @@ class ClientManager:
                 logger.exception("Постер-планировщик упал: {}", exc)
 
     async def _poster_tick(self) -> None:
-        """Один проход: для каждого активного постера — отправить очередное сообщение."""
+        """Один проход: каждому постеру, которому пора, — очередное сообщение.
+
+        Чатов у постера может быть сколько угодно, поэтому круг идёт не залпом:
+        за проход правило отправляет не больше ``POSTER_BATCH`` сообщений, между
+        чатами держит паузу, а весь проход ограничен ``POSTER_TICK_BUDGET`` —
+        иначе задача с сотней чатов заняла бы цикл целиком, и остальные постеры
+        ждали бы её. Недоотправленные чаты остаются в очереди правила и уйдут на
+        следующих тиках; интервал отсчитывается от конца круга, а не от первой
+        отправки, — иначе круги наезжали бы друг на друга.
+        """
+        from app.telegram_client.jobs import (
+            POSTER_BATCH,
+            POSTER_CHAT_GAP,
+            POSTER_TICK_BUDGET,
+            chat_recipients,
+        )
+
         now = time.localtime()
         now_sec = now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec
+        deadline = time.time() + POSTER_TICK_BUDGET
 
         async with self._lock:
             rules = list(self._poster_rules)
@@ -598,6 +688,9 @@ class ClientManager:
             messages = f.messages if hasattr(f, "messages") else (f.get("messages") or [])
             if not messages:
                 continue
+            chats = chat_recipients(rule)
+            if not chats:
+                continue
             start = _hhmm_to_sec(f.window_start if hasattr(f, "window_start") else "00:00")
             end = _hhmm_to_sec(f.window_end if hasattr(f, "window_end") else "23:59")
             if not _in_window(now_sec, start, end):
@@ -605,40 +698,60 @@ class ClientManager:
 
             interval = max(30, int(getattr(f, "interval_seconds", 120)))
             st = self._poster_state.setdefault(
-                rule.id, {"last": 0.0, "idx": 0, "runs": 0, "not_before": 0.0}
+                rule.id, {"last": 0.0, "idx": 0, "runs": 0, "not_before": 0.0, "queue": [], "msg": ""}
             )
             # Пауза, которую назначил сам Telegram после FloodWait: раньше этого
             # времени не пробуем, иначе получаем отказ по кругу.
             if time.time() < st.get("not_before", 0.0):
                 continue
-            if time.time() - st["last"] < interval:
-                continue
-
-            msg = messages[st["idx"] % len(messages)]
-            try:
-                await client.send_message(rule.target_id, msg)
-                st["last"] = time.time()
+            if not st.get("queue"):
+                if time.time() - st["last"] < interval:
+                    continue
+                # Новый круг: сообщение фиксируем на весь обход, иначе половина
+                # чатов получила бы один текст, половина — следующий.
+                st["queue"] = list(chats)
+                st["msg"] = messages[st["idx"] % len(messages)]
                 st["idx"] = (st["idx"] + 1) % len(messages)
+
+            msg = st.get("msg") or messages[st["idx"] % len(messages)]
+            sent = 0
+            while st["queue"] and sent < POSTER_BATCH and time.time() < deadline:
+                chat_id = st["queue"][0]
+                try:
+                    await client.send_message(chat_id, msg)
+                except FloodWaitError as exc:
+                    # Telegram явно говорит, сколько ждать. Слушаемся: иначе на
+                    # следующем тике тот же отказ и поток предупреждений в журнале.
+                    # Чат остаётся в очереди — круг продолжится после паузы.
+                    wait = int(getattr(exc, "seconds", 30)) + 1
+                    st["not_before"] = time.time() + wait
+                    logger.warning(
+                        "Постер #{}: Telegram просит подождать {} сек — ставлю паузу",
+                        rule.id,
+                        wait,
+                    )
+                    break
+                except Exception as exc:  # noqa: BLE001 — не спамим при ошибке
+                    # Недоступный чат выкидываем из круга: иначе он держал бы
+                    # очередь и остальные чаты не получили бы ничего.
+                    logger.warning("Постер #{} не отправил в {}: {}", rule.id, chat_id, exc)
+                    st["queue"].pop(0)
+                    continue
+                st["queue"].pop(0)
                 st["runs"] += 1
+                sent += 1
+                if st["queue"] and time.time() < deadline:
+                    await asyncio.sleep(POSTER_CHAT_GAP)
+
+            if sent:
                 # Косметика: счётчик отправок, чтобы в кабинете было видно работу
                 async with SessionLocal() as session:
                     db_rule = await repo.get_rule(session, rule.id, rule.user_id)
                     if db_rule is not None:
-                        db_rule.forwarded_count = (db_rule.forwarded_count or 0) + 1
+                        db_rule.forwarded_count = (db_rule.forwarded_count or 0) + sent
                         await session.commit()
-            except FloodWaitError as exc:
-                # Telegram явно говорит, сколько ждать. Слушаемся: иначе на
-                # следующем тике тот же отказ и поток предупреждений в журнале.
-                wait = int(getattr(exc, "seconds", 30)) + 1
-                st["not_before"] = time.time() + wait
-                st["last"] = time.time()
-                logger.warning(
-                    "Постер #{}: Telegram просит подождать {} сек — ставлю паузу",
-                    rule.id,
-                    wait,
-                )
-            except Exception as exc:  # noqa: BLE001 — не спамим при ошибке
-                logger.warning("Постер #{} не отправил: {}", rule.id, exc)
+            if not st["queue"]:
+                # Круг закрыт — интервал считаем от него, а не от начала обхода.
                 st["last"] = time.time()
 
     # ───────────────── Рассылка по чатам (планировщик, свой цикл) ─────────────────

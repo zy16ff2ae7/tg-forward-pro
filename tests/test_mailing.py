@@ -367,14 +367,23 @@ def login_open(monkeypatch):
 
 @pytest.fixture
 def resolved_chats(monkeypatch):
-    """Чаты «находятся» без Telegram: имя запроса и есть чат."""
+    """Чаты «находятся» без Telegram: имя запроса и есть чат.
+
+    Подменяем поиск пачкой: кабинет ищет все чаты задачи одним вызовом, и в нём
+    же живёт разбор ссылок. Одиночный ``resolve_chat`` ходит через ту же пачку,
+    поэтому подмена одного метода закрывает оба пути.
+    """
     chats = {"@a": 111, "@b": 222, "@c": 333}
 
-    async def fake_resolve(account_id: int, query: str):
-        found = chats.get(query.strip())
-        return (found, query) if found else None
+    async def fake_resolve_many(account_id: int, queries):
+        found = {}
+        for raw in queries:
+            key = (raw or "").strip()
+            if key in chats:
+                found[key] = (chats[key], key)
+        return found
 
-    monkeypatch.setattr(manager, "resolve_chat", fake_resolve)
+    monkeypatch.setattr(manager, "resolve_many", fake_resolve_many)
     return chats
 
 

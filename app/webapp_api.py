@@ -148,6 +148,61 @@ def _as_ids(value: Any) -> list[int]:
     return result
 
 
+def _missed_text(missed: list[str]) -> list[str]:
+    """Ненайденные чаты одной короткой строкой.
+
+    Чатов в задаче может быть сколько угодно, поэтому перечислять их все нельзя:
+    сообщение с двумя сотнями ссылок в кабинете не читается и не помещается.
+    Показываем первые три и число остальных — этого хватает, чтобы понять, что
+    именно не нашлось (обычно опечатка в одной ссылке).
+    """
+    if not missed:
+        return []
+    head = ", ".join(missed[:3])
+    if len(missed) <= 3:
+        return [f"Не нашёл {'чат' if len(missed) == 1 else 'чаты'}: {head}"]
+    return [f"Не нашёл чаты ({len(missed)}): {head} и ещё {len(missed) - 3}"]
+
+
+def _split_chats(pairs: list[tuple[int, str]], source_id: int) -> list[tuple[int, str]]:
+    """Список чатов задачи без повторов и без источника.
+
+    Геометрия «первый чат в обязательной колонке target_id, остальные — в
+    настройках» одна у пересылки в несколько чатов, авто-постинга и рассылки,
+    поэтому и подготовка списка одна: повтор означал бы два сообщения в один
+    чат за круг, а источник в получателях — пересылку самому себе.
+    """
+    seen: list[tuple[int, str]] = []
+    taken: set[int] = set()
+    for chat_id, title in pairs:
+        if chat_id and chat_id != source_id and chat_id not in taken:
+            taken.add(chat_id)
+            seen.append((chat_id, title))
+    return seen
+
+
+# Задачи, которые ходят в любое число чатов, и их ответ на «а чаты-то где?».
+# Держим одним словарём: список чатов у них собирается одним и тем же кодом, и
+# отличается только словами в ошибке.
+MULTI_CHAT_EMPTY: dict[str, str] = {
+    "broadcast": "Укажите, в какие чаты пересылать",
+    "poster": "Укажите, в какие чаты постить",
+    "mailing": "Укажите получателей рассылки",
+}
+MULTI_CHAT_KINDS: frozenset[str] = frozenset(MULTI_CHAT_EMPTY)
+
+# Как назвать незаполненный список в ответе «Укажите: …». Поле одно (targets), а
+# смысл разный: у пересылки и постинга это чаты, у автоподписки — каналы, у
+# рассылки — получатели. Одно слово «получателей» на всех сбивало с толку, ведь в
+# автоподписке никаких получателей нет.
+TARGETS_LABEL: dict[str, str] = {
+    "broadcast": "чаты",
+    "poster": "чаты",
+    "autosubscribe": "каналы",
+    "mailing": "получателей",
+}
+
+
 def _months_or_fail(raw: Any, default: int) -> int:
     """Срок абонемента из запроса. Поля нет — умолчание, мусор — отказ.
 
@@ -376,6 +431,13 @@ async def create_task(request: web.Request) -> web.Response:
     targets = _as_list(payload.get("targets"))
 
     needs = set(command["needs"])
+    # Задачи «в несколько чатов» просят список получателей, но одиночное поле
+    # target тоже принимаем: его присылают старые формы, бот и ссылки на задачу,
+    # созданные до того, как постинг научился ходить в любое число чатов. Один
+    # чат — это просто список из одного, отдельной ветки проверок не нужно.
+    if "targets" in needs and "target" not in needs and target and not targets:
+        targets, target = [target], ""
+
     missing = []
     if "account" in needs and not account_id:
         missing.append("аккаунт")
@@ -386,7 +448,7 @@ async def create_task(request: web.Request) -> web.Response:
     if "target_user" in needs and not target_user:
         missing.append("человека, за которым следим")
     if "targets" in needs and not targets:
-        missing.append("получателей")
+        missing.append(TARGETS_LABEL.get(kind, "чаты"))
     if "message" in needs and not str(payload.get("message") or "").strip():
         # Рассылке текст в форме не нужен, если сообщения выбраны из библиотеки:
         # оттуда их и берёт планировщик, а копия того же текста в поле только
@@ -423,37 +485,47 @@ async def create_task(request: web.Request) -> web.Response:
     filters = default_filters()
     errors: list[str] = []
 
-    async def _resolve_chat(query: str, label: str) -> tuple[int, str] | None:
+    # Чаты ищем одним обходом диалогов на все ссылки сразу: чатов в задаче может
+    # быть сколько угодно, а поиск каждого по отдельности означал бы столько же
+    # обходов Telegram подряд — верный FloodWait на сотне получателей.
+    lookups = [source, target, target_user, *(str(raw) for raw in targets)]
+    resolved = await manager.resolve_many(account_id, lookups)
+
+    def _resolve_chat(query: str, label: str) -> tuple[int, str] | None:
         if not query:
             return None
-        found = await manager.resolve_chat(account_id, query)
+        found = resolved.get(query.strip())
         if found is None:
             errors.append(f"Не нашёл {label}: {query}")
             return None
         return found
 
-    found_source = await _resolve_chat(source, "источник")
-    found_target = await _resolve_chat(target, "приёмник")
-    found_user = await _resolve_chat(target_user, "пользователя")
+    found_source = _resolve_chat(source, "источник")
+    found_target = _resolve_chat(target, "приёмник")
+    found_user = _resolve_chat(target_user, "пользователя")
 
     # Получателей держим парами (id, название): рассылке первый из них станет
     # приёмником правила, и без названия карточка задачи была бы безымянной.
+    missed: list[str] = []
     extra_pairs: list[tuple[int, str]] = []
     for raw in targets:
-        found = await _resolve_chat(str(raw), "получателя")
-        if found is not None:
-            extra_pairs.append(found)
+        ref = str(raw).strip()
+        found = resolved.get(ref)
+        if found is None:
+            missed.append(ref)
+            continue
+        extra_pairs.append(found)
     extra_targets = [pair[0] for pair in extra_pairs]
 
-    if errors:
-        # Рассылке, у которой не нашлось ни одного получателя, отвечает её
+    if errors or missed:
+        # Рассылке и постингу, где не нашлось ни одного чата, отвечает их
         # собственная ветка — и отвечает 400: это ошибка ввода, а не «чат не
         # найден». Если часть чатов нашлась, про остальные честно сообщаем здесь.
-        mailing_has_nowhere_to_send = (
-            kind == "mailing" and found_target is None and not extra_pairs
+        nowhere_to_send = (
+            kind in ("mailing", "poster") and found_target is None and not extra_pairs
         )
-        if not mailing_has_nowhere_to_send:
-            return _json({"error": "; ".join(errors)}, status=404)
+        if not nowhere_to_send:
+            return _json({"error": "; ".join([*errors, *_missed_text(missed)])}, status=404)
 
     source_id, source_title = found_source or (0, "")
     target_id, target_title = found_target or (0, "")
@@ -468,6 +540,21 @@ async def create_task(request: web.Request) -> web.Response:
     if found_user is not None:
         filters["target_user_id"] = found_user[0]
     filters["targets"] = extra_targets
+    # Все чаты задачи в одном списке: первый чат может прийти и полем «приёмник»
+    # (одиночный выбор, старые формы и бот), и первым из получателей.
+    chat_pairs = ([found_target] if found_target else []) + extra_pairs
+
+    # Задачи «в любое число чатов» делят список одинаково: первый чат живёт в
+    # обязательной колонке target_id, остальные — в настройках. Раньше эти
+    # четыре строки стояли в каждой ветке отдельно и разъезжались при правках.
+    # Источник выкидываем только у пересылки — там он есть и пересылать пост в
+    # его же чат незачем; у постинга и рассылки источника нет вовсе.
+    if kind in MULTI_CHAT_KINDS:
+        chats = _split_chats(chat_pairs, source_id if kind == "broadcast" else 0)
+        if not chats:
+            return _json({"error": MULTI_CHAT_EMPTY[kind]}, status=400)
+        target_id, target_title = chats[0]
+        filters["targets"] = [pair[0] for pair in chats[1:]]
 
     if kind == "parser":
         filters["limit"] = max(1, min(_as_int(payload.get("limit"), 200), MAX_PARSER_LIMIT))
@@ -484,9 +571,10 @@ async def create_task(request: web.Request) -> web.Response:
         if kind == "dialogs" and not source_id:
             source_title = "личные диалоги"
     elif kind == "poster":
-        # Авто-постер: шлёт собственные сообщения в приёмник по расписанию.
+        # Авто-постер: шлёт собственные сообщения в выбранные чаты по расписанию.
         # Источник не нужен — ставим 0, чтобы не создавать ложного совпадения
         # с входящими сообщениями приёмника.
+        source_id, source_title = 0, "авто-постинг"
         msgs = [m.strip() for m in str(payload.get("message") or "").split("\n") if m.strip()]
         if not msgs:
             msgs = [str(payload.get("message") or "").strip()]
@@ -495,28 +583,11 @@ async def create_task(request: web.Request) -> web.Response:
         filters["interval_seconds"] = interval_min * 60
         filters["window_start"] = str(payload.get("start") or "00:00")[:5]
         filters["window_end"] = str(payload.get("end") or "23:59")[:5]
-        source_id, source_title = 0, "авто-постинг"
     elif kind == "mailing":
         # Рассылка по чатам: свои сообщения по списку получателей, по кругу.
         # Источник не нужен — ставим 0, иначе входящее сообщение в первом же
         # чате-получателе «подхватило» бы рассылку как обычную пересылку.
-        chats: list[tuple[int, str]] = []
-        if found_target:
-            chats.append(found_target)
-        chats.extend(extra_pairs)
-        # Повторы убираем: один и тот же чат не должен получить сообщение дважды
-        # за круг. Источник исключаем по той же причине, что и в broadcast.
-        seen: list[tuple[int, str]] = []
-        for pair in chats:
-            if pair[0] and pair[0] != source_id and pair[0] not in [item[0] for item in seen]:
-                seen.append(pair)
-        if not seen:
-            return _json({"error": "Укажите получателей рассылки"}, status=400)
-
-        # Первый чат живёт в target_id (колонка обязательна), остальные — в
-        # настройках: такую же геометрию уже использует «Рассылка» (broadcast).
-        target_id, target_title = seen[0]
-        filters["targets"] = [pair[0] for pair in seen[1:]]
+        source_id, source_title = 0, "рассылка по чатам"
         filters["gap_seconds"] = max(0, _as_int(payload.get("gap"), 5))
         filters["gap_jitter"] = max(0, _as_int(payload.get("gap_jitter"), 0))
         filters["cycle_seconds"] = max(0, _as_int(payload.get("cycle"), 10))
@@ -525,7 +596,6 @@ async def create_task(request: web.Request) -> web.Response:
         filters["typing"] = _as_bool(payload.get("typing"))
         filters["random_pick"] = _as_bool(payload.get("random_pick"))
         filters["link_preview"] = _as_bool(payload.get("link_preview"))
-        source_id, source_title = 0, "рассылка по чатам"
 
         # Текст из формы кладём в библиотеку: рассылка берёт сообщения оттуда,
         # и потом их можно пополнять, не пересоздавая задачу.
@@ -605,13 +675,13 @@ async def toggle_task(request: web.Request) -> web.Response:
 def _mailing_finished(rule) -> bool:
     """Рассылка сделала все круги, сколько было задано."""
     from app.telegram_client.filters import FilterConfig
-    from app.telegram_client.jobs import mailing_position
+    from app.telegram_client.jobs import chat_recipients, mailing_position
 
     conf = FilterConfig.from_dict(rule.filters or {})
     repeats = max(0, int(conf.repeats or 0))
     if not repeats:
         return False
-    recipients = len(conf.targets) + (1 if rule.target_id else 0)
+    recipients = len(chat_recipients(rule))
     _, cycle = mailing_position(rule.forwarded_count, recipients)
     return cycle >= repeats
 
@@ -818,10 +888,14 @@ async def delete_task(request: web.Request) -> web.Response:
 @routes.get("/api/chats")
 @require_auth
 async def list_chats(request: web.Request) -> web.Response:
-    """Чаты подключённого аккаунта. Параметры: account_id, q (поиск)."""
+    """Чаты подключённого аккаунта. Параметры: account_id, q (поиск), limit."""
     user_id = request[USER_ID_KEY]
     account_id = int(request.query.get("account_id") or 0)
     query = (request.query.get("q") or "").strip().lower()
+    # По умолчанию отдаём все чаты: постинг и рассылка ходят в любое их число,
+    # и отрезанный список означал бы, что часть чатов просто не выбрать мышкой.
+    # limit оставлен для случаев, когда нужна короткая витрина.
+    limit = max(0, _as_int(request.query.get("limit"), 0))
 
     async with SessionLocal() as session:
         account = await repo.get_account(session, account_id, user_id)
@@ -841,7 +915,7 @@ async def list_chats(request: web.Request) -> web.Response:
             }
         )
 
-    dialogs = list(await manager.list_dialogs(account_id, limit=200))
+    dialogs = list(await manager.list_dialogs(account_id, limit=limit))
     if query:
         # Ищем и по названию, и по нику: в кабинете поле так и подписано
         # («Название, тема или @username»), а раньше ник не искался вовсе.
@@ -1318,7 +1392,12 @@ def _task_view(rule, collected: int | None = None) -> dict:
     считает вызывающий, пока открыта сессия).
     """
     from app.telegram_client.filters import FilterConfig
-    from app.telegram_client.jobs import KIND_LABELS, MAX_PARSER_LIMIT, task_title
+    from app.telegram_client.jobs import (
+        KIND_LABELS,
+        MAX_PARSER_LIMIT,
+        chat_recipients,
+        task_title,
+    )
 
     kind = rule.kind or "forward"
     view = {
@@ -1344,6 +1423,9 @@ def _task_view(rule, collected: int | None = None) -> dict:
     # Авто-постер: выносим расписание, чтобы в карточке задачи было видно,
     # как часто и в каком окне он шлёт (delay в секундах неинформативен).
     conf = FilterConfig.from_dict(rule.filters or {})
+    # Чаты задачи считает планировщик — тем же счётом, каким и рассылает.
+    # Своя арифметика здесь однажды разошлась бы с настоящим числом получателей.
+    chats = chat_recipients(rule)
     if kind == "poster":
         view["interval_min"] = max(1, conf.interval_seconds // 60)
         view["window_start"] = conf.window_start
@@ -1369,7 +1451,7 @@ def _task_view(rule, collected: int | None = None) -> dict:
         # У рассылки «всего» есть: получатели × число кругов. Без ограничения
         # кругов (repeats=0) конца нет — тогда и total остаётся null, как у
         # остальных бесконечных задач.
-        recipients = len(conf.targets) + (1 if rule.target_id else 0)
+        recipients = len(chats)
         view["mailing"] = {
             "recipients": recipients,
             "messages_count": len(conf.library_ids),
@@ -1382,10 +1464,10 @@ def _task_view(rule, collected: int | None = None) -> dict:
         if conf.repeats > 0 and recipients:
             total = recipients * int(conf.repeats)
     view["progress"] = {"done": done, "total": total}
-    if kind == "broadcast":
-        view["targets_count"] = len(conf.targets)
-    if kind == "mailing":
-        view["targets_count"] = len(conf.targets) + (1 if rule.target_id else 0)
+    # Сколько чатов у задачи — одним полем на все задачи «в несколько чатов»:
+    # у пересылки счёт раньше шёл по filters и терял первый чат из target_id.
+    if kind in MULTI_CHAT_KINDS:
+        view["targets_count"] = len(chats)
     return view
 
 
@@ -1417,9 +1499,12 @@ COMMANDS: list[dict] = [
         "title": "Пересылка в несколько чатов",
         "description": "Одно сообщение из источника — в несколько чатов сразу.",
         "status": "ready",
-        "needs": ["account", "source", "target", "targets"],
+        # Приёмник отдельным полем не просим: чаты — один список, и первый из
+        # них всё равно становится главным. Два поля под одно и то же заставляли
+        # заполнять «приёмник» руками даже при выборе чатов мышкой.
+        "needs": ["account", "source", "targets"],
         "optional": [],
-        "hint": "Источник — откуда берём пост, получатели — куда он уйдёт. Чаты отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты».",
+        "hint": "Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу.",
     },
     {
         "id": "parser",
@@ -1496,11 +1581,11 @@ COMMANDS: list[dict] = [
         "kind": "poster",
         "emoji": "📤",
         "title": "Авто-постинг",
-        "description": "Шлёт ваше сообщение в чат каждые N минут в заданном окне времени.",
+        "description": "Шлёт ваше сообщение в выбранные чаты каждые N минут в заданном окне времени.",
         "status": "ready",
-        "needs": ["account", "target", "message"],
+        "needs": ["account", "targets", "message"],
         "optional": ["interval", "start", "end"],
-        "hint": "Приёмник — куда постить, кнопка «выбрать» покажет чаты аккаунта. Сообщений может быть несколько (каждое с новой строки) — уходят по очереди. Интервал в минутах, окно — ЧЧ:ММ.",
+        "hint": "Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Сообщений тоже может быть несколько (каждое с новой строки) — за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ.",
     },
     {
         "id": "mailing",

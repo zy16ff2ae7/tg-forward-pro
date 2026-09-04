@@ -71,9 +71,9 @@ const FIELD_SPEC = {
     pick: 'one',
   },
   targets: {
-    label: 'Получатели',
+    label: 'Чаты',
     placeholder: '@chan1, @chan2, t.me/+invite',
-    note: 'через запятую или кнопкой «выбрать»',
+    note: 'кнопка «выбрать» умеет отметить все чаты сразу',
     pick: 'many',
   },
   target_user: { label: 'За кем следим', placeholder: '@username или ссылка на профиль' },
@@ -146,26 +146,31 @@ const KIND_EMOJI = {
 const kindEmoji = (kind) => KIND_EMOJI[kind] || '⚙️';
 
 /* Плитки «быстрый старт» на Главной: восемь слотов, последний — весь каталог.
-   Подписи короткие: на 390 px в четыре столбца длинное название не влезает. */
+   Подписи короткие: на 390 px в четыре столбца длинное название не влезает.
+   Двух «пересылок» и двух «рассылок» здесь быть не должно — плитки называются
+   так же, как задачи в каталоге: копия канала, один пост во все чаты,
+   авто-постинг и рассылка своих сообщений. */
 const TILES = [
-  { id: 'copy_channel', name: 'Пересылка' },
-  { id: 'broadcast', name: 'Рассылка' },
+  { id: 'copy_channel', name: 'Копия' },
+  { id: 'broadcast', name: 'В чаты' },
   { id: 'poster', name: 'Постинг' },
+  { id: 'mailing', name: 'Рассылка' },
   { id: 'parser', name: 'Парсер' },
   { id: 'autosubscribe', name: 'Подписка' },
   { id: 'checks', name: 'Чеки' },
-  { id: 'dialogs', name: 'Диалоги' },
   { id: null, name: 'Все', emoji: '☰', ico: 'ico--violet', tab: 'commands' },
 ];
 
 /* Умный поиск по командам работает локально: фраза → слова → команды.
    Никакого внешнего AI и ключей — значит, ничего не стоит и не отваливается.
-   Ключевые слова подобраны под то, как о задачах говорят вслух. */
+   Ключевые слова подобраны под то, как о задачах говорят вслух. Одно слово на
+   две задачи не вешаем: «рассылка» — это свои сообщения по чатам (mailing), а
+   один пост из источника во все чаты ищут словами «в чаты» и «во все». */
 const SMART_WORDS = {
   copy_channel: ['перес', 'копир', 'дубл', 'зеркал', 'репост', 'канал в канал'],
-  broadcast: ['рассыл', 'разосл', 'спам', 'всем', 'в чаты', 'массов', 'реклам'],
+  broadcast: ['в чаты', 'во все', 'один пост', 'из канала в чаты', 'массов'],
   poster: ['пост', 'публик', 'по расписан', 'кажд', 'таймер', 'автопост', 'интервал'],
-  mailing: ['рассыл', 'разосл', 'по чатам', 'отправ', 'прогрев', 'всем'],
+  mailing: ['рассыл', 'разосл', 'по чатам', 'отправ', 'прогрев', 'спам', 'реклам', 'всем'],
   parser: ['парс', 'собра', 'участник', 'аудитор', 'база', 'юзер', 'подписчик'],
   autosubscribe: ['подпис', 'вступ', 'войти', 'инвайт', 'присоедин'],
   checks: ['чек', 'подар', 'gift', 'ловец', 'халяв', 'промо'],
@@ -256,9 +261,9 @@ const DEMO_COMMANDS = [
     needs: ['account', 'source', 'target'], optional: ['mode'],
     description: 'Копирует новые публикации между каналами с заменами текста.' },
   { id: 'broadcast', group: 'publish', kind: 'broadcast', emoji: '📣', title: 'Пересылка в несколько чатов', status: 'ready',
-    needs: ['account', 'source', 'target', 'targets'], optional: [],
+    needs: ['account', 'source', 'targets'], optional: [],
     description: 'Одно сообщение из источника — в несколько чатов сразу.',
-    hint: 'Источник — откуда берём пост, получатели — куда он уйдёт. Чаты отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты».' },
+    hint: 'Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу.' },
   { id: 'parser', group: 'audience', kind: 'parser', emoji: '🕵️', title: 'Парсер аудитории', status: 'ready',
     needs: ['account', 'source'], optional: ['limit'],
     description: 'Собирает участников чужого чата в список по вашей команде.',
@@ -281,9 +286,9 @@ const DEMO_COMMANDS = [
     needs: ['account', 'source', 'target_user'], optional: ['keywords'],
     description: 'Удаляет сообщения выбранного человека в чате, где вы администратор.' },
   { id: 'poster', group: 'publish', kind: 'poster', emoji: '📤', title: 'Авто-постинг', status: 'ready',
-    needs: ['account', 'target', 'message'], optional: ['interval', 'start', 'end'],
-    description: 'Шлёт ваше сообщение в чат каждые N минут в заданном окне времени.',
-    hint: 'Приёмник — куда постить, кнопка «выбрать» покажет чаты аккаунта. Сообщений может быть несколько (каждое с новой строки) — уходят по очереди. Интервал в минутах, окно — ЧЧ:ММ.' },
+    needs: ['account', 'targets', 'message'], optional: ['interval', 'start', 'end'],
+    description: 'Шлёт ваше сообщение в выбранные чаты каждые N минут в заданном окне времени.',
+    hint: 'Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Сообщений тоже может быть несколько (каждое с новой строки) — за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ.' },
   { id: 'mailing', group: 'publish', kind: 'mailing', emoji: '📨', title: 'Рассылка по чатам', status: 'ready',
     needs: ['account', 'targets', 'message'], optional: ['gap', 'cycle', 'repeats', 'typing', 'random_pick'],
     description: 'Шлёт ваши сообщения по списку чатов: по одному в круг, с паузой между чатами.',
@@ -373,11 +378,29 @@ const DEMO_CHATS = [
   { id: 1004, title: 'Зеркало афиши', is_channel: true, is_group: false },
   { id: 1005, title: 'Подборки', is_channel: false, is_group: false },
   { id: 1006, title: 'Команда (чат)', is_channel: false, is_group: true },
+  // Массовка: постить и рассылать можно в любое число чатов, поэтому демо
+  // обязано показывать длинный список — на шести чатах не видно ни прокрутки
+  // шторки, ни счётчика «выбрано», ни кнопки «выбрать все».
+  ...Array.from({ length: 144 }, (_, n) => ({
+    id: 2001 + n,
+    title: `Чат ${n + 1} · ${CHAT_TAGS[n % CHAT_TAGS.length]}`,
+    username: n % 3 === 0 ? `demo_chat_${n + 1}` : '',
+    is_channel: n % 4 === 0,
+    is_group: n % 4 !== 0,
+  })),
 ];
 
 function demoChats(path) {
-  const query = (new URLSearchParams(path.split('?')[1] || '').get('q') || '').toLowerCase();
-  const chats = query ? DEMO_CHATS.filter((c) => c.title.toLowerCase().includes(query)) : DEMO_CHATS;
+  const params = new URLSearchParams(path.split('?')[1] || '');
+  const query = (params.get('q') || '').toLowerCase().replace(/^@/, '');
+  const limit = Number(params.get('limit') || 0);
+  let chats = query
+    ? DEMO_CHATS.filter(
+      (c) => c.title.toLowerCase().includes(query)
+        || String(c.username || '').toLowerCase().includes(query),
+    )
+    : DEMO_CHATS;
+  if (limit > 0) chats = chats.slice(0, limit);
   return { chats, total: chats.length, online: true };
 }
 
@@ -438,23 +461,45 @@ const DEMO_RESULTS = {
   },
 };
 
+/* Список чатов задачи — так же, как его собирает сервер (_split_chats): без
+   повторов и без источника, потому что пересылать пост в тот же чат, откуда он
+   взят, незачем. Сервер сравнивает уже найденные id, демо — сами ссылки: этого
+   хватает, чтобы карточка в демо не обещала на один чат больше, чем создастся. */
+function demoChatList(body, kind) {
+  const source = String(body.source || '').trim().toLowerCase();
+  const chats = [];
+  [body.target, ...(body.targets || [])].forEach((raw) => {
+    const ref = String(raw || '').trim();
+    const key = ref.toLowerCase();
+    if (!ref || chats.some((item) => item.toLowerCase() === key)) return;
+    if (kind === 'broadcast' && key === source) return;
+    chats.push(ref);
+  });
+  return chats;
+}
+
 function demoTaskTitle(body, command) {
   if (command) {
     if (command.kind === 'parser') return `Парсер аудитории: ${body.source}`;
-    if (command.kind === 'autosubscribe') return `Автоподписка: ${(body.targets || []).join(', ')}`;
+    if (command.kind === 'autosubscribe') {
+      const channels = (body.targets || []).length;
+      if (channels) return `Автоподписка: ${channels} кан.` + (body.source ? ` из «${body.source}»` : '');
+      return `Автоподписка: ${body.source || 'все чаты аккаунта'}`;
+    }
     if (command.kind === 'dialogs') return `Уведомления из диалогов → ${body.target}`;
     if (command.kind === 'baiting') return `Байтинг: ${body.target_user} в ${body.source}`;
     if (command.kind === 'mute') return `Мут: ${body.target_user} в ${body.source}`;
     if (command.kind === 'checks') return `Ловец чеков: ${body.source} → ${body.target}`;
-    if (command.kind === 'poster') {
-      return `Авто-постинг → ${body.target || ''}`;
-    }
-    if (command.kind === 'mailing') {
-      const count = splitList(body.targets).length || 1;
-      return `Рассылка по чатам: ${count} чат.`;
-    }
-    if (command.kind === 'broadcast') {
-      return `Рассылка: ${body.source} → ${[body.target, ...(body.targets || [])].join(', ')}`;
+    // Постинг, рассылка и пересылка в чаты ходят в любое число чатов: в
+    // заголовке счёт, а имя чата — только когда он один. Тот же расчёт, что
+    // task_title на сервере.
+    if (['broadcast', 'poster', 'mailing'].includes(command.kind)) {
+      const chats = demoChatList(body, command.kind);
+      const many = chats.length > 1 ? `${chats.length} чат.` : (chats[0] || '');
+      if (command.kind === 'broadcast') return `Пересылка: ${body.source} → ${many}`;
+      const name = command.kind === 'poster' ? 'Авто-постинг' : 'Рассылка по чатам';
+      if (!chats.length) return name;
+      return chats.length > 1 ? `${name}: ${many}` : `${name} → ${many}`;
     }
   }
   return `${body.source} → ${body.target}`;
@@ -570,13 +615,17 @@ function demoApi(path, options = {}) {
       || DEMO_COMMANDS.find((item) => item.kind === body.kind)
       || DEMO_COMMANDS[0];
     const kind = command.kind;
+    // Первый чат задачи: у постинга и рассылки поля «приёмник» нет вовсе, и без
+    // этого карточка в демо оставалась безымянной. Список — тот же, что у
+    // заголовка, и без источника внутри: его сервер из получателей выкидывает.
+    const chats = demoChatList(body, kind);
     const task = {
       id: DEMO_STATE.nextId++,
       kind,
       kind_label: command.title.toLowerCase(),
       title: demoTaskTitle(body, command),
       source: String(body.source || ''),
-      target: String(body.target || body.source || ''),
+      target: String(chats[0] || body.source || ''),
       archived: false,
       oneshot: kind === 'parser' || kind === 'autosubscribe',
       enabled: kind !== 'parser' && kind !== 'autosubscribe',
@@ -587,6 +636,30 @@ function demoApi(path, options = {}) {
       account_id: Number(body.account_id) || 1,
       created_at: new Date().toISOString(),
     };
+    // Дальше демо повторяет _task_view: счёт чатов у всех задач «в несколько
+    // чатов», расписание у постинга, паузы и круги у рассылки. Иначе в демо на
+    // карточке не видно того, что показывает сервер.
+    const lines = String(body.message || '').split('\n').filter((item) => item.trim()).length;
+    if (['broadcast', 'poster', 'mailing'].includes(kind)) task.targets_count = chats.length;
+    if (kind === 'poster') {
+      task.interval_min = Number(body.interval) || 2;
+      task.window_start = body.start || '00:00';
+      task.window_end = body.end || '23:59';
+      task.messages_count = lines;
+    }
+    if (kind === 'mailing') {
+      const repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
+      task.mailing = {
+        recipients: chats.length,
+        messages_count: (body.library_ids || []).length || lines,
+        gap_seconds: Number(body.gap) || 5,
+        cycle_seconds: Number(body.cycle) || 10,
+        repeats,
+        typing: Boolean(body.typing),
+        random_pick: Boolean(body.random_pick),
+      };
+      if (repeats > 0 && chats.length) task.progress = { done: 0, total: chats.length * repeats };
+    }
     DEMO_STATE.tasks.push(task);
     const run = kind === 'parser'
       ? { ok: true, collected: 128, limit: Number(body.limit) || 200 }
@@ -1174,6 +1247,9 @@ function taskMetaLines(task) {
   const isForward = kind === 'forward';
   const lines = [task.kind_label || (isForward ? 'пересылка' : kind)];
   if (isForward) lines.push(task.mode === 'copy' ? 'копия без метки' : 'обычный форвард');
+  // Сколько чатов у задачи — первым делом: у постинга и рассылки это главное
+  // число задачи, и в заголовке оно есть только когда чатов больше одного.
+  if (task.targets_count) lines.push(`${task.targets_count} ${chatWord(task.targets_count)}`);
   if (kind === 'poster') {
     // Авто-постер: показываем расписание вместо «задержки в секундах».
     lines.push(`каждые ${task.interval_min || 1} мин`);
@@ -1184,7 +1260,6 @@ function taskMetaLines(task) {
   } else if (kind === 'mailing') {
     // Рассылка: её расписание — это паузы и число кругов, а не «задержка».
     const info = task.mailing || {};
-    if (info.recipients) lines.push(`${info.recipients} чат.`);
     lines.push(`пауза ${info.gap_seconds || 5} сек`);
     if (info.messages_count) lines.push(`${info.messages_count} сообщ.`);
     lines.push(info.repeats ? `${info.repeats} круг(ов)` : 'круги без конца');
@@ -1193,7 +1268,6 @@ function taskMetaLines(task) {
   } else {
     lines.push(`задержка ${task.delay} сек`);
   }
-  if (kind === 'broadcast' && task.targets_count) lines.push(`${task.targets_count} получат.`);
   return lines;
 }
 
@@ -1554,13 +1628,14 @@ async function loadChats() {
 }
 
 /* Из выбранных чатов — открыть шторку задачи с уже заполненными полями.
-   Куда именно подставить выбранные чаты — зависит от команды, иначе
-   валидация на сохранении падает «Укажите: источник»:
-     • parser      → источник (кого парсим — сам выбранный чат)
-     • forward      → приёмник (куда пересылаем)
-     • broadcast/.. → получатели (куда рассылаем / на что подписываемся).
-   Один чат → он же единственный получатель. Несколько → первый приёмник,
-   остальные — в список получателей. */
+   Куда подставить выбранное, спрашиваем у самой команды, а не у её типа: поля
+   приходят в needs/optional, и разбор по kind разъезжался с сервером при каждой
+   правке каталога (постинг оброс списком чатов — и «выбрать все» складывало
+   двести чатов в поле одного приёмника).
+     • есть «источник» и нет приёмников (парсер) → выбранный чат в источник;
+     • есть «получатели» и нет «приёмника» (постинг, рассылка) → все в список;
+     • есть и то и другое (пересылка в чаты) → первый в приёмник, прочие в список;
+     • только «приёмник» (пересылка, ловец чеков) → первый выбранный чат. */
 function openTaskForSelection(kind) {
   const selected = getSelectedChats();
   if (!selected.length) return;
@@ -1573,21 +1648,22 @@ function openTaskForSelection(kind) {
     toast('Каталог команд ещё не загружен');
     return;
   }
+  const fields = [...(command.needs || []), ...(command.optional || [])];
   const prefill = {};
-  if (command.kind === 'parser') {
+  if (fields.includes('targets')) {
+    // Приёмник заполняем только когда поле есть у команды: у постинга и рассылки
+    // его нет вовсе, и первый чат из выборки просто исчез бы.
+    if (fields.includes('target')) {
+      prefill.target = refs[0];
+      prefill.targets = refs.slice(1);
+    } else {
+      prefill.targets = refs;
+    }
+  } else if (fields.includes('target')) {
+    prefill.target = refs[0];
+  } else if (fields.includes('source')) {
     // Парсер собирает участников ВЫБРАННОГО чата — он и есть источник.
     prefill.source = refs[0];
-  } else if (command.kind === 'mailing') {
-    // У рассылки по чатам поля «приёмник» нет: все выбранные чаты — получатели,
-    // даже если выбран один. Иначе форма открывалась бы пустой.
-    prefill.targets = refs.join(', ');
-  } else if (command.kind === 'forward') {
-    // Пересылка кладёт выбранный чат в приёмник; источник допишет пользователь.
-    prefill.target = refs[0];
-  } else {
-    // Рассылка / автоподписка и пр.: выбранные чаты — получатели.
-    prefill.target = refs[0];
-    prefill.targets = refs.length > 1 ? refs.join(', ') : '';
   }
   openTaskSheet(command, prefill);
 }
@@ -2066,12 +2142,17 @@ function fieldHtml(key) {
   // Поле с выбором чата: рядом с ним кнопка, которая открывает список чатов
   // аккаунта. Раньше единственным способом было вписать @username или id.
   if (spec.pick) {
+    // Чатов в поле может быть двести, и строка через запятую в одну строку
+    // ввода не читается — под полем показываем счёт, первые имена и «очистить».
+    const counter = spec.pick === 'many'
+      ? `<div class="field__count" id="count_${key}" hidden></div>` : '';
     return `<label class="field"><span>${spec.label}</span>
       <div class="field__row">
         ${input}
         <button type="button" class="btn btn--pick" data-pick="${key}"
                 data-multi="${spec.pick === 'many' ? '1' : ''}">💬 выбрать</button>
       </div>
+      ${counter}
       ${note}
     </label>`;
   }
@@ -2099,6 +2180,43 @@ function splitList(value) {
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+/* «1 чат» / «2 чата» / «5 чатов»: счёт читают глазами, и «5 чат» выглядит
+   недоделкой. */
+function chatWord(n) {
+  const tail = n % 100;
+  if (tail >= 11 && tail <= 14) return 'чатов';
+  const last = n % 10;
+  if (last === 1) return 'чат';
+  if (last >= 2 && last <= 4) return 'чата';
+  return 'чатов';
+}
+
+/* Итог под полем-списком: сколько чатов набрано, первые имена и «очистить».
+   Двести ссылок через запятую видны в поле одной обрезанной строкой — по ней
+   не понять ни счёт, ни что там вообще лежит. */
+function renderFieldCount(key) {
+  const holder = $(`count_${key}`);
+  if (!holder) return;
+  const refs = splitList(fieldValue(key));
+  holder.hidden = !refs.length;
+  if (!refs.length) {
+    holder.innerHTML = '';
+    return;
+  }
+  const head = refs.slice(0, 2).join(', ');
+  holder.innerHTML = `<b>${refs.length} ${chatWord(refs.length)}</b>
+    <span>${esc(refs.length > 2 ? `${head} и ещё ${refs.length - 2}` : head)}</span>
+    <button type="button" data-count-clear="${key}">очистить</button>`;
+}
+
+/* Все итоги формы разом: поля пересобираются под каждую команду, поэтому
+   ключи берём из разметки, а не из списка полей команды. */
+function renderFieldCounts() {
+  document.querySelectorAll('#taskFields .field__count').forEach((node) => {
+    renderFieldCount(node.id.replace(/^count_/, ''));
+  });
 }
 
 function openTaskSheet(command, prefill) {
@@ -2155,6 +2273,7 @@ function applyTaskPrefill(prefill) {
   }
   setValue('source', prefill.source);
   setValue('target_user', prefill.target_user);
+  renderFieldCounts();
 }
 
 function bindSheetFields() {
@@ -2235,11 +2354,46 @@ function renderPickerFooter() {
       `Отметьте сообщения — рассылка отправит их по очереди. Отмечено: ${chosen.length}.`;
   } else {
     $('pickerLead').textContent = multi
-      ? `${label}: отмечайте чаты — уйдут в поле через запятую. Отмечено: ${chosen.length}.`
+      ? `${label}: отмечайте — уйдут в поле через запятую. Чатов можно сколько угодно.`
       : `${label}: нажмите чат — он встанет в поле, шторка закроется.`;
   }
   apply.hidden = !multi;
   apply.textContent = chosen.length ? `Готово · ${chosen.length}` : 'Готово';
+  // «Выбрать все» нужно только там, где чатов может быть много: в библиотеке
+  // сообщений и при выборе одного чата эта строка ничего не значит.
+  const bulk = $('pickerBulk');
+  bulk.hidden = !(multi && mode === 'chats');
+  $('pickerCount').innerHTML = chosen.length
+    ? `отмечено <b>${chosen.length}</b>`
+    : 'ничего не отмечено';
+}
+
+/* Отметить или снять всё, что видно на экране. Именно видно: поиск сужает
+   список, и «выбрать все» после запроса «реклама» должно брать рекламные чаты,
+   а не заодно и остальные двести. Отметки за пределами текущего списка
+   не трогаем — человек набирал их раньше и не просил стирать. */
+function pickerSelectVisible(select) {
+  const picker = state.picker;
+  if (!picker.multi || picker.mode !== 'chats') return;
+  const refs = picker.chats.map(chatToRef).filter(Boolean);
+  if (!refs.length) return;
+  if (select) {
+    refs.forEach((ref) => {
+      if (!picker.chosen.includes(ref)) picker.chosen.push(ref);
+    });
+  } else {
+    picker.chosen = picker.chosen.filter((ref) => !refs.includes(ref));
+  }
+  // Отметки расставляем одним проходом по списку: markPickerRow на каждый чат —
+  // это поиск по всему списку, и на трёхсотом чате задержка уже видна.
+  const chosen = new Set(picker.chosen);
+  $('pickerList').querySelectorAll('[data-pick-ref]').forEach((row) => {
+    const on = chosen.has(row.dataset.pickRef);
+    row.classList.toggle('is-selected', on);
+    const mark = row.querySelector('.chat__check');
+    if (mark) mark.textContent = on ? '✓' : '';
+  });
+  renderPickerFooter();
 }
 
 /* Поиск в шторке: чаты ищет сервер, библиотеку фильтруем на месте — она
@@ -2387,6 +2541,7 @@ function applyPicker() {
   }
   const node = key ? $(`task_${key}`) : null;
   if (node) node.value = chosen.join(', ');
+  renderFieldCount(key);
   closePicker();
 }
 
@@ -2990,10 +3145,26 @@ function bindEvents() {
       renderLibraryPicks();
       return;
     }
+    // «Очистить» под полем-списком: набранные двести чатов иначе пришлось бы
+    // выделять в поле руками.
+    const clear = event.target.closest('[data-count-clear]');
+    if (clear) {
+      event.preventDefault();
+      const key = clear.dataset.countClear;
+      const node = $(`task_${key}`);
+      if (node) node.value = '';
+      renderFieldCount(key);
+      return;
+    }
     const button = event.target.closest('[data-pick]');
     if (!button) return;
     event.preventDefault();
     openFieldPicker(button.dataset.pick, button.dataset.multi === '1');
+  });
+  // Счёт под полем должен совпадать с полем и когда чаты вписывают руками.
+  $('taskFields').addEventListener('input', (event) => {
+    const key = String(event.target.id || '').replace(/^task_/, '');
+    if (key && $(`count_${key}`)) renderFieldCount(key);
   });
   $('pickerList').addEventListener('click', (event) => {
     const item = event.target.closest('[data-pick-ref]');
@@ -3001,6 +3172,8 @@ function bindEvents() {
     togglePickerRef(item.dataset.pickRef);
   });
   $('pickerApply').addEventListener('click', applyPicker);
+  $('pickerAll').addEventListener('click', () => pickerSelectVisible(true));
+  $('pickerNone').addEventListener('click', () => pickerSelectVisible(false));
   let pickerTimer = null;
   $('pickerSearch').addEventListener('input', () => {
     clearTimeout(pickerTimer);

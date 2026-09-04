@@ -160,7 +160,7 @@
         <button class="btn btn--primary" data-chat-action="mailing" title="Свои сообщения по выбранным чатам, по кругу">📨 Рассылка</button>
         <button class="btn" data-chat-action="broadcast" title="Один пост из источника — во все выбранные чаты">📣 Пост в чаты</button>
         <button class="btn" data-chat-action="forward" title="Переслать в выбранный чат">🔁 Пересылка</button>
-        <button class="btn" data-chat-action="poster" title="Авто-постинг в выбранный чат">📤 Авто-постинг</button>
+        <button class="btn" data-chat-action="poster" title="Авто-постинг во все выбранные чаты">📤 Авто-постинг</button>
         <button class="btn" data-chat-action="parser" title="Спарсить аудиторию выбранного чата">🕵️ Парсер</button>
         <button class="btn chat-bar__clear" data-chat-action="clear" title="Сбросить выбор">✕</button>
       </div>
@@ -314,6 +314,14 @@
                  autocomplete="off" aria-label="Поиск чата">
         </div>
         <div class="sheet__lead" id="pickerLead"></div>
+        <!-- Отметить весь список сразу: постить и рассылать можно в любое число
+             чатов, и на сотне чатов «выбрать все» — единственный разумный путь.
+             Кнопка знает про поиск: отмечает то, что видно на экране. -->
+        <div class="picker__bulk" id="pickerBulk" hidden>
+          <button type="button" class="btn btn--ghost btn--sm" id="pickerAll">Выбрать все</button>
+          <button type="button" class="btn btn--ghost btn--sm" id="pickerNone">Снять все</button>
+          <span class="picker__count" id="pickerCount"></span>
+        </div>
         <div class="list" id="pickerList"></div>
         <button class="btn btn--primary btn--block" id="pickerApply">Готово</button>
       </div>

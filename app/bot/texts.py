@@ -93,7 +93,7 @@ def subscription_status(active_until: datetime | None, rules_count: int) -> str:
 
 def rule_card(rule) -> str:
     """Карточка задачи. Состав строк зависит от типа задачи."""
-    from app.telegram_client.jobs import KIND_LABELS, task_title
+    from app.telegram_client.jobs import KIND_LABELS, chat_recipients, task_title
 
     kind = rule.kind or "forward"
     filters = rule.filters or {}
@@ -111,14 +111,20 @@ def rule_card(rule) -> str:
 
     if kind in ("forward", "broadcast", "checks"):
         lines.append(f"Источник: <b>{rule.source_title or rule.source_id}</b>")
+    if kind in ("forward", "checks"):
         lines.append(f"Приёмник: <b>{rule.target_title or rule.target_id}</b>")
     if kind == "forward":
         mode = "копия (без метки)" if rule.mode == "copy" else "обычный форвард"
         lines.append(f"Режим: {mode}")
-    if kind == "broadcast":
-        extra = filters.get("targets") or []
-        if extra:
-            lines.append(f"Дополнительных получателей: {len(extra)}")
+    # Пересылка в чаты, постинг и рассылка ходят в любое число чатов: считаем их
+    # одним счётом. Раньше пересылка писала «дополнительных получателей» и
+    # теряла из счёта первый чат, а постинг с рассылкой не писали ничего.
+    if kind in ("broadcast", "poster", "mailing"):
+        chats = chat_recipients(rule)
+        if len(chats) == 1 and (rule.target_title or rule.target_id):
+            lines.append(f"Чат: <b>{rule.target_title or rule.target_id}</b>")
+        else:
+            lines.append(f"Чатов: <b>{len(chats)}</b>")
     if kind in ("baiting", "mute"):
         watched = int(filters.get("target_user_id") or 0)
         lines.append(f"Следим за: {watched or 'всеми подряд'}")
