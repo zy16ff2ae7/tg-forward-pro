@@ -99,7 +99,7 @@ async def subscription_gate(event: Message | CallbackQuery) -> bool:
 
     if isinstance(event, CallbackQuery):
         await event.answer()
-        await message.answer(text, reply_markup=payment_menu())
+        await message.answer(text, reply_markup=payment_menu(event.from_user.id))
     else:
-        await message.answer(text, reply_markup=payment_menu())
+        await message.answer(text, reply_markup=payment_menu(event.from_user.id))
     return False

@@ -16,11 +16,17 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 echo "==> Синхронизирую файлы в $TARGET_HOST:$APP_DIR"
 ssh "$TARGET_HOST" "mkdir -p $APP_DIR/{data,logs}"
 
+# data и logs исключены целиком, а не по маске *.db. SQLite работает в режиме WAL,
+# рядом с базой лежат app.db-wal и app.db-shm: маска их не покрывала, и деплой
+# затирал живой журнал локальным (у разработчика он почти всегда пустой) —
+# вместе с транзакциями, которые не успели попасть в основной файл.
+
 rsync -av --delete \
   --exclude '.git' \
   --exclude 'venv' \
   --exclude '__pycache__' \
-  --exclude 'data/*.db' \
+  --exclude '.pytest_cache' \
+  --exclude 'data/*' \
   --exclude 'logs/*' \
   --exclude '.env' \
   "$PROJECT_DIR"/ "$TARGET_HOST:$APP_DIR"/
@@ -36,7 +42,7 @@ echo "==> Проверяю .env на сервере"
 # Но systemd-юнит читает его через EnvironmentFile — без файла сервис не стартует,
 # поэтому на первом деплое создаём заготовку и останавливаемся.
 ENV_CREATED="$(ssh "$TARGET_HOST" "if [[ -f $APP_DIR/.env ]]; then echo no; \
-  else cp $APP_DIR/.env.example $APP_DIR/.env && echo yes; fi")"
+  else (umask 077 && cp $APP_DIR/.env.example $APP_DIR/.env) && echo yes; fi")"
 
 if [[ "$ENV_CREATED" == "yes" ]]; then
   echo "!! На сервере создан $APP_DIR/.env из примера."
@@ -44,6 +50,14 @@ if [[ "$ENV_CREATED" == "yes" ]]; then
   echo "!! запустите деплой снова. Сервис пока не запущен."
   exit 1
 fi
+
+echo "==> Закрываю права на секреты"
+# rsync копирует права с локальной машины, где .env мог остаться 644.
+# .env — токен бота и ключ Fernet, data — БД с зашифрованными сессиями,
+# logs — отладочные записи с номерами телефонов.
+ssh "$TARGET_HOST" "chmod 600 $APP_DIR/.env \
+  && chmod 700 $APP_DIR/data $APP_DIR/logs \
+  && find $APP_DIR/data $APP_DIR/logs -type f -exec chmod 600 {} + 2>/dev/null || true"
 
 echo "==> Устанавливаю systemd-юнит"
 ssh "$TARGET_HOST" "cp $APP_DIR/deploy/$SERVICE_NAME.service /etc/systemd/system/ \

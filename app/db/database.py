@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib import import_module
 
+from loguru import logger
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -88,6 +89,23 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "subscriptions": {
         "banked_days": "INTEGER NOT NULL DEFAULT 0",
     },
+    "payments": {
+        "tx_id": "TEXT",
+    },
+    "pending_logins": {
+        "attempts": "INTEGER NOT NULL DEFAULT 0",
+    },
+}
+
+# Индексы, добавленные позже: create_all создаёт индексы только вместе с новой
+# таблицей, поэтому для уже существующих их доливаем отдельно. Уникальный
+# индекс по tx_id — это и есть защита от повторного зачёта одного перевода,
+# поэтому на старых базах он обязателен, а не «желателен».
+ADDED_INDEXES: dict[str, dict[str, str]] = {
+    "payments": {
+        "ux_payments_tx": 'CREATE UNIQUE INDEX IF NOT EXISTS "ux_payments_tx" '
+        'ON "payments" ("tx_id")',
+    },
 }
 
 
@@ -117,10 +135,25 @@ def _add_missing_columns(connection) -> None:
                 )
 
 
+def _add_missing_indexes(connection) -> None:
+    for table, indexes in ADDED_INDEXES.items():
+        if not connection.dialect.has_table(connection, table):
+            continue
+        for name, ddl in indexes.items():
+            try:
+                connection.execute(text(ddl))
+            except Exception as exc:  # noqa: BLE001
+                # Единственная реальная причина — дубликаты в уже накопленных
+                # данных. Молча падать на старте из-за этого нельзя, но и
+                # прятать тоже: пишем в лог, дальше защиту держит проверка в коде.
+                logger.warning("Не создали индекс {} на {}: {}", name, table, exc)
+
+
 async def ensure_schema() -> None:
-    """Доливает колонки, появившиеся после первого запуска."""
+    """Доливает колонки и индексы, появившиеся после первого запуска."""
     async with engine.begin() as conn:
         await conn.run_sync(_add_missing_columns)
+        await conn.run_sync(_add_missing_indexes)
 
 
 async def init_db() -> None:

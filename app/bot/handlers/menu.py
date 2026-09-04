@@ -16,6 +16,7 @@ from aiogram.types import (
 from app.bot import keyboards as kb
 from app.bot import texts
 from app.bot.media import WELCOME_PHOTO
+from app.bot.states import LoginStates
 from app.bot.utils import ensure_user, is_admin, smart_edit
 from app.config import settings
 from app.db import repo
@@ -49,7 +50,7 @@ DEEP_LINKS = {
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, state: FSMContext) -> None:
     user = await ensure_user(message)
     parts = (message.text or "").split(maxsplit=1)
     deep_link = parts[1].strip() if len(parts) > 1 else ""
@@ -67,6 +68,15 @@ async def cmd_start(message: Message) -> None:
         return
 
     if deep_link in ("add_account", "resume_login"):
+        # Из кабинета нажали «Подключить аккаунт» — человек должен попасть
+        # на сам шаг входа, а не в список аккаунтов: иначе он оказывается в
+        # чате бота перед меню и не понимает, что делать дальше.
+        from app.bot.handlers.accounts import begin_login_message
+
+        await begin_login_message(message, state)
+        return
+
+    if deep_link == "accounts":
         from app.bot.handlers.accounts import show_accounts_message
 
         await show_accounts_message(message)
@@ -140,7 +150,16 @@ async def cmd_help(message: Message) -> None:
 
 @router.callback_query(F.data == "nav:cancel")
 async def cancel_action(callback: CallbackQuery, state: FSMContext) -> None:
+    # Вход по номеру держит своё состояние в БД, а не во FSM: без этого «Отмена»
+    # чистила бы только шаг в памяти, а кабинет и бот продолжали бы предлагать
+    # «продолжить вход» на номер, от которого человек уже отказался.
+    current = await state.get_state()
     await state.clear()
+    if current in {LoginStates.phone.state, LoginStates.code.state, LoginStates.password.state}:
+        from app import accounts_login
+
+        if callback.from_user is not None:
+            await accounts_login.cancel(callback.from_user.id)
     await callback.answer("Отменено")
     if callback.message is not None:
         await smart_edit(callback.message, "Действие отменено.", reply_markup=kb.back_to_main())

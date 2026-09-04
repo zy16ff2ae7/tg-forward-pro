@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -12,6 +12,7 @@ from app.db.models import (
     CollectedItem,
     ForwardLog,
     Payment,
+    PendingDelivery,
     PendingLogin,
     Rule,
     Subscription,
@@ -421,9 +422,28 @@ async def create_payment(
     return payment
 
 
-async def get_payment_by_memo(session: AsyncSession, memo: str) -> Payment | None:
-    result = await session.execute(select(Payment).where(Payment.memo == memo))
-    return result.scalar_one_or_none()
+async def payment_with_tx(session: AsyncSession, tx_id: str) -> Payment | None:
+    """Платёж, уже закрытый этой транзакцией блокчейна (защита от двойного зачёта)."""
+    result = await session.execute(select(Payment).where(Payment.tx_id == tx_id))
+    return result.scalars().first()
+
+
+async def reserved_memos(session: AsyncSession, provider: str) -> set[str]:
+    """Метки-суммы, которые уже заняты ожидающими платежами этого провайдера.
+
+    Сумма-метка — единственное, чем мы отличаем один перевод от другого, поэтому
+    двум одновременно висящим платежам одинаковую сумму давать нельзя: перевод
+    зачли бы не тому. Берём только ``pending`` — закрытые платежи метку
+    освобождают, их защищает уже ``tx_id``.
+    """
+    result = await session.execute(
+        select(Payment.memo).where(
+            Payment.provider == provider,
+            Payment.status == "pending",
+            Payment.memo.is_not(None),
+        )
+    )
+    return {memo for memo in result.scalars().all() if memo}
 
 
 async def mark_payment_paid(session: AsyncSession, payment: Payment) -> None:
@@ -432,11 +452,177 @@ async def mark_payment_paid(session: AsyncSession, payment: Payment) -> None:
     await session.flush()
 
 
+async def claim_payment(
+    session: AsyncSession, payment: Payment, *, tx_id: str | None = None
+) -> bool:
+    """Забирает платёж себе: pending → paid. False — его уже закрыл кто-то другой.
+
+    Начисление подписки должно случиться ровно один раз, а закрыть платёж могут
+    сразу двое: пользователь нажал «Проверить оплату» и в этот же момент по нему
+    прошёл фоновый цикл. Раньше проверка была «прочитали status, увидели pending,
+    начислили» — между чтением и записью влезал второй, и месяц начислялся дважды.
+
+    Перевод состояния — одним ``UPDATE ... WHERE status = 'pending'``: СУБД
+    гарантирует, что строку заберёт только один, а ``rowcount`` говорит, кто это
+    был. Начислять подписку имеет право только тот, кому вернули True.
+    """
+    values: dict = {"status": "paid", "paid_at": utcnow()}
+    if tx_id:
+        values["tx_id"] = tx_id
+    result = await session.execute(
+        update(Payment)
+        .where(Payment.id == payment.id, Payment.status == "pending")
+        .values(**values)
+    )
+    if (result.rowcount or 0) != 1:
+        return False
+    # В объекте в памяти остались старые значения — подтягиваем записанные.
+    await session.refresh(payment)
+    return True
+
+
 async def pending_payments(session: AsyncSession, provider: str) -> Sequence[Payment]:
     result = await session.execute(
         select(Payment).where(Payment.provider == provider, Payment.status == "pending")
     )
     return result.scalars().all()
+
+
+async def count_pending_payments(session: AsyncSession, user_id: int, provider: str) -> int:
+    """Сколько неоплаченных счетов уже висит у пользователя по этому способу.
+
+    Нужно, чтобы страница оплаты не плодила счёта без счёта: каждый USDT-счёт
+    занимает уникальную метку-сумму, а свободных меток конечное число.
+    """
+    result = await session.execute(
+        select(func.count(Payment.id)).where(
+            Payment.user_id == user_id,
+            Payment.provider == provider,
+            Payment.status == "pending",
+        )
+    )
+    return int(result.scalar_one() or 0)
+
+
+async def expire_stale_payments(
+    session: AsyncSession, provider: str, *, older_than: timedelta
+) -> int:
+    """Закрывает брошенные счёта: pending → expired. Возвращает их количество.
+
+    Счёт, по которому не заплатили, иначе висит вечно: фоновый цикл каждые пять
+    минут спрашивает про него провайдера, метка-сумма остаётся занятой, а лимит
+    висящих счетов (см. app/payments/service.py) со временем запирает человека
+    без возможности выставить новый.
+
+    Одним ``UPDATE``, без вычитки строк: счетов может накопиться много, а
+    интересует нас только сам факт закрытия.
+    """
+    cutoff = utcnow() - older_than
+    result = await session.execute(
+        update(Payment)
+        .where(
+            Payment.provider == provider,
+            Payment.status == "pending",
+            Payment.created_at < cutoff,
+        )
+        .values(status="expired")
+    )
+    return int(result.rowcount or 0)
+
+
+# ─────────────────────── Отправки, ждущие доведения до конца ──────────────────
+
+# Дольше суток восстанавливать бессмысленно: в источнике пост уже неактуален,
+# а «переслали вчерашнее» выглядит хуже, чем «не переслали».
+PENDING_DELIVERY_MAX_AGE_HOURS = 24
+PENDING_DELIVERY_RESTORE_LIMIT = 500
+
+
+async def remember_pending_delivery(
+    session: AsyncSession,
+    *,
+    rule_id: int,
+    user_id: int,
+    account_id: int,
+    source_chat_id: int,
+    message_id: int,
+    delay_seconds: int = 0,
+) -> int:
+    """Записывает отправку как незавершённую и возвращает id записи.
+
+    Повторный вызов с той же тройкой (правило, чат, сообщение) не создаёт вторую
+    строку, а отдаёт уже существующую: иначе восстановление после перезапуска
+    размножало бы отправки. Уникальный индекс ``ux_pending_delivery_msg`` держит
+    это же правило на уровне БД.
+    """
+    existing = await session.execute(
+        select(PendingDelivery.id).where(
+            PendingDelivery.rule_id == rule_id,
+            PendingDelivery.source_chat_id == source_chat_id,
+            PendingDelivery.message_id == message_id,
+        )
+    )
+    found = existing.scalars().first()
+    if found is not None:
+        return int(found)
+
+    row = PendingDelivery(
+        rule_id=rule_id,
+        user_id=user_id,
+        account_id=account_id,
+        source_chat_id=source_chat_id,
+        message_id=message_id,
+        due_at=utcnow() + timedelta(seconds=max(0, int(delay_seconds))),
+    )
+    session.add(row)
+    await session.flush()
+    return int(row.id)
+
+
+async def due_pending_deliveries(
+    session: AsyncSession,
+    *,
+    limit: int = PENDING_DELIVERY_RESTORE_LIMIT,
+    max_age_hours: int = PENDING_DELIVERY_MAX_AGE_HOURS,
+) -> Sequence[PendingDelivery]:
+    """Незавершённые отправки, которые ещё имеет смысл досылать.
+
+    Порядок — по времени отправки: то, что должно было уйти раньше, уходит
+    первым. Ограничение по количеству нужно, чтобы после долгого простоя
+    восстановление не выплюнуло в Telegram тысячи сообщений разом.
+    """
+    threshold = utcnow() - timedelta(hours=max(1, int(max_age_hours)))
+    result = await session.execute(
+        select(PendingDelivery)
+        .where(PendingDelivery.created_at >= threshold)
+        .order_by(PendingDelivery.due_at)
+        .limit(max(1, int(limit)))
+    )
+    return result.scalars().all()
+
+
+async def drop_stale_pending_deliveries(
+    session: AsyncSession, *, max_age_hours: int = PENDING_DELIVERY_MAX_AGE_HOURS
+) -> int:
+    """Убирает записи, которые уже поздно досылать. Возвращает число удалённых."""
+    threshold = utcnow() - timedelta(hours=max(1, int(max_age_hours)))
+    result = await session.execute(
+        delete(PendingDelivery).where(PendingDelivery.created_at < threshold)
+    )
+    await session.flush()
+    return int(result.rowcount or 0)
+
+
+async def delete_pending_delivery(session: AsyncSession, delivery_id: int) -> None:
+    await session.execute(
+        delete(PendingDelivery).where(PendingDelivery.id == delivery_id)
+    )
+    await session.flush()
+
+
+async def count_pending_deliveries(session: AsyncSession) -> int:
+    result = await session.execute(select(func.count()).select_from(PendingDelivery))
+    return int(result.scalar() or 0)
 
 
 # ─────────────────────────────── Незавершённый вход ───────────────────────────
@@ -449,6 +635,7 @@ async def save_pending_login(
     session_encrypted: str,
     phone_code_hash: str,
     stage: str = "waiting_code",
+    attempts: int = 0,
 ) -> PendingLogin:
     pending = await session.get(PendingLogin, user_id)
     if pending is None:
@@ -458,9 +645,24 @@ async def save_pending_login(
     pending.session_encrypted = session_encrypted
     pending.phone_code_hash = phone_code_hash
     pending.stage = stage
+    pending.attempts = int(attempts)
     pending.created_at = utcnow()
     await session.flush()
     return pending
+
+
+async def bump_login_attempts(session: AsyncSession, user_id: int) -> int:
+    """Отмечает неудачную попытку кода. Возвращает новое число попыток.
+
+    ``created_at`` намеренно не трогаем: это время отправки кода, по нему
+    считается пауза до повторного запроса.
+    """
+    pending = await session.get(PendingLogin, user_id)
+    if pending is None:
+        return 0
+    pending.attempts = int(pending.attempts or 0) + 1
+    await session.flush()
+    return int(pending.attempts)
 
 
 async def get_pending_login(session: AsyncSession, user_id: int) -> PendingLogin | None:

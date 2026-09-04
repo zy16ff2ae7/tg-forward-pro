@@ -1,0 +1,1078 @@
+#!/usr/bin/env python3
+"""Дымовой прогон кабинета: каждый эндпоинт на живом сокете, без сети.
+
+Зачем отдельно от pytest: тесты собирают приложение из тех же функций, но по
+кусочкам. Здесь оно поднимается целиком и так же, как в app/main.py — те же
+middleware, те же маршруты, та же статика мини-аппа, — и опрашивается настоящим
+HTTP-клиентом. Так видно то, чего не видно в юнит-тестах: не забыт ли маршрут,
+на месте ли файлы webapp/, честен ли ответ при выключенном контуре оплаты.
+
+Наружу не ходим: сервер слушает 127.0.0.1 на случайном порту, бот в приложение
+не передаётся (часть ответов от этого честно 503), TronGrid и ЮKassa не
+дёргаются. База своя, временная — рабочую прогон не открывает.
+
+Запуск: python scripts/smoke_api.py
+Код возврата 1 — хотя бы одна проверка не прошла.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import shutil
+import sys
+import tempfile
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator
+from urllib.parse import quote
+
+from cryptography.fernet import Fernet
+
+# Настройки и движок БД создаются в момент импорта app.*, поэтому окружение
+# правим до первого такого импорта — позже это уже ни на что не влияет.
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+TMP_DIR = Path(tempfile.mkdtemp(prefix="tgf-smoke-"))
+os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{TMP_DIR / 'smoke.db'}"
+# Токен свой: initData подписывается локально, в Bot API прогон не ходит.
+# Рабочий токен из .env для этого не нужен и не должен участвовать.
+os.environ["BOT_TOKEN"] = "123456789:AASmokeTokenNotARealBotToken00000"
+os.environ["SECRET_KEY"] = Fernet.generate_key().decode()
+# Тариф фиксируем: проверки копилки считают дни, а не «сколько получится».
+os.environ["TRIAL_DAYS"] = "3"
+os.environ["LOG_LEVEL"] = "WARNING"
+
+import aiohttp  # noqa: E402
+from aiohttp import web  # noqa: E402
+from loguru import logger  # noqa: E402
+from telethon.errors import PhoneCodeInvalidError, SessionPasswordNeededError  # noqa: E402
+
+from app import accounts_login, paylink  # noqa: E402
+from app.config import settings  # noqa: E402
+from app.db import repo  # noqa: E402
+from app.db.database import dispose_db, init_db, session_scope  # noqa: E402
+from app.errors import http_error_middleware  # noqa: E402
+from app.payments import crypto, service, yookassa  # noqa: E402
+from app.plans import PERIODS, rub_amount, usdt_amount  # noqa: E402
+from app.telegram_client.manager import manager  # noqa: E402
+from app.webapp_api import COMMAND_GROUPS, COMMANDS, setup_webapp_routes  # noqa: E402
+from tests.helpers import sign_init_data  # noqa: E402
+
+# Логи приложения в отчёте только мешают: INFO о раздаче статики и обновлении
+# правил не имеет отношения к проверкам. Ошибки и предупреждения оставляем.
+logger.remove()
+logger.add(sys.stderr, level="WARNING", format="  ! {message}")
+
+SMOKE_USER_ID = 999_000_222
+# Настоящий по формату адрес TRC-20: settings.usdt_ready проверяет длину и
+# алфавит, иначе контур USDT считается ненастроенным. Переводов не делаем.
+USDT_WALLET = "TQn9Y2khDD95J42FQtQTdwVVR93o1n1gLz"
+
+# Номер, на который «подключается» аккаунт в разделе входа. Он же удаляется в
+# конце раздела, чтобы остальные проверки видели ту же одну учётку из seed().
+LOGIN_PHONE = "+79001234567"
+# Ключи MTProto для раздела входа: сама готовность шлюза считается по ним, а в
+# .env разработчика их может не быть. Плейсхолдеры из .env.example не подходят —
+# settings.mtproto_ready считает их ненастроенными.
+SMOKE_API_ID = 1_234_567
+SMOKE_API_HASH = "1234abcd" * 4
+
+
+@contextmanager
+def stubbed_gateway(**overrides: Any) -> Iterator[None]:
+    """Подменяет вызовы MTProto-шлюза на время раздела.
+
+    Вход по номеру — единственная часть кабинета, которая обязана говорить с
+    Telegram. Прогон offline, поэтому шлюз заменяется заглушками: проверяем
+    своё — шаги, коды ответов и состояние в БД, — а не работу Telegram.
+    """
+    for name, value in overrides.items():
+        setattr(manager, name, value)
+    try:
+        yield
+    finally:
+        for name in overrides:
+            delattr(manager, name)
+
+
+
+@contextmanager
+def configured(**values: Any) -> Iterator[None]:
+    """Временно переключает настройки — как monkeypatch в тестах.
+
+    Нужно, чтобы один прогон увидел и включённый внешний контур оплаты, и
+    выключенный: в .env одновременно оба состояния не задать.
+    """
+    before = {name: getattr(settings, name) for name in values}
+    for name, value in values.items():
+        setattr(settings, name, value)
+    try:
+        yield
+    finally:
+        for name, value in before.items():
+            setattr(settings, name, value)
+
+
+class Report:
+    """Печатает результат каждой проверки сразу и помнит провалы для итога."""
+
+    def __init__(self) -> None:
+        self.rows: list[tuple[str, bool, str]] = []
+
+    def section(self, title: str) -> None:
+        print(f"\n── {title} " + "─" * max(0, 60 - len(title)))
+
+    def check(self, what: str, ok: bool, detail: str = "") -> bool:
+        self.rows.append((what, bool(ok), detail))
+        print(f"  {'✓' if ok else '✗'} {what}" + (f" — {detail}" if detail else ""))
+        return bool(ok)
+
+    def note(self, text: str) -> None:
+        """Пояснение, а не проверка: чего прогон сознательно не делает."""
+        print(f"  · {text}")
+
+    @property
+    def failures(self) -> list[tuple[str, bool, str]]:
+        return [row for row in self.rows if not row[1]]
+
+
+class Cabinet:
+    """HTTP-клиент кабинета: подпись Telegram подставляется сама."""
+
+    def __init__(self, session: aiohttp.ClientSession, base: str) -> None:
+        self._session = session
+        self._base = base
+        self.headers = {"X-Telegram-Init-Data": sign_init_data(SMOKE_USER_ID)}
+
+    async def request(
+        self, method: str, path: str, *, auth: bool = True, **kwargs: Any
+    ) -> tuple[int, Any]:
+        """Возвращает (статус, тело). Тело — разобранный JSON или текст.
+
+        Редиректы не проходим: корень и /app отвечают 302, и проверять надо
+        именно их, а не то, куда они ведут.
+        """
+        headers: dict[str, str] = dict(self.headers) if auth else {}
+        headers.update(kwargs.pop("headers", None) or {})
+        async with self._session.request(
+            method, self._base + path, headers=headers, allow_redirects=False, **kwargs
+        ) as response:
+            if response.content_type == "application/json":
+                return response.status, await response.json()
+            return response.status, await response.text()
+
+    async def get(self, path: str, **kwargs: Any) -> tuple[int, Any]:
+        return await self.request("GET", path, **kwargs)
+
+    async def post(self, path: str, **kwargs: Any) -> tuple[int, Any]:
+        return await self.request("POST", path, **kwargs)
+
+    async def delete(self, path: str, **kwargs: Any) -> tuple[int, Any]:
+        return await self.request("DELETE", path, **kwargs)
+
+
+async def seed() -> tuple[int, int]:
+    """Пользователь, аккаунт и правило: без них половине эндпоинтов нечего отдать.
+
+    Правило создаём напрямую в БД, а не через API: создание задачи требует
+    живого MTProto-входа (найти чат по имени), которого в offline-прогоне нет.
+    Сам отказ этого эндпоинта проверяется отдельно.
+    """
+    async with session_scope() as session:
+        await repo.get_or_create_user(
+            session, SMOKE_USER_ID, username="smoke", full_name="Дымовой прогон"
+        )
+        account = await repo.add_account(
+            session,
+            user_id=SMOKE_USER_ID,
+            phone="+79000000000",
+            # Шифровать нечего: Telethon-клиент прогон не поднимает.
+            session_encrypted="smoke-session",
+        )
+        rule = await repo.add_rule(
+            session,
+            user_id=SMOKE_USER_ID,
+            account_id=account.id,
+            source_id=-1001234567890,
+            source_title="Источник",
+            target_id=-1009876543210,
+            target_title="Приёмник",
+        )
+        return account.id, rule.id
+
+
+async def start_server() -> tuple[web.AppRunner, str]:
+    """Поднимает то же приложение, что и app/main.py, на свободном порту."""
+    app = web.Application(middlewares=[http_error_middleware])
+    # bot=None — как при работе одной веб-части сервиса: всё, что требует Bot
+    # API (счёт в звёздах, имя бота в ссылке), обязано ответить честным отказом.
+    setup_webapp_routes(app, bot=None)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    host, port = runner.addresses[0][:2]
+    return runner, f"http://{host}:{port}"
+
+
+# ─────────────────────────────── Разделы прогона ──────────────────────────────
+
+
+async def check_static(cab: Cabinet, rep: Report) -> None:
+    """Мини-апп раздаётся сервисом: без файлов кабинет открывается пустым окном."""
+    rep.section("Мини-апп и статика")
+
+    status, body = await cab.get("/", auth=False)
+    rep.check("GET / — редирект на кабинет", status == 302, f"статус {status}")
+
+    status, _ = await cab.get("/app", auth=False)
+    rep.check("GET /app — редирект на /app/", status == 302, f"статус {status}")
+
+    status, body = await cab.get("/app/", auth=False)
+    rep.check(
+        "GET /app/ — страница кабинета",
+        status == 200 and "app.js" in str(body),
+        f"статус {status}",
+    )
+
+    for asset in ("app.js", "styles.css", "pay.html"):
+        status, _ = await cab.get(f"/app/{asset}", auth=False)
+        rep.check(f"GET /app/{asset}", status == 200, f"статус {status}")
+
+    status, _ = await cab.get("/app/no-such-file.js", auth=False)
+    rep.check("Несуществующий файл — 404", status == 404, f"статус {status}")
+
+
+async def check_health(cab: Cabinet, rep: Report) -> None:
+    """Мониторинг: /api/health открыт без подписи и показывает счётчики очереди."""
+    rep.section("Здоровье сервиса")
+
+    status, body = await cab.get("/api/health", auth=False)
+    rep.check("GET /api/health без подписи — 200", status == 200, f"статус {status}")
+    if status != 200 or not isinstance(body, dict):
+        return
+    rep.check("ok: true", body.get("ok") is True)
+    delivery = body.get("delivery") or {}
+    expected = {"submitted", "dropped", "sent", "failed", "skipped", "restored", "queued"}
+    missing = sorted(expected - set(delivery))
+    rep.check("счётчики очереди на месте", not missing, f"нет: {missing}" if missing else "")
+    rep.check(
+        "пропуски с разбивкой по причинам",
+        isinstance(delivery.get("skips"), dict),
+        f"skips={delivery.get('skips')!r}",
+    )
+    rep.check(
+        "журнал ожидания читается",
+        delivery.get("persisted") == 0,
+        f"persisted={delivery.get('persisted')!r}",
+    )
+
+
+async def check_auth(cab: Cabinet, rep: Report) -> None:
+    """Вход только по подписи Telegram: подделать её без токена бота нельзя."""
+    rep.section("Авторизация по initData")
+
+    status, _ = await cab.get("/api/me", auth=False)
+    rep.check("без подписи — 401", status == 401, f"статус {status}")
+
+    cases = {
+        "битая подпись": sign_init_data(SMOKE_USER_ID, corrupt_hash=True),
+        "чужой токен бота": sign_init_data(
+            SMOKE_USER_ID, token="987654321:AAAnotherBotEntirely000000000000"
+        ),
+        "просроченный initData": sign_init_data(
+            SMOKE_USER_ID, auth_date=int(time.time()) - 2 * 24 * 60 * 60
+        ),
+    }
+    for name, init_data in cases.items():
+        status, _ = await cab.get(
+            "/api/me", auth=False, headers={"X-Telegram-Init-Data": init_data}
+        )
+        rep.check(f"{name} — 401", status == 401, f"статус {status}")
+
+    status, _ = await cab.get("/api/me")
+    rep.check("своя подпись — 200", status == 200, f"статус {status}")
+
+    # Тот же initData принимается и параметром запроса: так его передают
+    # страницы, куда заголовок не подставить.
+    quoted = quote(cab.headers["X-Telegram-Init-Data"], safe="")
+    status, _ = await cab.get(f"/api/me?initData={quoted}", auth=False)
+    rep.check("подпись в query-параметре — 200", status == 200, f"статус {status}")
+
+
+async def check_profile(cab: Cabinet, rep: Report) -> dict:
+    """Профиль: подписка, тарифы и признаки включённых возможностей."""
+    rep.section("Профиль и тарифы")
+
+    status, body = await cab.get("/api/me")
+    if not rep.check("GET /api/me — 200", status == 200, f"статус {status}"):
+        return {}
+
+    rep.check("id совпадает с подписью", body.get("id") == SMOKE_USER_ID)
+    subscription = body.get("subscription") or {}
+    rep.check(
+        "пробный период выдан автоматически",
+        subscription.get("active") is True and subscription.get("days_left", 0) >= 2,
+        f"days_left={subscription.get('days_left')}",
+    )
+    stats = body.get("stats") or {}
+    rep.check(
+        "статистика видит правило и аккаунт",
+        stats.get("rules") == 1 and stats.get("accounts") == 1,
+        f"{stats}",
+    )
+    tariffs = body.get("tariffs") or {}
+    rep.check(
+        "тарифы отдаются из настроек",
+        tariffs.get("rub") == settings.price_rub
+        and tariffs.get("stars") == settings.price_stars,
+        f"{tariffs}",
+    )
+    features = body.get("features") or {}
+    rep.check(
+        "способы оплаты — только настроенные",
+        features.get("payment_methods") == settings.payment_methods(),
+        f"{features.get('payment_methods')}",
+    )
+    rep.check(
+        "состояние входа аккаунтов честное",
+        features.get("account_login_enabled") == settings.public_login_enabled
+        and features.get("account_login_status") == settings.account_login_status,
+        f"{features.get('account_login_status')}",
+    )
+    return body
+
+
+async def check_commands(cab: Cabinet, rep: Report) -> None:
+    """Каталог команд: статус считается по реальному состоянию, а не из справочника."""
+    rep.section("Каталог команд")
+
+    status, body = await cab.get("/api/commands")
+    if not rep.check("GET /api/commands — 200", status == 200, f"статус {status}"):
+        return
+    items = body.get("commands") or []
+    rep.check(
+        "все команды на месте",
+        len(items) == len(COMMANDS),
+        f"{len(items)} из {len(COMMANDS)}",
+    )
+    rep.check(
+        "у каждой команды есть тип и обязательные поля",
+        all(item.get("kind") and isinstance(item.get("needs"), list) for item in items),
+    )
+    expected = "ready" if settings.public_login_enabled else "setup_required"
+    rep.check(
+        f"статус команд считается по состоянию шлюза — {expected}",
+        all(item.get("status") == expected for item in items),
+    )
+
+    # Блоки каталога: порядок и подписи держит сервер, иначе в мини-аппе
+    # появилась бы вторая копия списка и разошлась бы с этим.
+    groups = body.get("groups") or []
+    rep.check(
+        "блоки каталога приходят с сервера",
+        groups == COMMAND_GROUPS and all(g.get("title") for g in groups),
+        f"{[g.get('id') for g in groups]}",
+    )
+    known = {g.get("id") for g in groups}
+    unknown = sorted({item.get("group") for item in items} - known)
+    rep.check(
+        "каждая команда в известном блоке",
+        not unknown,
+        f"без блока: {unknown}" if unknown else "",
+    )
+
+
+async def check_tasks(cab: Cabinet, rep: Report, account_id: int, rule_id: int) -> None:
+    """Задачи: список, создание, пауза, режим, архив, результаты, удаление."""
+    rep.section("Задачи")
+
+    status, body = await cab.get("/api/tasks")
+    tasks = (body or {}).get("tasks") or []
+    rep.check(
+        "GET /api/tasks — активная задача видна",
+        status == 200 and [t["id"] for t in tasks] == [rule_id],
+        f"статус {status}, задач {len(tasks)}",
+    )
+    status, body = await cab.get("/api/tasks?status=done")
+    rep.check(
+        "архив пока пуст",
+        status == 200 and not (body or {}).get("tasks"),
+        f"статус {status}",
+    )
+
+    status, body = await cab.post("/api/tasks", json={})
+    rep.check(
+        "создание без полей — 400 со списком нужного",
+        status == 400 and "Укажите" in str((body or {}).get("error")),
+        f"статус {status}",
+    )
+    status, body = await cab.post("/api/tasks", data="не json")
+    rep.check("тело не JSON — 400", status == 400, f"статус {status}")
+
+    status, body = await cab.post(
+        "/api/tasks", json={"account_id": 10**9, "source": "@src", "target": "@dst"}
+    )
+    rep.check(
+        "чужой аккаунт — 404",
+        status == 404 and "Аккаунт не найден" in str((body or {}).get("error")),
+        f"статус {status}",
+    )
+
+    status, body = await cab.post(
+        "/api/tasks",
+        json={"command": "copy_channel", "account_id": account_id, "source": "@src", "target": "@dst"},
+    )
+    if settings.public_login_enabled:
+        rep.check(
+            "создание задачи — чат не найден (клиент не поднят)",
+            status == 404,
+            f"статус {status}",
+        )
+    else:
+        rep.check(
+            "создание задачи — 503 с указанием причины",
+            status == 503 and (body or {}).get("feature") == "account_login",
+            f"статус {status}, feature={(body or {}).get('feature')}",
+        )
+
+
+async def check_task_actions(cab: Cabinet, rep: Report, rule_id: int) -> None:
+    """Кнопки карточки задачи: пауза, режим, архив, запуск, результаты, удаление."""
+    rep.section("Управление задачей")
+
+    status, body = await cab.post(f"/api/tasks/{rule_id}/toggle")
+    rep.check(
+        "пауза выключает задачу",
+        status == 200 and (body or {}).get("task", {}).get("enabled") is False,
+        f"статус {status}",
+    )
+    status, body = await cab.post(f"/api/tasks/{rule_id}/toggle")
+    rep.check(
+        "повторное нажатие возвращает в работу",
+        status == 200 and (body or {}).get("task", {}).get("enabled") is True,
+        f"статус {status}",
+    )
+
+    status, body = await cab.post(f"/api/tasks/{rule_id}/mode")
+    rep.check(
+        "режим переключается на форвард",
+        status == 200 and (body or {}).get("task", {}).get("mode") == "forward",
+        f"статус {status}",
+    )
+    status, body = await cab.post(f"/api/tasks/{rule_id}/mode")
+    rep.check(
+        "и обратно на копию",
+        status == 200 and (body or {}).get("task", {}).get("mode") == "copy",
+        f"статус {status}",
+    )
+
+    status, body = await cab.post(f"/api/tasks/{rule_id}/run")
+    rep.check(
+        "запуск обычной пересылки — 409, она работает по сообщениям",
+        status == 409,
+        f"статус {status}",
+    )
+
+    status, body = await cab.get(f"/api/tasks/{rule_id}/results")
+    rep.check(
+        "результаты — пустой список без ошибки",
+        status == 200 and (body or {}).get("total") == 0,
+        f"статус {status}",
+    )
+
+    status, body = await cab.post(f"/api/tasks/{rule_id}/archive")
+    rep.check(
+        "архив убирает задачу из рабочих",
+        status == 200 and (body or {}).get("task", {}).get("archived") is True,
+        f"статус {status}",
+    )
+    status, body = await cab.get("/api/tasks?status=done")
+    rep.check(
+        "и показывает её в архиве",
+        status == 200 and len((body or {}).get("tasks") or []) == 1,
+        f"статус {status}",
+    )
+    status, body = await cab.post(f"/api/tasks/{rule_id}/toggle")
+    rep.check(
+        "архивную задачу нельзя включить — 409",
+        status == 409,
+        f"статус {status}",
+    )
+    status, body = await cab.post(f"/api/tasks/{rule_id}/archive?undo=1")
+    rep.check(
+        "возврат из архива",
+        status == 200 and (body or {}).get("task", {}).get("archived") is False,
+        f"статус {status}",
+    )
+
+    status, _ = await cab.post("/api/tasks/10000000/toggle")
+    rep.check("чужая задача — 404", status == 404, f"статус {status}")
+
+    status, body = await cab.delete(f"/api/tasks/{rule_id}")
+    rep.check("удаление задачи", status == 200 and (body or {}).get("ok") is True, f"статус {status}")
+    status, _ = await cab.delete(f"/api/tasks/{rule_id}")
+    rep.check("повторное удаление — 404", status == 404, f"статус {status}")
+
+
+async def check_chats_and_accounts(cab: Cabinet, rep: Report, account_id: int) -> None:
+    """Чаты и аккаунты: пустой список тут — честный ответ, а не поломка."""
+    rep.section("Чаты и аккаунты")
+
+    status, body = await cab.get(f"/api/chats?account_id={account_id}")
+    if settings.public_login_enabled:
+        rep.check(
+            "чаты аккаунта — список без ошибки",
+            status == 200 and isinstance((body or {}).get("chats"), list),
+            f"статус {status}",
+        )
+    else:
+        rep.check(
+            "чаты — пусто и с объяснением, почему",
+            status == 200
+            and (body or {}).get("chats") == []
+            and (body or {}).get("feature") == "account_login"
+            and bool((body or {}).get("note")),
+            f"статус {status}",
+        )
+
+    status, body = await cab.get("/api/chats?account_id=999999999")
+    rep.check(
+        "чужой аккаунт — пусто с пометкой",
+        status == 200 and "не найден" in str((body or {}).get("note", "")).lower(),
+        f"статус {status}",
+    )
+
+    status, body = await cab.get("/api/accounts")
+    if not rep.check("GET /api/accounts — 200", status == 200, f"статус {status}"):
+        return
+    accounts = (body or {}).get("accounts") or []
+    rep.check(
+        "аккаунт виден с телефоном и состоянием",
+        len(accounts) == 1
+        and accounts[0].get("phone") == "+79000000000"
+        and accounts[0].get("online") is False,
+        f"{accounts}",
+    )
+    rep.check(
+        "незавершённого входа нет",
+        (body or {}).get("pending_login", {}).get("exists") is False,
+    )
+    rep.check(
+        "подписка и копилка в одном ответе",
+        (body or {}).get("subscription", {}).get("active") is True
+        and (body or {}).get("subscription", {}).get("piggy_bank_days") == 0,
+        f"{(body or {}).get('subscription')}",
+    )
+
+
+async def walk_login(cab: Cabinet, rep: Report) -> None:
+    """Проходит шаги входа по HTTP и сверяет состояние в ответе /api/accounts."""
+    status, body = await cab.post("/api/accounts/login/start", json={"phone": "телефон"})
+    rep.check(
+        "мусор вместо номера — 400 с примером формата",
+        status == 400 and "+79001234567" in str((body or {}).get("error")),
+        f"статус {status}",
+    )
+
+    status, body = await cab.post("/api/accounts/login/start", json={"phone": LOGIN_PHONE})
+    rep.check(
+        "шаг 1: код запрошен",
+        status == 200 and (body or {}).get("stage") == "code",
+        f"статус {status}, {body}",
+    )
+    status, body = await cab.get("/api/accounts")
+    pending = (body or {}).get("pending_login") or {}
+    rep.check(
+        "незавершённый вход виден кабинету",
+        pending.get("exists") is True
+        and pending.get("step") == "code"
+        and pending.get("attempts_left") == accounts_login.MAX_CODE_ATTEMPTS,
+        f"{pending}",
+    )
+
+    status, body = await cab.post("/api/accounts/login/code", json={"code": "00000"})
+    rep.check(
+        "неверный код — 400, вход остаётся на том же шаге",
+        status == 400 and "Осталось попыток" in str((body or {}).get("error")),
+        f"статус {status}, {(body or {}).get('error')}",
+    )
+    status, body = await cab.get("/api/accounts")
+    rep.check(
+        "попытка списана, шаг не сброшен",
+        (body or {}).get("pending_login", {}).get("attempts_left")
+        == accounts_login.MAX_CODE_ATTEMPTS - 1,
+        f"{(body or {}).get('pending_login')}",
+    )
+
+    status, body = await cab.post("/api/accounts/login/code", json={"code": "11111"})
+    rep.check(
+        "шаг 2: включён 2FA — просим облачный пароль",
+        status == 200 and (body or {}).get("stage") == "password",
+        f"статус {status}, {body}",
+    )
+
+    status, body = await cab.post("/api/accounts/login/password", json={"password": "секрет"})
+    account_id = (body or {}).get("account_id")
+    rep.check(
+        "шаг 3: аккаунт подключён",
+        status == 200 and (body or {}).get("stage") == "done" and bool(account_id),
+        f"статус {status}, {body}",
+    )
+    await check_login_result(cab, rep, account_id)
+
+
+async def check_login_result(cab: Cabinet, rep: Report, account_id: int | None) -> None:
+    """Итог входа: аккаунт в списке, сессия зашифрована, отключение работает."""
+    status, body = await cab.get("/api/accounts")
+    phones = [item.get("phone") for item in (body or {}).get("accounts") or []]
+    rep.check(
+        "аккаунт появился в кабинете, незавершённого входа больше нет",
+        LOGIN_PHONE in phones and (body or {}).get("pending_login", {}).get("exists") is False,
+        f"{phones}",
+    )
+
+    async with session_scope() as session:
+        rows = [
+            item
+            for item in await repo.list_accounts(session, SMOKE_USER_ID)
+            if item.phone == LOGIN_PHONE
+        ]
+    stored = rows[0].session_encrypted if rows else ""
+    rep.check(
+        "сессия в БД только шифром",
+        bool(stored) and "smoke-session-after-2fa" not in stored,
+        "иначе доступ к аккаунту утекает вместе с дампом базы",
+    )
+
+    status, body = await cab.post("/api/accounts/login/cancel")
+    rep.check(
+        "отмена без незавершённого входа — честное dropped: false",
+        status == 200 and (body or {}).get("dropped") is False,
+        f"статус {status}, {body}",
+    )
+
+    status, body = await cab.delete(f"/api/accounts/{account_id}")
+    rep.check(
+        "отключение аккаунта убирает его вместе с сессией",
+        status == 200 and (body or {}).get("phone") == LOGIN_PHONE,
+        f"статус {status}, {body}",
+    )
+    status, _ = await cab.delete(f"/api/accounts/{account_id}")
+    rep.check("повторное отключение — 404", status == 404, f"статус {status}")
+
+
+async def check_account_login(cab: Cabinet, rep: Report) -> None:
+    """Подключение аккаунта целиком: номер → код → пароль 2FA, не выходя из кабинета.
+
+    Раньше кнопка «Подключить аккаунт» умела единственное — открыть чат с ботом,
+    и человек уходил из мини-аппа на середине пути. Теперь вход проходит здесь,
+    значит и проверять его надо на живом сокете. Telegram при этом не участвует:
+    шлюз подменён заглушками (см. stubbed_gateway).
+    """
+    rep.section("Подключение аккаунта")
+
+    with configured(api_id=0, api_hash=""):
+        status, body = await cab.post("/api/accounts/login/start", json={"phone": LOGIN_PHONE})
+        rep.check(
+            "без MTProto-шлюза — 503 с причиной, а не молчание",
+            status == 503
+            and (body or {}).get("feature") == "account_login"
+            and (body or {}).get("status") == "setup_required",
+            f"статус {status}",
+        )
+
+    attempts = {"code": 0}
+
+    async def send_code(_phone: str) -> tuple[str, str]:
+        return "smoke-temp-session", "smoke-code-hash"
+
+    async def sign_in_code(**_kwargs: Any) -> str:
+        attempts["code"] += 1
+        if attempts["code"] == 1:
+            # Первая попытка — «опечатка в цифре»: вход обязан её пережить.
+            raise PhoneCodeInvalidError(request=None)
+        raise SessionPasswordNeededError(request=None)
+
+    async def sign_in_password(_password: str, _session: str) -> str:
+        return "smoke-session-after-2fa"
+
+    async def check_session(_session: str) -> tuple[bool, str | None, str | None]:
+        return True, "Дымовой прогон", None
+
+    async def start_account(_account: Any, _session: str) -> bool:
+        return True
+
+    async def stop_account(_account_id: int) -> None:
+        return None
+
+    async def refresh_rules() -> None:
+        return None
+
+    with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
+        send_code=send_code,
+        sign_in_code=sign_in_code,
+        sign_in_password=sign_in_password,
+        check_session=check_session,
+        start_account=start_account,
+        stop_account=stop_account,
+        refresh_rules=refresh_rules,
+    ):
+        await walk_login(cab, rep)
+    rep.note("Telegram в разделе не участвует: код, вход и проверка сессии — заглушки")
+
+
+async def check_subscription(cab: Cabinet, rep: Report, me: dict) -> None:
+    """Абонемент: состояние, цены, счёт в звёздах и копилка дней."""
+    rep.section("Абонемент и оплата звёздами")
+
+    status, body = await cab.get("/api/subscription")
+    if not rep.check("GET /api/subscription — 200", status == 200, f"статус {status}"):
+        return
+    rep.check(
+        "срок и остаток дней на месте",
+        body.get("active") is True and body.get("until") and body.get("days_left", 0) >= 2,
+        f"days_left={body.get('days_left')}",
+    )
+    # Кабинет читает контур оплаты из двух ответов — они обязаны совпадать,
+    # иначе кнопки в разных разделах предлагают разные способы.
+    same_pay = body.get("pay") == me.get("pay")
+    rep.check(
+        "контур оплаты совпадает с /api/me",
+        same_pay,
+        "" if same_pay else f"{body.get('pay')} ≠ {me.get('pay')}",
+    )
+
+    status, body = await cab.post("/api/subscription/invoice")
+    rep.check(
+        "счёт в звёздах без бота — 503 с причиной",
+        status == 503
+        and (body or {}).get("feature") == "stars"
+        and (body or {}).get("status") == "bot_unavailable",
+        f"статус {status}, {body}",
+    )
+    for months in ("много", 2, 1.5, 0):
+        status, _ = await cab.post("/api/subscription/invoice", json={"months": months})
+        rep.check(f"срок {months!r} — 400", status == 400, f"статус {status}")
+    rep.note("сам счёт Stars не выставляем: это вызов Bot API, а прогон offline")
+
+    rep.section("Копилка дней")
+    status, body = await cab.post("/api/subscription/bank", json={"days": 1})
+    rep.check(
+        "день уходит в копилку",
+        status == 200 and (body or {}).get("moved") == 1 and (body or {}).get("banked_days") == 1,
+        f"статус {status}, {body}",
+    )
+    status, body = await cab.post("/api/subscription/bank", json={})
+    rep.check(
+        "сутки активного периода заморозить не дают — 409",
+        status == 409,
+        f"статус {status}",
+    )
+    status, body = await cab.post("/api/subscription/distribute", json={})
+    rep.check(
+        "дни возвращаются в абонемент",
+        status == 200
+        and (body or {}).get("moved") == 1
+        and (body or {}).get("banked_days") == 0
+        and (body or {}).get("active") is True,
+        f"статус {status}, {body}",
+    )
+    status, body = await cab.post("/api/subscription/distribute", json={})
+    rep.check("пустая копилка — 409", status == 409, f"статус {status}")
+
+
+async def check_pay_disabled(cab: Cabinet, rep: Report) -> None:
+    """Контур выключен: отказ должен быть внятным, а не пустой страницей."""
+    rep.section("Оплата вне Telegram: контур выключен")
+
+    with configured(pay_mode="stars"):
+        token = paylink.make_token(SMOKE_USER_ID, 3)
+
+        status, body = await cab.get("/pay", auth=False)
+        rep.check(
+            "GET /pay — 404 с объяснением",
+            status == 404 and "отключена" in str(body),
+            f"статус {status}",
+        )
+        status, body = await cab.get("/api/pay/link")
+        rep.check(
+            "ссылку на страницу не выдаём — 503",
+            status == 503 and (body or {}).get("feature") == "external",
+            f"статус {status}",
+        )
+        status, body = await cab.get(f"/api/pay/info?t={token}", auth=False)
+        rep.check(
+            "данные страницы — 503",
+            status == 503 and (body or {}).get("status") == "disabled",
+            f"статус {status}",
+        )
+        status, body = await cab.post(
+            "/api/pay/start", auth=False, json={"t": token, "method": "usdt"}
+        )
+        rep.check(
+            "счёт по выключенному способу не выставляется — 503",
+            status == 503 and (body or {}).get("feature") == "usdt",
+            f"статус {status}",
+        )
+
+
+async def check_pay_page(cab: Cabinet, rep: Report) -> None:
+    """Контур включён: страница, реквизиты и счёт USDT — целиком, без сети."""
+    rep.section("Оплата вне Telegram: страница и USDT")
+
+    with configured(
+        pay_mode="external",
+        webapp_url="https://smoke.example.test",
+        usdt_wallet=USDT_WALLET,
+        yookassa_shop_id=None,
+        yookassa_secret_key=None,
+    ):
+        status, body = await cab.get("/api/pay/link")
+        ok = status == 200 and str((body or {}).get("url", "")).startswith(
+            "https://smoke.example.test/pay?t="
+        )
+        rep.check("кабинет получает свежую ссылку", ok, f"статус {status}")
+        rep.check(
+            "на странице только карта и крипта",
+            (body or {}).get("methods") == ["usdt"],
+            f"{(body or {}).get('methods')} (ключей ЮKassa в прогоне нет)",
+        )
+        rep.check(
+            "срок жизни ссылки — час",
+            (body or {}).get("expires_in") == paylink.TOKEN_TTL_SECONDS,
+            f"{(body or {}).get('expires_in')} сек",
+        )
+        token = paylink.make_token(SMOKE_USER_ID, 3)
+
+        status, body = await cab.get(f"/pay?t={token}", auth=False)
+        rep.check(
+            "страница оплаты открывается по подписанной ссылке",
+            status == 200 and "Оплата абонемента" in str(body),
+            f"статус {status}",
+        )
+        for name, path in (
+            ("без токена", "/pay"),
+            ("с подделанным токеном", "/pay?t=1.1.99999999999.xxx"),
+            ("с просроченным токеном", f"/pay?t={paylink.make_token(SMOKE_USER_ID, 3, ttl=-10)}"),
+        ):
+            status, _ = await cab.get(path, auth=False)
+            rep.check(f"страница {name} — 410", status == 410, f"статус {status}")
+
+        await check_pay_info(cab, rep, token)
+        await check_pay_start(cab, rep, token)
+
+
+async def check_pay_info(cab: Cabinet, rep: Report, token: str) -> None:
+    """Что видит страница оплаты: способы, сроки и цены — считает их сервер."""
+    status, body = await cab.get(f"/api/pay/info?t={token}", auth=False)
+    if not rep.check("GET /api/pay/info — 200", status == 200, f"статус {status}"):
+        return
+    rep.check(
+        "срок берётся из подписи ссылки",
+        body.get("months") == 3,
+        f"months={body.get('months')}",
+    )
+    rep.check(
+        "остаток жизни ссылки честный",
+        0 < body.get("expires_in", 0) <= paylink.TOKEN_TTL_SECONDS,
+        f"{body.get('expires_in')} сек",
+    )
+    prices = {item["months"]: (item["rub"], item["usdt"]) for item in body.get("periods", [])}
+    expected = {months: (rub_amount(months), usdt_amount(months)) for months in PERIODS}
+    rep.check("цены всех сроков считает сервер", prices == expected, f"{prices}")
+    rep.check(
+        "ссылки на бота нет, пока нет имени бота",
+        body.get("bot_url") is None,
+        "иначе кнопка вела бы на главную Telegram",
+    )
+
+    status, _ = await cab.get("/api/pay/info?t=подделка", auth=False)
+    rep.check("битый токен — 400", status == 400, f"статус {status}")
+
+
+async def check_pay_start(cab: Cabinet, rep: Report, token: str) -> None:
+    """Счёт USDT: реквизиты, уникальная метка-сумма и защита от перебора."""
+    status, body = await cab.post(
+        "/api/pay/start", auth=False, json={"t": token, "method": "usdt", "months": 3}
+    )
+    if not rep.check("POST /api/pay/start (usdt) — 200", status == 200, f"статус {status}"):
+        return
+
+    rep.check(
+        "реквизиты: кошелёк, сеть, сумма",
+        body.get("wallet") == USDT_WALLET
+        and "TRC-20" in str(body.get("network"))
+        and body.get("currency") == "USDT",
+        f"{body.get('network')}",
+    )
+    expected_micro = crypto.to_micro(usdt_amount(3)) + body["payment_id"] * crypto.MEMO_STEP_MICRO
+    rep.check(
+        "метка-сумма привязана к номеру счёта",
+        crypto.to_micro(body["memo"]) == expected_micro,
+        f"memo={body.get('memo')}",
+    )
+
+    _, second = await cab.post(
+        "/api/pay/start", auth=False, json={"t": token, "method": "usdt", "months": 3}
+    )
+    rep.check(
+        "второй счёт получает свою метку",
+        (second or {}).get("memo") != body.get("memo"),
+        f"{body.get('memo')} → {(second or {}).get('memo')}",
+    )
+
+    status, _ = await cab.post(
+        "/api/pay/start", auth=False, json={"t": token, "method": "yookassa"}
+    )
+    rep.check("ненастроенная карта — 503", status == 503, f"статус {status}")
+    status, _ = await cab.post(
+        "/api/pay/start", auth=False, json={"t": token, "method": "usdt", "months": 2}
+    )
+    rep.check("срок не из каталога — 400", status == 400, f"статус {status}")
+    expired = paylink.make_token(SMOKE_USER_ID, 3, ttl=-10)
+    status, _ = await cab.post(
+        "/api/pay/start", auth=False, json={"t": expired, "method": "usdt"}
+    )
+    rep.check("просроченная ссылка — 400", status == 400, f"статус {status}")
+    status, _ = await cab.post("/api/pay/start", auth=False, data="не json")
+    rep.check("тело не JSON — 400", status == 400, f"статус {status}")
+
+    # Каждый счёт занимает уникальную метку, поэтому перебор кнопки ограничен.
+    # Цикл ограничен сверху: если лимит не сработает, прогон не должен зависнуть.
+    for _ in range(service.MAX_PENDING_PER_METHOD + 2):
+        status, _ = await cab.post(
+            "/api/pay/start", auth=False, json={"t": token, "method": "usdt"}
+        )
+        if status != 200:
+            break
+    rep.check(
+        f"больше {service.MAX_PENDING_PER_METHOD} неоплаченных счетов — 409",
+        status == 409,
+        f"статус {status}",
+    )
+
+
+async def check_pay_card(cab: Cabinet, rep: Report) -> None:
+    """Счёт картой целиком, кроме самого вызова ЮKassa.
+
+    Провайдера подменяем заглушкой: настоящий вызов — это сеть и живой магазин,
+    а проверить нужно своё — строку платежа, сохранённый номер счёта у
+    провайдера и ответ странице оплаты.
+    """
+    rep.section("Оплата вне Telegram: карта")
+
+    async def fake_invoice(**_kwargs: Any) -> tuple[str, str]:
+        return "https://yookassa.smoke/checkout/1", "yoo-smoke-1"
+
+    real_invoice = yookassa.create_invoice
+    yookassa.create_invoice = fake_invoice  # type: ignore[assignment]
+    try:
+        with configured(
+            pay_mode="external",
+            webapp_url="https://smoke.example.test",
+            usdt_wallet=USDT_WALLET,
+            yookassa_shop_id="smoke-shop",
+            yookassa_secret_key="smoke-secret",
+        ):
+            token = paylink.make_token(SMOKE_USER_ID, 12)
+            status, body = await cab.get(f"/api/pay/info?t={token}", auth=False)
+            rep.check(
+                "с ключами ЮKassa на странице оба способа",
+                status == 200 and (body or {}).get("methods") == ["yookassa", "usdt"],
+                f"{(body or {}).get('methods')}",
+            )
+
+            status, body = await cab.post(
+                "/api/pay/start", auth=False, json={"t": token, "method": "yookassa"}
+            )
+            if not rep.check(
+                "POST /api/pay/start (карта) — 200", status == 200, f"статус {status}"
+            ):
+                return
+            rep.check(
+                "в ответе ссылка на оплату и сумма от сервера",
+                body.get("url") == "https://yookassa.smoke/checkout/1"
+                and body.get("amount") == rub_amount(12)
+                and body.get("currency") == "RUB",
+                f"{body.get('amount')} ₽ за {body.get('months')} мес.",
+            )
+
+            async with session_scope() as session:
+                rows = {p.id: p for p in await repo.pending_payments(session, "yookassa")}
+            saved = rows.get(body.get("payment_id"))
+            rep.check(
+                "номер счёта у провайдера сохранён в БД",
+                saved is not None and saved.external_id == "yoo-smoke-1",
+                "без него фоновая проверка не найдёт платёж",
+            )
+    finally:
+        yookassa.create_invoice = real_invoice  # type: ignore[assignment]
+    rep.note("вызов ЮKassa заменён заглушкой: прогон не ходит в сеть и не создаёт счёт")
+
+
+async def check_misc(cab: Cabinet, rep: Report) -> None:
+    """Мелочи, которые ломаются молча: неизвестный маршрут и чужой метод."""
+    rep.section("Прочее")
+
+    status, _ = await cab.get("/api/no-such-endpoint")
+    rep.check("неизвестный эндпоинт — 404", status == 404, f"статус {status}")
+    status, _ = await cab.request("PUT", "/api/tasks")
+    rep.check("метод не поддерживается — 405", status == 405, f"статус {status}")
+
+
+async def run_all(rep: Report) -> None:
+    """Поднимает приложение и проходит по всем разделам."""
+    await init_db()
+    account_id, rule_id = await seed()
+    runner, base = await start_server()
+    print(f"Сервер прогона: {base}")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            cab = Cabinet(session, base)
+            await check_static(cab, rep)
+            await check_health(cab, rep)
+            await check_auth(cab, rep)
+            me = await check_profile(cab, rep)
+            await check_commands(cab, rep)
+            await check_tasks(cab, rep, account_id, rule_id)
+            await check_task_actions(cab, rep, rule_id)
+            await check_chats_and_accounts(cab, rep, account_id)
+            await check_account_login(cab, rep)
+            await check_subscription(cab, rep, me)
+            await check_pay_disabled(cab, rep)
+            await check_pay_page(cab, rep)
+            await check_pay_card(cab, rep)
+            await check_misc(cab, rep)
+    finally:
+        await runner.cleanup()
+        await dispose_db()
+
+
+async def main() -> int:
+    print("Дымовой прогон кабинета tg-forward — целиком, на живом сокете")
+    print(f"База: {TMP_DIR / 'smoke.db'} (временная, рабочую не открываем)")
+    print(f"Контур оплаты в .env: PAY_MODE={settings.pay_mode}, "
+          f"способы {settings.payment_methods()}")
+
+    rep = Report()
+    try:
+        await run_all(rep)
+    finally:
+        shutil.rmtree(TMP_DIR, ignore_errors=True)
+
+    failures = rep.failures
+    print(f"\nПроверок: {len(rep.rows)}, не прошло: {len(failures)}")
+    for what, _, detail in failures:
+        print(f"  ✗ {what}" + (f" — {detail}" if detail else ""))
+    if failures:
+        return 1
+    print("Все проверки пройдены ✅")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

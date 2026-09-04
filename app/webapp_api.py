@@ -12,28 +12,38 @@ import json
 import re
 import time
 from typing import Any, Callable
-from urllib.parse import parse_qsl, unquote
+from urllib.parse import parse_qsl
 
 from aiogram.types import LabeledPrice
 from aiohttp import web
 from loguru import logger
 
+from app import accounts_login, paylink
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
 from app.errors import FeatureUnavailable, ValidationError, _dumps
-from app.plans import STARS_DESCRIPTION, is_valid_period, periods_text, stars_amount
+from app.payments import service
+from app.plans import (
+    DEFAULT_MONTHS,
+    PERIODS,
+    STARS_DESCRIPTION,
+    is_valid_period,
+    periods_text,
+    rub_amount,
+    stars_amount,
+    usdt_amount,
+)
 from app.telegram_client.jobs import MAX_PARSER_LIMIT, ONE_SHOT_KINDS
 from app.telegram_client.manager import manager
 
 # initData считаем свежим в течение суток
 INIT_DATA_TTL = 24 * 60 * 60
 
-# Один и тот же отказ отдаётся везде, где нужен живой MTProto-вход
-LOGIN_UNAVAILABLE_TEXT = (
-    "Подключение аккаунтов временно на настройке. Кабинет уже работает, "
-    "пересылка включится после подключения MTProto-шлюза сервиса."
-)
+# Один и тот же отказ отдаётся везде, где нужен живой MTProto-вход. Текст живёт
+# в app/accounts_login.py — там же, где сам вход, чтобы кабинет и бот объясняли
+# отключённую функцию одними словами.
+LOGIN_UNAVAILABLE_TEXT = accounts_login.LOGIN_UNAVAILABLE_TEXT
 
 routes = web.RouteTableDef()
 
@@ -74,9 +84,13 @@ def validate_init_data(init_data: str) -> dict[str, Any] | None:
     user: dict | None = None
     raw_user = parsed.get("user")
     if raw_user:
+        # parse_qsl уже раскодировал percent-encoding. Второй unquote ломал бы
+        # имена, где сам процент — часть текста («скидка 50%25» → «50%»), а из
+        # «Ко%22т» делал бы кавычку и невалидный JSON, то есть отказ 401.
         try:
-            user = json.loads(unquote(raw_user))
+            user = json.loads(raw_user)
         except json.JSONDecodeError:
+            logger.debug("initData: поле user не разобралось как JSON")
             user = None
 
     return {"user": user, "auth_date": auth_date, "query_id": parsed.get("query_id")}
@@ -97,12 +111,7 @@ def _json(data: Any, status: int = 200) -> web.Response:
 
 def _require_account_login() -> None:
     """Общий отказ там, где нужен живой MTProto-вход (создание задачи, запуск)."""
-    if not settings.public_login_enabled:
-        raise FeatureUnavailable(
-            LOGIN_UNAVAILABLE_TEXT,
-            feature="account_login",
-            status=settings.account_login_status,
-        )
+    accounts_login.require_enabled()
 
 
 def _as_list(value: Any) -> list[str]:
@@ -121,6 +130,28 @@ def _as_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _months_or_fail(raw: Any, default: int) -> int:
+    """Срок абонемента из запроса. Поля нет — умолчание, мусор — отказ.
+
+    Отсутствие поля — нормальный случай «оплатить месяц», у него есть умолчание.
+    А вот молча превращать «много» в один месяц нельзя: человек заплатит не за
+    то, что выбирал, и в претензии будет прав.
+
+    Разбираем через строку, чтобы «1.5» тоже считалось мусором: ``int(1.5)``
+    молча даёт 1, то есть счёт на другой срок, чем просили.
+    """
+    if raw is None or raw == "":
+        months = default
+    else:
+        try:
+            months = int(str(raw).strip())
+        except (TypeError, ValueError):
+            raise ValidationError(f"Срок — {periods_text()}") from None
+    if not is_valid_period(months):
+        raise ValidationError(f"Срок — {periods_text()}")
+    return months
 
 
 def require_auth(handler: Callable) -> Callable:
@@ -147,9 +178,18 @@ async def health(_request: web.Request) -> web.Response:
     """Проверка живости. Без авторизации — для мониторинга.
 
     Плюс счётчики очереди: по ним видно, не копятся ли отправки и не сыплются
-    ли ошибки, — иначе узнаём о проблеме только от пользователей.
+    ли ошибки, — иначе узнаём о проблеме только от пользователей. Пропуски идут
+    с разбивкой по причинам: «отфильтровано» — норма, «нет подписки» — деньги,
+    «фильтр упал» — правило надо править. В общем счётчике всё это неразличимо.
     """
-    return _json({"ok": True, "service": "tg-forward", "delivery": manager.delivery_stats()})
+    delivery = dict(manager.delivery_stats())
+    try:
+        async with SessionLocal() as session:
+            delivery["persisted"] = await repo.count_pending_deliveries(session)
+    except Exception as exc:  # noqa: BLE001 — health не должен падать из-за БД
+        logger.debug("health: не прочитали журнал ожидания: {}", exc)
+        delivery["persisted"] = None
+    return _json({"ok": True, "service": "tg-forward", "delivery": delivery})
 
 
 @routes.get("/api/me")
@@ -211,6 +251,17 @@ async def me(request: web.Request) -> web.Response:
             "features": {
                 "account_login_enabled": settings.public_login_enabled,
                 "account_login_status": settings.account_login_status,
+                # Только реально подключённые способы оплаты: мини-апп
+                # не должен предлагать карту или USDT, если они не работают.
+                "payment_methods": settings.payment_methods(),
+            },
+            # Где чем платят: внутри Telegram — звёзды, карта и крипта — по
+            # ссылке во внешнем браузере (см. app/paylink.py).
+            "pay": {
+                "mode": settings.pay_mode,
+                "inline": settings.inline_payment_methods(),
+                "external": settings.external_payment_methods(),
+                "url": paylink.pay_url(user_id),
             },
         }
     )
@@ -233,8 +284,12 @@ def commands_payload() -> list[dict]:
 @routes.get("/api/commands")
 @require_auth
 async def commands(_request: web.Request) -> web.Response:
-    """Каталог команд. status: ready | setup_required."""
-    return _json({"commands": commands_payload()})
+    """Каталог команд. status: ready | setup_required.
+
+    ``groups`` — порядок и подписи блоков каталога: кабинет раскладывает
+    команды по ним, чтобы список не выглядел свалкой из девяти карточек.
+    """
+    return _json({"commands": commands_payload(), "groups": COMMAND_GROUPS})
 
 
 @routes.get("/api/tasks")
@@ -640,6 +695,16 @@ async def list_accounts(request: web.Request) -> web.Response:
                 "exists": pending is not None,
                 "phone": pending.phone if pending else None,
                 "stage": pending.stage if pending else None,
+                # Короткое имя шага — то же, что отдают ручки входа, чтобы
+                # кабинету не приходилось знать про «waiting_*» из БД.
+                "step": accounts_login._PUBLIC_STAGE.get(pending.stage, "code")
+                if pending
+                else None,
+                "attempts_left": max(
+                    accounts_login.MAX_CODE_ATTEMPTS - int(pending.attempts or 0), 0
+                )
+                if pending
+                else None,
             },
             "bot_url": f"https://t.me/{(await _bot_username()) or ''}".rstrip("/"),
             "features": {
@@ -648,6 +713,65 @@ async def list_accounts(request: web.Request) -> web.Response:
             },
         }
     )
+
+
+# ─────────────────────────── Подключение аккаунта ─────────────────────────────
+#
+# Вход целиком проходит в кабинете: раньше кнопка «Подключить аккаунт» умела
+# только открыть чат с ботом, и человек уходил из мини-аппа на середине.
+# Сами шаги живут в app/accounts_login.py — там же, откуда их берёт бот.
+
+
+async def _login_body(request: web.Request) -> dict:
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        raise ValidationError("Нужен JSON") from None
+    return payload if isinstance(payload, dict) else {}
+
+
+@routes.post("/api/accounts/login/start")
+@require_auth
+async def login_start(request: web.Request) -> web.Response:
+    """Шаг 1: {"phone": "+79001234567"} → Telegram присылает код."""
+    body = await _login_body(request)
+    step = await accounts_login.start(request[USER_ID_KEY], body.get("phone"))
+    return _json(step.as_dict())
+
+
+@routes.post("/api/accounts/login/code")
+@require_auth
+async def login_code(request: web.Request) -> web.Response:
+    """Шаг 2: {"code": "12345"} → либо просим 2FA, либо аккаунт подключён."""
+    body = await _login_body(request)
+    step = await accounts_login.submit_code(request[USER_ID_KEY], body.get("code"))
+    return _json(step.as_dict())
+
+
+@routes.post("/api/accounts/login/password")
+@require_auth
+async def login_password(request: web.Request) -> web.Response:
+    """Шаг 3: {"password": "…"} — облачный пароль 2FA."""
+    body = await _login_body(request)
+    step = await accounts_login.submit_password(request[USER_ID_KEY], body.get("password"))
+    return _json(step.as_dict())
+
+
+@routes.post("/api/accounts/login/cancel")
+@require_auth
+async def login_cancel(request: web.Request) -> web.Response:
+    """Забыть незавершённый вход (кнопка «Отмена» на любом шаге)."""
+    dropped = await accounts_login.cancel(request[USER_ID_KEY])
+    return _json({"ok": True, "dropped": dropped})
+
+
+@routes.delete("/api/accounts/{account_id}")
+@require_auth
+async def delete_account(request: web.Request) -> web.Response:
+    """Отключает аккаунт: гасит клиент и удаляет сохранённую сессию."""
+    account_id = _as_int(request.match_info.get("account_id"), 0)
+    phone = await accounts_login.disconnect(request[USER_ID_KEY], account_id)
+    return _json({"ok": True, "phone": phone})
 
 
 @routes.get("/api/subscription")
@@ -670,6 +794,15 @@ async def subscription(request: web.Request) -> web.Response:
                 "stars": settings.price_stars,
                 "usdt": settings.price_usdt,
                 "trial_days": settings.trial_days,
+            },
+            # Контур оплаты: внутри Telegram — звёзды, карта и крипта — на сайте.
+            # Кабинет открывает эту ссылку через WebApp.openLink, то есть во
+            # внешнем браузере: платёж не проходит внутри Telegram.
+            "pay": {
+                "mode": settings.pay_mode,
+                "inline": settings.inline_payment_methods(),
+                "external": settings.external_payment_methods(),
+                "url": paylink.pay_url(user_id),
             },
         }
     )
@@ -700,12 +833,9 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
         body = {}
     if not isinstance(body, dict):
         raise ValidationError("Ожидается JSON-объект с полем months")
-    months = _as_int(body.get("months"), 1)
-
-    # Срок только из каталога: «2 месяца» со стороны клиента — не повод
-    # молча округлять, иначе цена на кнопке разойдётся с ценой в счёте.
-    if not is_valid_period(months):
-        raise ValidationError(f"Срок — {periods_text()}")
+    # Срок только из каталога: «2 месяца» со стороны клиента — не повод молча
+    # округлять, иначе цена на кнопке разойдётся с ценой в счёте.
+    months = _months_or_fail(body.get("months"), DEFAULT_MONTHS)
 
     if _bot is None:
         raise FeatureUnavailable(
@@ -736,6 +866,157 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
         ) from exc
 
     return _json({"url": link, "months": months, "amount": amount, "currency": "XTR"})
+
+
+# ───────────────── Оплата вне Telegram: карта и USDT на странице ───────────────
+#
+# Внутри Telegram абонемент продаётся только за звёзды — так требуют правила
+# Telegram (ToS для разработчиков, п. 6.2). Карта и крипта живут на обычной
+# веб-странице ``/pay``, которая открывается во внешнем браузере. Ничего не
+# скрыто: в боте прямо написано, что платёж уходит на сайт сервиса.
+#
+# Авторизация здесь не по initData (его на странице нет), а по подписанному
+# токену из ссылки — см. app/paylink.py.
+
+
+def _pay_link_or_fail(token: str) -> paylink.PayLink:
+    link = paylink.parse_token(token or "")
+    if link is None:
+        raise ValidationError(
+            "Ссылка на оплату устарела или неверна. Откройте её заново из бота."
+        )
+    return link
+
+
+def _pay_html(title: str, message: str) -> str:
+    """Минимальная страница-заглушка: устаревшая ссылка, выключенный контур."""
+    return (
+        "<!doctype html><html lang=ru><head><meta charset=utf-8>"
+        '<meta name=viewport content="width=device-width,initial-scale=1">'
+        f"<title>{title}</title>"
+        "<style>body{font:16px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;"
+        "margin:0;min-height:100vh;display:flex;align-items:center;"
+        "justify-content:center;background:#0f1115;color:#e8eaed}"
+        "div{max-width:28rem;padding:2rem;text-align:center}"
+        "h1{font-size:1.25rem;margin:0 0 .75rem}p{margin:0;color:#9aa0a6}</style>"
+        f"</head><body><div><h1>{title}</h1><p>{message}</p></div></body></html>"
+    )
+
+
+@routes.get("/pay")
+async def pay_page(request: web.Request) -> web.Response:
+    """Страница оплаты картой и криптой. Открывается вне Telegram."""
+    if not settings.external_payment_methods():
+        return web.Response(
+            text=_pay_html(
+                "Оплата на сайте отключена",
+                "Абонемент можно оплатить звёздами в боте.",
+            ),
+            content_type="text/html",
+            status=404,
+        )
+    if paylink.parse_token(request.query.get("t") or "") is None:
+        # 410, а не 400: ссылка была рабочей, просто истекла — это нормальный
+        # исход, и понятный статус помогает в логах отличить его от подделки.
+        return web.Response(
+            text=_pay_html(
+                "Ссылка устарела",
+                "Ссылка на оплату живёт час. Откройте раздел «Подписка» в боте "
+                "и нажмите кнопку оплаты снова.",
+            ),
+            content_type="text/html",
+            status=410,
+        )
+    page = settings.webapp_dir / "pay.html"
+    if not page.exists():
+        raise web.HTTPNotFound()
+    return web.FileResponse(page)
+
+
+@routes.get("/api/pay/info")
+async def pay_info(request: web.Request) -> web.Response:
+    """Что показать на странице оплаты: способы, сроки и цены."""
+    link = _pay_link_or_fail(request.query.get("t") or "")
+    methods = settings.external_payment_methods()
+    if not methods:
+        raise FeatureUnavailable(
+            "Оплата на сайте отключена", feature="external", status="disabled"
+        )
+    # Без username бота ссылку не собираем: "https://t.me" без имени ведёт
+    # на главную Telegram и выглядит как поломка.
+    username = await _bot_username()
+    return _json(
+        {
+            "months": link.months,
+            "methods": methods,
+            "expires_in": max(0, link.expires_at - int(time.time())),
+            "periods": [
+                {"months": months, "rub": rub_amount(months), "usdt": usdt_amount(months)}
+                for months in PERIODS
+            ],
+            "bot_url": f"https://t.me/{username}" if username else None,
+        }
+    )
+
+
+@routes.get("/api/pay/link")
+@require_auth
+async def pay_link(request: web.Request) -> web.Response:
+    """Свежая ссылка на страницу оплаты для кнопки в кабинете.
+
+    Ссылка из ``/api/me`` подписана на момент открытия кабинета, а живёт час:
+    если человек вернулся к вкладке позже, она уже не сработает. Поэтому
+    кабинет просит новый токен в момент нажатия.
+    """
+    user_id = request[USER_ID_KEY]
+    url = paylink.pay_url(user_id)
+    if not url:
+        raise FeatureUnavailable(
+            "Оплата на сайте отключена", feature="external", status="disabled"
+        )
+    return _json(
+        {
+            "url": url,
+            "methods": settings.external_payment_methods(),
+            "expires_in": paylink.TOKEN_TTL_SECONDS,
+        }
+    )
+
+
+@routes.post("/api/pay/start")
+async def pay_start(request: web.Request) -> web.Response:
+    """Выставляет счёт по способу оплаты со страницы ``/pay``.
+
+    Пользователь берётся из подписи токена, а не из тела запроса: иначе можно
+    было бы оплатить абонемент себе, а начислить его чужому аккаунту.
+    """
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = None
+    if not isinstance(body, dict):
+        raise ValidationError("Ожидается JSON-объект")
+
+    link = _pay_link_or_fail(str(body.get("t") or ""))
+    method = str(body.get("method") or "").strip()
+    if method not in settings.external_payment_methods():
+        raise FeatureUnavailable(
+            "Этот способ оплаты недоступен", feature=method or "external", status="disabled"
+        )
+
+    # Срок можно поменять на странице: цену всё равно считает сервер, а токен
+    # подтверждает только личность плательщика.
+    months = _months_or_fail(body.get("months"), link.months)
+
+    invoice = await service.start(method, link.user_id, months)
+    logger.info(
+        "Страница оплаты: счёт #{} на {} мес. для {} ({})",
+        invoice.get("payment_id"),
+        months,
+        link.user_id,
+        method,
+    )
+    return _json(invoice)
 
 
 @routes.post("/api/subscription/bank")
@@ -860,9 +1141,12 @@ def _task_view(rule) -> dict:
 # Каталог команд мини-аппа.
 # kind — тип задачи в app.telegram_client.jobs; needs/optional — поля формы,
 # по ним фронтенд собирает шторку создания и проверяет обязательность.
+# group — блок каталога (см. COMMAND_GROUPS ниже): девять команд одним списком
+# читались как свалка, поэтому кабинет раскладывает их по смыслу.
 COMMANDS: list[dict] = [
     {
         "id": "copy_channel",
+        "group": "publish",
         "kind": "forward",
         "emoji": "🔁",
         "title": "Копирование канала",
@@ -873,6 +1157,7 @@ COMMANDS: list[dict] = [
     },
     {
         "id": "broadcast",
+        "group": "publish",
         "kind": "broadcast",
         "emoji": "📣",
         "title": "Рассылка по чатам",
@@ -884,6 +1169,7 @@ COMMANDS: list[dict] = [
     },
     {
         "id": "parser",
+        "group": "audience",
         "kind": "parser",
         "emoji": "🕵️",
         "title": "Парсер аудитории",
@@ -895,6 +1181,7 @@ COMMANDS: list[dict] = [
     },
     {
         "id": "autosubscribe",
+        "group": "audience",
         "kind": "autosubscribe",
         "emoji": "🤝",
         "title": "Автоподписка",
@@ -906,6 +1193,7 @@ COMMANDS: list[dict] = [
     },
     {
         "id": "checks",
+        "group": "inbox",
         "kind": "checks",
         "emoji": "🧾",
         "title": "Ловец чеков",
@@ -916,6 +1204,7 @@ COMMANDS: list[dict] = [
     },
     {
         "id": "dialogs",
+        "group": "inbox",
         "kind": "dialogs",
         "emoji": "💬",
         "title": "Уведомления из диалогов",
@@ -927,6 +1216,7 @@ COMMANDS: list[dict] = [
     },
     {
         "id": "baiting",
+        "group": "moderation",
         "kind": "baiting",
         "emoji": "🎣",
         "title": "Байтинг",
@@ -937,6 +1227,7 @@ COMMANDS: list[dict] = [
     },
     {
         "id": "mute",
+        "group": "moderation",
         "kind": "mute",
         "emoji": "🔇",
         "title": "Мут",
@@ -947,6 +1238,7 @@ COMMANDS: list[dict] = [
     },
     {
         "id": "poster",
+        "group": "publish",
         "kind": "poster",
         "emoji": "📤",
         "title": "Авто-постинг",
@@ -956,6 +1248,16 @@ COMMANDS: list[dict] = [
         "optional": ["interval", "start", "end"],
         "hint": "Чат — куда постить. Сообщений может быть несколько (каждое с новой строки) — уходят по очереди. Интервал в минутах, окно — ЧЧ:ММ.",
     },
+]
+
+# Блоки каталога в порядке показа. Подписи и порядок живут здесь, а не в
+# мини-аппе: иначе появилась бы вторая копия, которая рано или поздно разойдётся
+# с этим списком. Команда без известной группы попадёт в «прочее».
+COMMAND_GROUPS: list[dict] = [
+    {"id": "publish", "title": "пересылка и публикация"},
+    {"id": "audience", "title": "аудитория"},
+    {"id": "inbox", "title": "входящее"},
+    {"id": "moderation", "title": "модерация"},
 ]
 
 COMMANDS_BY_ID: dict[str, dict] = {item["id"]: item for item in COMMANDS}

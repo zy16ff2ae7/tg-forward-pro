@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -18,9 +19,18 @@ from app.config import BASE_DIR, settings
 from app.db import repo
 from app.db.database import SessionLocal, dispose_db, init_db
 from app.errors import http_error_middleware, on_bot_error
+from app.fsperms import harden_runtime_files
 from app.logging_setup import setup_logging
-from app.payments import crypto
+from app.payments import crypto, yookassa
 from app.telegram_client.manager import manager
+
+# Как часто фоновый цикл проверяет платежи и подписки
+BACKGROUND_INTERVAL_SECONDS = 300
+
+# Ссылку на фоновую задачу держим, чтобы остановить её на выходе. Без ссылки
+# задачу может собрать сборщик мусора, а на shutdown она продолжала бы писать
+# в закрытую БД.
+_background_task: asyncio.Task | None = None
 
 
 async def notify_expiring(bot: Bot) -> None:
@@ -40,32 +50,71 @@ async def notify_expiring(bot: Bot) -> None:
                 user_id,
                 "⏳ Абонемент заканчивается.\n\n"
                 "Чтобы пересылка не остановилась, продлите его — это займёт минуту.",
-                reply_markup=payment_menu(),
+                reply_markup=payment_menu(user_id),
             )
         except Exception:  # noqa: BLE001
             logger.debug("Не смогли напомнить пользователю {}", user_id)
 
 
-async def background_loop(bot: Bot) -> None:
-    """Фоновые проверки: оплата USDT и напоминания о продлении."""
-    while True:
+async def run_background_checks(bot: Bot) -> None:
+    """Прогоняет фоновые проверки по очереди, независимо друг от друга.
+
+    Раньше все три стояли под одним ``try``: недоступность TronGrid означала,
+    что в этом проходе не зачтётся и оплата картой, и напоминания не уйдут.
+    Человек заплатил картой, а доступа нет — из-за чужого провайдера. Поэтому
+    каждая проверка отвечает только за себя.
+    """
+    checks = (
+        ("USDT", crypto.check_pending),
+        ("ЮKassa", yookassa.check_pending),
+        ("напоминания о продлении", notify_expiring),
+    )
+    for name, check in checks:
         try:
-            await asyncio.sleep(300)  # раз в 5 минут
-            await crypto.check_pending(bot)
-            await notify_expiring(bot)
+            await check(bot)
         except asyncio.CancelledError:
+            # Остановка сервиса — не ошибка проверки: пробрасываем дальше,
+            # иначе цикл не остановить.
             raise
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Ошибка в фоновом цикле: {}", exc)
+            logger.warning("Фоновая проверка «{}» не прошла: {}", name, exc)
+
+
+async def background_loop(bot: Bot) -> None:
+    """Фоновые проверки: оплата USDT и картой, напоминания о продлении.
+
+    Первый проход — сразу, без ожидания: пока сервис перезапускался, перевод
+    мог уже прийти, и заставлять человека ждать пять минут не за что.
+
+    Карту проверяем здесь же, а не только кнопкой «Я оплатил» в боте: на внешней
+    странице оплаты такой кнопки нет — человек уходит на страницу банка и
+    обратно может не вернуться, а доступ всё равно должен включиться.
+    """
+    while True:
+        await run_background_checks(bot)
+        await asyncio.sleep(BACKGROUND_INTERVAL_SECONDS)
+
+
+async def stop_background_loop() -> None:
+    """Останавливает фоновый цикл и дожидается его выхода."""
+    global _background_task
+    task, _background_task = _background_task, None
+    if task is None or task.done():
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 async def on_startup(bot: Bot) -> None:
+    global _background_task
+
     await init_db()
     logger.info("БД готова: {}", settings.database_url)
 
     await manager.start_all()
     manager.start_periodic_refresh(interval=60)
-    asyncio.create_task(background_loop(bot))
+    _background_task = asyncio.create_task(background_loop(bot), name="background-loop")
 
     if settings.use_webhook:
         await bot.set_webhook(
@@ -99,6 +148,9 @@ async def on_shutdown(bot: Bot) -> None:
     logger.info("Останавливаемся…")
     if settings.use_webhook:
         await bot.delete_webhook()
+    # Сначала фон, потом клиенты и БД: иначе цикл успеет обратиться к
+    # закрытому движку и напишет в лог ошибку на пустом месте.
+    await stop_background_loop()
     await manager.stop_all()
     await dispose_db()
 
@@ -108,6 +160,11 @@ async def main() -> None:
     # до всего остального: невалидный ключ лучше увидеть сразу, а не на первой пересылке.
     setup_logging(settings.log_level, BASE_DIR / "logs")
     settings.require()
+    # Права на .env, базу и логи чиним сами: файл с токеном не должен читаться
+    # всей машиной, а забыть про chmod после деплоя слишком легко.
+    fixed = harden_runtime_files(BASE_DIR)
+    if fixed:
+        logger.info("Права ужаты до 600/700: {}", ", ".join(fixed))
     for warning in settings.warnings():
         logger.warning("{}", warning)
 

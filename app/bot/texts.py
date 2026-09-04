@@ -54,13 +54,31 @@ HELP = (
 )
 
 
+def price_line() -> str:
+    """Строка со стоимостью: только те способы, что реально принимают оплату.
+
+    Незачем показывать цену в рублях, если карты не подключены, — это
+    выглядит как обман и рождает вопросы в поддержку.
+    """
+    parts: list[str] = []
+    if settings.stars_ready:
+        parts.append(f"{settings.price_stars} ⭐")
+    if settings.yookassa_ready:
+        parts.append(f"{settings.price_rub} ₽")
+    if settings.usdt_ready:
+        parts.append(f"{settings.price_usdt:g} USDT")
+    if not parts:
+        return ""
+    return "Стоимость: " + "  ·  ".join(parts)
+
+
 def subscription_status(active_until: datetime | None, rules_count: int) -> str:
     if active_until is None:
+        price = price_line()
         return (
             "💳 <b>Абонемент не активен</b>\n\n"
-            "Сейчас пересылка остановлена. Оплатите месяц, и правила снова заработают.\n"
-            f"Стоимость: {settings.price_rub} ₽  ·  {settings.price_stars} ⭐  ·  "
-            f"{settings.price_usdt:g} USDT"
+            "Сейчас пересылка остановлена. Оплатите месяц, и правила снова заработают."
+            + (f"\n{price}" if price else "")
         )
     days = (active_until - utcnow()).days
     return (

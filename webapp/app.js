@@ -13,7 +13,12 @@ const state = {
   me: null,
   accounts: [],
   pendingLogin: null,
+  // Шаг, на котором сейчас стоит шторка подключения аккаунта. Настоящее
+  // состояние входа помнит сервер (строка в pending_logins), здесь лежит
+  // только то, что нужно нарисовать: какой вопрос задать и сколько попыток.
+  login: { stage: 'phone', phone: '', attemptsLeft: null },
   commands: [],
+  commandGroups: [],   // порядок и подписи блоков каталога (из /api/commands)
   tasks: [],
   // Все задачи пользователя, разложенные по статусу — нужны для агрегации
   // бейджей команд: видим «N на паузе» даже когда пользователь смотрит
@@ -130,36 +135,45 @@ const DEMO_STATE = {
   nextId: 5,
 };
 
+/* Демо-каталог повторяет COMMANDS и COMMAND_GROUPS из app/webapp_api.py:
+   в демо-режиме кабинет должен выглядеть точно так же, как с сервером. */
+const DEMO_COMMAND_GROUPS = [
+  { id: 'publish', title: 'пересылка и публикация' },
+  { id: 'audience', title: 'аудитория' },
+  { id: 'inbox', title: 'входящее' },
+  { id: 'moderation', title: 'модерация' },
+];
+
 const DEMO_COMMANDS = [
-  { id: 'copy_channel', kind: 'forward', emoji: '🔁', title: 'Копирование канала', status: 'ready',
+  { id: 'copy_channel', group: 'publish', kind: 'forward', emoji: '🔁', title: 'Копирование канала', status: 'ready',
     needs: ['account', 'source', 'target'], optional: ['mode'],
     description: 'Копирует новые публикации между каналами с заменами текста.' },
-  { id: 'broadcast', kind: 'broadcast', emoji: '📣', title: 'Рассылка по чатам', status: 'ready',
+  { id: 'broadcast', group: 'publish', kind: 'broadcast', emoji: '📣', title: 'Рассылка по чатам', status: 'ready',
     needs: ['account', 'source', 'target', 'targets'], optional: [],
     description: 'Одно сообщение из источника — в несколько чатов сразу.',
     hint: 'Выберите чаты во вкладке «Чаты» и нажмите «📣 Рассылка» — они станут получателями. Источник: сообщение из него уйдёт во все выбранные чаты.' },
-  { id: 'parser', kind: 'parser', emoji: '🕵️', title: 'Парсер аудитории', status: 'ready',
+  { id: 'parser', group: 'audience', kind: 'parser', emoji: '🕵️', title: 'Парсер аудитории', status: 'ready',
     needs: ['account', 'source'], optional: ['limit'],
     description: 'Собирает участников чужого чата в список по вашей команде.',
     hint: 'Выберите чат во вкладке «Чаты» и нажмите «🕵️ Парсер» — он станет источником. Запускается сразу, результат — кнопкой «Результаты».' },
-  { id: 'autosubscribe', kind: 'autosubscribe', emoji: '🤝', title: 'Автоподписка', status: 'ready',
+  { id: 'autosubscribe', group: 'audience', kind: 'autosubscribe', emoji: '🤝', title: 'Автоподписка', status: 'ready',
     needs: ['account', 'targets'], optional: ['source'],
     description: 'Вступает в каналы из списка и подхватывает ссылки из источника.',
     hint: 'Каналы — через запятую: @chan1, t.me/+invite.' },
-  { id: 'checks', kind: 'checks', emoji: '🧾', title: 'Ловец чеков', status: 'ready',
+  { id: 'checks', group: 'inbox', kind: 'checks', emoji: '🧾', title: 'Ловец чеков', status: 'ready',
     needs: ['account', 'source', 'target'], optional: ['keywords'],
     description: 'Ловит чеки и подарочные ссылки в чатах и складывает в одно место.' },
-  { id: 'dialogs', kind: 'dialogs', emoji: '💬', title: 'Уведомления из диалогов', status: 'ready',
+  { id: 'dialogs', group: 'inbox', kind: 'dialogs', emoji: '💬', title: 'Уведомления из диалогов', status: 'ready',
     needs: ['account', 'target'], optional: ['keywords'],
     description: 'Присылает входящие личные сообщения в выбранный чат.',
     hint: 'Источник не нужен: задача слушает все личные диалоги аккаунта.' },
-  { id: 'baiting', kind: 'baiting', emoji: '🎣', title: 'Байтинг', status: 'ready',
+  { id: 'baiting', group: 'moderation', kind: 'baiting', emoji: '🎣', title: 'Байтинг', status: 'ready',
     needs: ['account', 'source', 'target_user'], optional: ['reaction'],
     description: 'Ставит реакцию на сообщения выбранного человека в общем чате.' },
-  { id: 'mute', kind: 'mute', emoji: '🔇', title: 'Мут', status: 'ready',
+  { id: 'mute', group: 'moderation', kind: 'mute', emoji: '🔇', title: 'Мут', status: 'ready',
     needs: ['account', 'source', 'target_user'], optional: ['keywords'],
     description: 'Удаляет сообщения выбранного человека в чате, где вы администратор.' },
-  { id: 'poster', kind: 'poster', emoji: '📤', title: 'Авто-постинг', status: 'ready',
+  { id: 'poster', group: 'publish', kind: 'poster', emoji: '📤', title: 'Авто-постинг', status: 'ready',
     needs: ['account', 'target', 'message'], optional: ['interval', 'start', 'end'],
     description: 'Шлёт ваше сообщение в чат каждые N минут в заданном окне времени.',
     hint: 'Чат — куда постить. Сообщений может быть несколько (каждое с новой строки) — уходят по очереди. Интервал в минутах, окно — ЧЧ:ММ.' },
@@ -181,31 +195,61 @@ function demoMe() {
     subscription: { active: true, until: '2026-09-27T12:00:00', days_left: DEMO_BANK.days_left },
     stats: {
       rules: DEMO_STATE.tasks.filter((task) => !task.archived).length,
-      accounts: 1,
+      accounts: DEMO_ACCOUNTS.length,
       forwarded: 1284,
     },
     tariffs: { rub: 990, stars: 299, usdt: 12, trial_days: 3, max_rules_free: 3 },
     features: DEMO_FEATURES,
+    // Демо показывает оба контура: звёзды внутри Telegram, карта и крипта — на
+    // сайте. Ссылку демо не выдаёт: подписать её может только сервер.
+    pay: { mode: 'external', inline: ['stars', 'manual'], external: ['yookassa', 'usdt'], url: null },
   };
 }
 
+/* Аккаунты и незавершённый вход в демо живут между запросами: иначе демо-вход
+   заканчивался бы ничем, а список аккаунтов не показывал бы результат.
+   Код и пароль фиксированные — их видно в подсказке под полем. */
+const DEMO_ACCOUNTS = [{
+  id: 1,
+  phone: '+7 916 •••• 12 34',
+  is_active: true,
+  online: true,
+  last_error: null,
+  created_at: '2026-08-12T10:00:00',
+}];
+const DEMO_LOGIN = { pending: null, nextId: 2 };
+const DEMO_MAX_ATTEMPTS = 5;
+const DEMO_CODE = '11111';
+const DEMO_PASSWORD = 'papa';
+
+/* Отказ в демо выглядит как отказ сервера: тот же status, тот же текст.
+   Так шторка входа проверяется целиком, включая «осталось попыток». */
+function demoFail(status, message, details) {
+  const error = new Error(message);
+  error.status = status;
+  error.data = { error: message, ...(details || {}) };
+  throw error;
+}
+
 function demoAccounts() {
+  const pending = DEMO_LOGIN.pending;
   return {
-    accounts: [{
-      id: 1,
-      phone: '+7 916 •••• 12 34',
-      is_active: true,
-      online: true,
-      last_error: null,
-      created_at: '2026-08-12T10:00:00',
-    }],
+    accounts: DEMO_ACCOUNTS,
     subscription: {
       active: true,
       until: '2026-09-27T12:00:00',
       days_left: DEMO_BANK.days_left,
       piggy_bank_days: DEMO_BANK.banked,
     },
-    pending_login: { exists: false, phone: null, stage: null },
+    pending_login: pending
+      ? {
+        exists: true,
+        phone: pending.phone,
+        stage: `waiting_${pending.stage}`,
+        step: pending.stage,
+        attempts_left: Math.max(DEMO_MAX_ATTEMPTS - pending.attempts, 0),
+      }
+      : { exists: false, phone: null, stage: null, step: null, attempts_left: null },
     bot_url: 'https://t.me/papa_is_working_for_you_bot',
     features: DEMO_FEATURES,
   };
@@ -264,6 +308,65 @@ function demoTaskTitle(body, command) {
     }
   }
   return `${body.source} → ${body.target}`;
+}
+
+/* Вход в демо повторяет сервер по шагам и по ошибкам: номер → код → пароль 2FA.
+   Демо всегда спрашивает пароль, чтобы все три шага можно было увидеть. */
+function demoLogin(clean, options) {
+  const body = JSON.parse(options.body || '{}');
+  const pending = DEMO_LOGIN.pending;
+
+  if (clean === '/api/accounts/login/cancel') {
+    DEMO_LOGIN.pending = null;
+    return { ok: true, dropped: Boolean(pending) };
+  }
+
+  if (clean === '/api/accounts/login/start') {
+    const phone = String(body.phone || '').replace(/[\s\-()]+/g, '');
+    if (!/^\+?\d{10,15}$/.test(phone)) {
+      demoFail(400, 'Нужен номер в международном формате, например +79001234567.');
+    }
+    DEMO_LOGIN.pending = { phone: phone.startsWith('+') ? phone : `+${phone}`, stage: 'code', attempts: 0 };
+    return { stage: 'code', phone: DEMO_LOGIN.pending.phone, attempts_left: DEMO_MAX_ATTEMPTS };
+  }
+
+  if (!pending) demoFail(409, 'Незавершённого входа нет. Начните заново: «Подключить аккаунт».');
+
+  if (clean === '/api/accounts/login/code') {
+    if (pending.stage !== 'code') demoFail(409, 'Шаг входа не тот: сервис ждёт облачный пароль.');
+    const code = String(body.code || '').replace(/\D/g, '');
+    if (!code) demoFail(400, 'В коде только цифры — пришлите их подряд, без пробелов.');
+    if (code !== DEMO_CODE) {
+      pending.attempts += 1;
+      const left = DEMO_MAX_ATTEMPTS - pending.attempts;
+      if (left <= 0) {
+        DEMO_LOGIN.pending = null;
+        demoFail(409, 'Код не подошёл слишком много раз. Начните подключение заново.');
+      }
+      demoFail(400, `Код не подошёл. Осталось попыток: ${left}.`, { attempts_left: left });
+    }
+    pending.stage = 'password';
+    pending.attempts = 0;
+    return { stage: 'password', phone: pending.phone };
+  }
+
+  // /api/accounts/login/password
+  if (pending.stage !== 'password') demoFail(409, 'Шаг входа не тот: сервис ждёт код из Telegram.');
+  if (!String(body.password || '').trim()) demoFail(400, 'Пароль пустой.');
+  if (String(body.password) !== DEMO_PASSWORD) {
+    demoFail(400, 'Пароль не подошёл (PasswordHashInvalidError). Попробуйте снова.');
+  }
+  const account = {
+    id: DEMO_LOGIN.nextId++,
+    phone: pending.phone,
+    is_active: true,
+    online: true,
+    last_error: null,
+    created_at: new Date().toISOString(),
+  };
+  DEMO_ACCOUNTS.push(account);
+  DEMO_LOGIN.pending = null;
+  return { stage: 'done', phone: account.phone, account_id: account.id, name: 'Демо-аккаунт' };
 }
 
 function demoApi(path, options = {}) {
@@ -344,8 +447,16 @@ function demoApi(path, options = {}) {
 
   if (clean === '/api/tasks') return demoTasks(path);
   if (clean === '/api/me') return demoMe();
-  if (clean === '/api/commands') return { commands: DEMO_COMMANDS };
+  if (clean === '/api/commands') return { commands: DEMO_COMMANDS, groups: DEMO_COMMAND_GROUPS };
   if (clean === '/api/accounts') return demoAccounts();
+  if (clean.startsWith('/api/accounts/login/')) return demoLogin(clean, options);
+  if (clean.startsWith('/api/accounts/') && method === 'DELETE') {
+    const id = Number(clean.split('/')[3]);
+    const idx = DEMO_ACCOUNTS.findIndex((item) => item.id === id);
+    if (idx < 0) demoFail(404, 'Аккаунт не найден');
+    const [removed] = DEMO_ACCOUNTS.splice(idx, 1);
+    return { ok: true, phone: removed.phone };
+  }
   if (clean === '/api/chats') return demoChats(path);
 
   if (clean === '/api/subscription/bank') {
@@ -398,6 +509,9 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const error = new Error(data.error || 'Ошибка запроса');
     error.status = response.status;
+    // Тело отказа несёт машиночитаемые поля (например, attempts_left) — они
+    // нужны обработчику, а вытаскивать их из текста сообщения нельзя.
+    error.data = data;
     throw error;
   }
   return data;
@@ -443,9 +557,28 @@ function switchTab(name) {
   const onTasks = name === 'tasks';
   fab.classList.toggle('hidden', !onTasks);
   fab.setAttribute('aria-hidden', onTasks ? 'false' : 'true');
+  updateChatBar();
+  syncFloatingPad();
   if (name === 'tasks') loadTasks();
   if (name === 'chats') loadChats();
   if (name === 'accounts') loadAccounts();
+}
+
+/* У нижнего запаса один хозяин: на задачах — FAB, на чатах — панель выбора.
+   Иначе две функции наперегонки ставили и снимали отступ, и на задачах он
+   пропадал. Высоту берём с живого элемента: она зависит от переносов подписей. */
+function syncFloatingPad() {
+  const onTasks = !$('tab-tasks').classList.contains('hidden');
+  const onChats = !$('tab-chats').classList.contains('hidden');
+  const floating = onTasks
+    ? $('addTaskBtn')
+    : onChats && state.selectedChats.length
+    ? $('chatBar')
+    : null;
+  const content = document.querySelector('.content');
+  content.classList.toggle('content--float', Boolean(floating));
+  // +26 px — просвет между кнопкой и последней карточкой плюс её отрыв от навигации.
+  content.style.setProperty('--float-h', floating ? `${floating.offsetHeight + 26}px` : '0px');
 }
 
 /* ─────────────────────────────── Шапка ───────────────────────────────── */
@@ -471,6 +604,7 @@ async function loadCommands() {
   try {
     const data = await api('/api/commands');
     state.commands = data.commands;
+    state.commandGroups = data.groups || [];
     endLoad(holder);
     renderCommands();
   } catch (error) {
@@ -516,6 +650,33 @@ function computeCommandState(command) {
   return { label: STATUS_LABELS.idle, kind: 'off', active: 0, paused: 0, done: 0 };
 }
 
+/* Карточка команды: эмодзи, название, описание, статус — по одной строке
+   каждое. Раньше статус стоял рядом с названием и на узком экране срывался на
+   вторую строку, разъезжая с эмодзи и шевроном; подсказка «как пользоваться»
+   лежала прямо в списке и делала его нечитаемым. Подсказка теперь живёт в
+   шторке команды (там она и нужна — при заполнении полей). */
+function commandCardHtml(command) {
+  const meta = computeCommandState(command);
+  // Карточка кликабельна ТОЛЬКО если команда доступна на сервере.
+  // «На настройке» — карточка остаётся видимой, но реагирует тостом.
+  const clickable = command.status === 'ready';
+  const tag = `card--cmd${clickable ? '' : ' card--cmd--locked'}`;
+  return `
+    <button class="${tag}" data-command="${command.id}">
+      <div class="card__emoji" aria-hidden="true">${command.emoji}</div>
+      <div class="cmd__main">
+        <div class="cmd__title">${esc(command.title)}</div>
+        <div class="cmd__desc">${esc(command.description)}</div>
+        <div class="cmd__foot">
+          <span class="status status--${meta.kind}">
+            <span class="status__dot" aria-hidden="true"></span>${esc(meta.label)}
+          </span>
+        </div>
+      </div>
+      <span class="cmd__chevron" aria-hidden="true">›</span>
+    </button>`;
+}
+
 function renderCommands() {
   const query = ($('commandSearch').value || '').toLowerCase();
   const list = state.commands.filter(
@@ -530,29 +691,26 @@ function renderCommands() {
     return;
   }
 
-  $('commandList').innerHTML = list
-    .map((command) => {
-      const meta = computeCommandState(command);
-      // Карточка кликабельна ТОЛЬКО если команда доступна на сервере.
-      // «На настройке» — карточка остаётся видимой, но реагирует тостом.
-      const clickable = command.status === 'ready';
-      const tag = `card--cmd${clickable ? '' : ' card--cmd--locked'}`;
-      return `
-        <button class="${tag}" data-command="${command.id}">
-          <div class="card__emoji">${command.emoji}</div>
-          <div class="cmd__main">
-            <div class="cmd__head">
-              <div class="cmd__title">${esc(command.title)}</div>
-              <span class="status status--${meta.kind}" title="${esc(meta.label)}">
-                <span class="status__dot" aria-hidden="true"></span>${esc(meta.label)}
-              </span>
-            </div>
-            <div class="cmd__desc">${esc(command.description)}</div>
-            ${command.hint ? `<div class="cmd__hint">${esc(command.hint)}</div>` : ''}
-          </div>
-          <span class="cmd__chevron" aria-hidden="true">›</span>
-        </button>`;
-    })
+  // Блоки идут в порядке, который задал сервер; пустые (например, всё
+  // отфильтровано поиском) не рисуем вовсе — заголовок без карточек не нужен.
+  const groups = state.commandGroups.length
+    ? state.commandGroups
+    : [{ id: null, title: '' }];
+  const known = new Set(groups.map((group) => group.id));
+  const blocks = groups.map((group) => ({
+    title: group.title,
+    items: list.filter((command) => (group.id ? command.group === group.id : true)),
+  }));
+  const rest = list.filter((command) => !known.has(command.group));
+  if (state.commandGroups.length && rest.length) blocks.push({ title: 'прочее', items: rest });
+
+  $('commandList').innerHTML = blocks
+    .filter((block) => block.items.length)
+    .map(
+      (block) =>
+        (block.title ? `<div class="section-label">${esc(block.title)}</div>` : '') +
+        block.items.map(commandCardHtml).join('')
+    )
     .join('');
 }
 
@@ -639,7 +797,7 @@ function renderTasks(tasks) {
         } else {
           actions.push(
             '<button class="btn" data-action="toggle" data-id="' + task.id + '">' +
-              (task.enabled ? '⏸ На паузу' : '▶️ Запустить') +
+              (task.enabled ? '⏸ Пауза' : '▶️ Запустить') +
               '</button>'
           );
         }
@@ -649,9 +807,12 @@ function renderTasks(tasks) {
         if (RESULTS_TITLES[kind] || task.oneshot) {
           actions.push('<button class="btn" data-action="results" data-id="' + task.id + '">📄 Результаты</button>');
         }
-        actions.push('<button class="btn" data-action="archive" data-id="' + task.id + '">📦 В архив</button>');
+        actions.push('<button class="btn" data-action="archive" data-id="' + task.id + '">📦 Архив</button>');
       }
-      actions.push('<button class="btn btn--danger" data-action="delete" data-id="' + task.id + '">🗑</button>');
+      // Корзина стоит отдельным столбцом, а не в общем ряду: иначе при переносе
+      // она уезжала на пустую строку одна, и карточка выглядела оборванной.
+      const del =
+        '<button class="btn btn--danger" data-action="delete" data-id="' + task.id + '">🗑</button>';
 
       return `
       <div class="task${task.archived ? ' task--archived' : ''}">
@@ -660,7 +821,10 @@ function renderTasks(tasks) {
           <div class="task__title">${esc(task.title)}</div>
         </div>
         <div class="task__meta">${lines.join(' · ')}</div>
-        <div class="task__actions">${actions.join('')}</div>
+        <div class="task__actions">
+          <div class="task__acts">${actions.join('')}</div>
+          ${del}
+        </div>
       </div>`;
     })
     .join('');
@@ -827,11 +991,21 @@ function updateChatBar() {
   const bar = $('chatBar');
   if (!bar) return;
   const n = state.selectedChats.length;
-  bar.classList.toggle('is-visible', n > 0);
+  const onChats = !$('tab-chats').classList.contains('hidden');
+  const shown = onChats && n > 0;
+  // Панель вынесена из вкладки (см. index.html), поэтому вместе с вкладкой уже
+  // не исчезает — гасим руками, иначе она всплывёт поверх задач и аккаунтов.
+  bar.classList.toggle('hidden', !onChats);
+  bar.classList.toggle('is-visible', shown);
+  bar.setAttribute('aria-hidden', shown ? 'false' : 'true');
   const countEl = $('chatBarCount');
   if (countEl) countEl.textContent = String(n);
   const sumEl = $('chatBarSummary');
   if (sumEl) sumEl.textContent = n ? selectedChatsSummary() : '';
+  // Панель висит поверх списка, как и FAB: пока она видна, последнему чату
+  // нужен запас снизу, иначе выбранный чат прячется под своей же кнопкой.
+  // Считаем после подписи — от неё зависит высота панели.
+  syncFloatingPad();
 }
 
 async function loadChats() {
@@ -983,8 +1157,11 @@ function renderAccountList() {
     return;
   }
 
-  const pendingHtml = state.pendingLogin && state.pendingLogin.exists
-    ? `<button class="card card--add" data-action="resume-login">▶️ Продолжить вход ${esc(state.pendingLogin.phone || '')}</button>`
+  const pending = state.pendingLogin;
+  const pendingHtml = pending && pending.exists
+    ? `<button class="card card--add card--resume" data-action="resume-login">
+         ▶️ Продолжить вход ${esc(pending.phone || '')} · ${pending.step === 'password' ? 'ждём пароль 2FA' : 'ждём код'}
+       </button>`
     : '';
 
   if (!state.accounts.length) {
@@ -1004,9 +1181,219 @@ function renderAccountList() {
         <div class="account__state ${account.online ? 'account__state--on' : 'account__state--off'}">
           ${account.online ? '🟢 на связи' : '🔴 офлайн'}
         </div>
+        <button class="account__del" data-action="delete-account" data-id="${account.id}"
+                aria-label="Отключить аккаунт ${esc(account.phone)}" title="Отключить аккаунт">🗑</button>
       </div>`
     )
     .join('');
+}
+
+/* ────────────────── Шторка подключения аккаунта ──────────────────────── */
+
+/* Вход проходит целиком в кабинете: номер → код из Telegram → облачный пароль.
+   Раньше кнопка «Добавить аккаунт» умела только открыть чат с ботом, и человек
+   уходил из мини-аппа на середине пути. Шаг помнит сервер (строка в БД), так
+   что закрытая шторка, перезапуск бота и переход в бота ничего не теряют. */
+const LOGIN_STEPS = {
+  phone: {
+    title: 'Подключение аккаунта',
+    lead: 'Номер того аккаунта, который будет читать источники и пересылать посты.',
+    label: 'Номер телефона',
+    placeholder: '+79001234567',
+    type: 'tel',
+    inputmode: 'tel',
+    submit: 'Получить код',
+    note: 'Международный формат, например +79001234567.',
+  },
+  code: {
+    title: 'Код из Telegram',
+    lead: 'Код пришёл в чат «Telegram» в приложении, а не по SMS.',
+    label: 'Код подтверждения',
+    placeholder: '12345',
+    type: 'text',
+    inputmode: 'numeric',
+    submit: 'Подтвердить код',
+    note: 'Код вида 1 2 3 4 5 — это 12345, без пробелов.',
+  },
+  password: {
+    title: 'Облачный пароль',
+    lead: 'На аккаунте включена двухэтапная проверка. Сервис хранит только полученную сессию, сам пароль не сохраняется.',
+    label: 'Пароль 2FA',
+    placeholder: 'Облачный пароль Telegram',
+    type: 'password',
+    inputmode: 'text',
+    submit: 'Войти',
+    note: '',
+  },
+};
+const LOGIN_ORDER = ['phone', 'code', 'password'];
+const LOGIN_PATHS = { phone: 'start', code: 'code', password: 'password' };
+const LOGIN_FIELDS = { phone: 'phone', code: 'code', password: 'password' };
+
+function loginReset() {
+  state.login = { stage: 'phone', phone: '', attemptsLeft: null };
+}
+
+function openLoginSheet() {
+  if (!state.features.account_login_enabled) {
+    toast('Вход аккаунтов пока на настройке');
+    return;
+  }
+  const pending = state.pendingLogin;
+  if (pending && pending.exists) {
+    state.login = {
+      stage: pending.step || 'code',
+      phone: pending.phone || '',
+      attemptsLeft: pending.attempts_left != null ? pending.attempts_left : null,
+    };
+  } else {
+    loginReset();
+  }
+  renderLoginStage();
+  $('loginSheet').classList.add('is-open');
+  // Фокус — после появления шторки: пока она скрыта, клавиатура не поднимется.
+  setTimeout(() => $('loginInput').focus(), 220);
+}
+
+function renderLoginStage(message) {
+  const { stage, phone, attemptsLeft } = state.login;
+  const spec = LOGIN_STEPS[stage] || LOGIN_STEPS.phone;
+  const lead = stage !== 'phone' && phone ? `Номер ${phone}. ${spec.lead}` : spec.lead;
+  const notes = [spec.note];
+  if (stage === 'code' && attemptsLeft != null) notes.push(`Осталось попыток: ${attemptsLeft}.`);
+  if (DEMO) notes.push(`Демо: код ${DEMO_CODE}, пароль ${DEMO_PASSWORD}.`);
+
+  $('loginTitle').textContent = spec.title;
+  $('loginLead').textContent = lead;
+  $('loginLabel').textContent = spec.label;
+  $('loginSubmit').textContent = spec.submit;
+  $('loginNote').textContent = notes.filter(Boolean).join(' ');
+  $('loginError').textContent = message || '';
+  $('loginRestart').hidden = stage === 'phone';
+
+  const input = $('loginInput');
+  input.type = spec.type;
+  input.inputMode = spec.inputmode;
+  input.placeholder = spec.placeholder;
+  input.value = stage === 'phone' ? phone : '';
+
+  const current = LOGIN_ORDER.indexOf(stage);
+  document.querySelectorAll('#loginSteps .steps__item').forEach((item) => {
+    const idx = LOGIN_ORDER.indexOf(item.dataset.step);
+    item.classList.toggle('is-done', idx < current);
+    item.classList.toggle('is-current', idx === current);
+  });
+}
+
+async function submitLogin() {
+  const stage = state.login.stage;
+  const value = ($('loginInput').value || '').trim();
+  if (!value) {
+    renderLoginStage(stage === 'phone' ? 'Введите номер телефона.' : 'Поле пустое.');
+    return;
+  }
+  if (stage === 'phone') state.login.phone = value;
+
+  try {
+    const step = await withLoading($('loginSubmit'), () =>
+      api(`/api/accounts/login/${LOGIN_PATHS[stage]}`, {
+        method: 'POST',
+        body: JSON.stringify({ [LOGIN_FIELDS[stage]]: value }),
+      })
+    );
+    await applyLoginStep(step);
+  } catch (error) {
+    await loginFailed(error);
+  }
+}
+
+/* Ответ сервера — это и есть следующий вопрос: code → password → done. */
+async function applyLoginStep(step) {
+  if (!step || !step.stage) return;
+  if (step.stage === 'done') {
+    closeSheets();
+    loginReset();
+    toast(`Аккаунт ${step.phone || ''} подключён`.replace('  ', ' '));
+    await loadAccounts();
+    return;
+  }
+  const wasStage = state.login.stage;
+  state.login = {
+    stage: step.stage,
+    phone: step.phone || state.login.phone,
+    attemptsLeft: step.attempts_left != null ? step.attempts_left : null,
+  };
+  renderLoginStage();
+  if (step.stage === 'code' && wasStage === 'phone') toast('Код отправлен в Telegram');
+  $('loginInput').focus();
+}
+
+/* 400 — ввод не подошёл, шаг тот же: опечатка в цифре кода не должна выбрасывать
+   человека в начало (код-то ещё живой). 503 — шлюза нет, входить некуда.
+   Остальное (409: код устарел, попытки кончились, сессия побилась) — вход
+   закончился, возвращаемся к номеру и сверяем состояние с сервером. */
+async function loginFailed(error) {
+  if (error.status === 400) {
+    // Остаток попыток берём из ответа: иначе подсказка под полем осталась бы с
+    // прежним числом и спорила бы с текстом ошибки.
+    const left = error.data ? error.data.attempts_left : null;
+    if (left != null) state.login.attemptsLeft = left;
+    renderLoginStage(error.message);
+    $('loginInput').focus();
+    $('loginInput').select();
+    return;
+  }
+  if (error.status === 503) {
+    closeSheets();
+    toast(error.message);
+    await loadAccounts();
+    return;
+  }
+  loginReset();
+  renderLoginStage(error.message);
+  await loadAccounts();
+}
+
+/* «Другой номер» — забыть незавершённый вход и начать с первого шага. */
+async function restartLogin() {
+  try {
+    await withLoading($('loginRestart'), () =>
+      api('/api/accounts/login/cancel', { method: 'POST' })
+    );
+  } catch (error) {
+    toast(error.message);
+  }
+  loginReset();
+  state.pendingLogin = null;
+  renderLoginStage();
+  $('loginInput').focus();
+  await loadAccounts();
+}
+
+/* Отключение аккаунта необратимо: сессия стирается, задачи на нём встают.
+   Поэтому спрашиваем подтверждение — нативным окном Telegram, если оно есть. */
+async function deleteAccount(id, button) {
+  const account = state.accounts.find((item) => item.id === Number(id));
+  const phone = account ? account.phone : `ID ${id}`;
+  const agreed = await confirmAction(
+    `Отключить аккаунт ${phone}? Сохранённая сессия будет удалена, задачи на этом аккаунте остановятся.`
+  );
+  if (!agreed) return;
+  try {
+    const data = await withLoading(button, () => api(`/api/accounts/${id}`, { method: 'DELETE' }));
+    toast(`Аккаунт ${data.phone || phone} отключён`);
+    await loadAccounts();
+    await refreshAllTaskLists();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function confirmAction(question) {
+  if (tg && tg.showConfirm) {
+    return new Promise((resolve) => tg.showConfirm(question, (ok) => resolve(Boolean(ok))));
+  }
+  return Promise.resolve(window.confirm(question));
 }
 
 /* ─────────────────────────── Шторка задачи ───────────────────────────── */
@@ -1085,6 +1472,7 @@ function openTaskSheet(command, prefill) {
   if (!state.accounts.length) {
     toast('Сначала подключите аккаунт');
     switchTab('accounts');
+    openLoginSheet();
     return;
   }
 
@@ -1140,8 +1528,12 @@ function bindSheetFields() {
 }
 
 function closeSheets() {
+  const loginWasOpen = $('loginSheet').classList.contains('is-open');
   document.querySelectorAll('.sheet').forEach((sheet) => sheet.classList.remove('is-open'));
   state.activeCommand = null;
+  // Закрыли шторку на середине входа — в списке должна появиться карточка
+  // «Продолжить вход»: шаг никуда не делся, он лежит в БД на сервере.
+  if (loginWasOpen && state.login.stage !== 'phone') loadAccounts();
 }
 
 /* Значения полей → тело запроса POST /api/tasks. */
@@ -1220,15 +1612,17 @@ function renderPiggyBank(banked, daysLeft) {
   $('piggyDays').textContent = state.bankedDays;
   const distribute = $('distributeBtn');
   const freeze = $('freezeBtn');
+  // Половина ряда — это ~158 px, подпись в две строки. Число от «дн.» отрывать
+  // нельзя, поэтому между ними неразрывный пробел: перенос уйдёт до числа.
   if (distribute) {
     distribute.disabled = !state.bankedDays;
     distribute.textContent = state.bankedDays
-      ? `Распределить ${state.bankedDays} дн.`
+      ? `Распределить ${state.bankedDays} дн.`
       : 'Копилка пуста';
   }
   if (freeze) {
     freeze.disabled = !daysLeft || daysLeft <= 1;
-    freeze.textContent = daysLeft > 1 ? `❄️ Заморозить ${daysLeft - 1} дн.` : '❄️ Заморозить дни';
+    freeze.textContent = daysLeft > 1 ? `❄️ Заморозить ${daysLeft - 1} дн.` : '❄️ Заморозить дни';
   }
 }
 
@@ -1275,6 +1669,52 @@ function renderTopUpButton() {
   if (!button) return;
   const stars = (state.me && state.me.tariffs && state.me.tariffs.stars) || 0;
   button.textContent = stars ? `⭐ Оплатить ${stars} звёзд` : '⭐ Оплатить звёздами';
+}
+
+/* ───────────────── Оплата вне Telegram: карта и крипта ───────────────── */
+
+/* Внутри Telegram абонемент продаётся только за звёзды — так требуют правила
+   Telegram (ToS для разработчиков, п. 6.2). Карта и USDT работают на странице
+   сервиса, и кабинет открывает её через WebApp.openLink, то есть во внешнем
+   браузере. Ничего не прячем: на кнопке прямо написано «на сайте». */
+const WEB_PAY_LABELS = { yookassa: 'картой', usdt: 'криптой' };
+
+function renderWebPayButton() {
+  const button = $('webPayBtn');
+  if (!button) return;
+  const pay = (state.me && state.me.pay) || {};
+  const methods = pay.external || [];
+  button.hidden = !methods.length;
+  if (!methods.length) return;
+  const names = methods.map((method) => WEB_PAY_LABELS[method] || method).join(' или ');
+  button.textContent = `🌐 Оплатить ${names} на сайте`;
+}
+
+async function payOnWeb(button) {
+  if (DEMO) {
+    toast('В демо страница оплаты не открывается — она работает из бота.');
+    return;
+  }
+  try {
+    // Ссылка подписана и живёт час, поэтому берём свежую в момент нажатия,
+    // а не ту, что пришла с /api/me при открытии кабинета.
+    const data = await withLoading(button, () => api('/api/pay/link'));
+    openExternal(data.url);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+/* openLink — это внешний браузер, а не WebView Telegram: платёж проходит вне
+   Telegram, как и задумано. Вне Telegram (обычный браузер) уходим в ту же
+   ссылку обычным переходом: window.open после await блокируется. */
+function openExternal(url) {
+  if (!url) {
+    toast('Оплата на сайте недоступна');
+    return;
+  }
+  if (tg && tg.openLink) tg.openLink(url, { try_instant_view: false });
+  else location.href = url;
 }
 
 async function moveBankDays(direction, button) {
@@ -1500,22 +1940,37 @@ function bindEvents() {
 
   // аккаунты
   $('addAccountBtn').addEventListener('click', () => {
+    // Вход проходит здесь же. В боте он остаётся запасным путём — на случай,
+    // когда шлюз выключен и кабинету нечего показать.
     if (!state.features.account_login_enabled) {
       toast('Вход аккаунтов пока на настройке');
       openBot('add_account');
       return;
     }
-    openBot('add_account');
+    openLoginSheet();
   });
   $('accountList').addEventListener('click', (event) => {
-    const button = event.target.closest('[data-action="resume-login"]');
+    const button = event.target.closest('[data-action]');
     if (!button) return;
-    openBot('resume_login');
+    if (button.dataset.action === 'resume-login') openLoginSheet();
+    else if (button.dataset.action === 'delete-account') deleteAccount(button.dataset.id, button);
   });
+  $('loginSubmit').addEventListener('click', submitLogin);
+  $('loginInput').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submitLogin();
+    }
+  });
+  $('loginRestart').addEventListener('click', restartLogin);
+  $('loginInBot').addEventListener('click', () => openBot('add_account'));
   $('topUpBtn').addEventListener('click', (event) => {
     // currentTarget, а не target: внутри кнопки может лежать <span>, и тогда
     // индикатор загрузки (withLoading) повесился бы не на ту кнопку.
     payWithStars(event.currentTarget);
+  });
+  $('webPayBtn').addEventListener('click', (event) => {
+    payOnWeb(event.currentTarget);
   });
   $('distributeBtn').addEventListener('click', (event) => {
     moveBankDays('distribute', event.currentTarget);
@@ -1577,6 +2032,8 @@ async function boot() {
       // Цена в звёздах приходит с тарифами, поэтому подпись кнопки знает её
       // только здесь — до этого на кнопке нейтральный текст из index.html.
       renderTopUpButton();
+      // Кнопка «на сайте» появляется только если контур внешней оплаты включён.
+      renderWebPayButton();
     } catch (error) {
       toast(error.message);
     }

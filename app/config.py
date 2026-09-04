@@ -8,9 +8,14 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 from dotenv import load_dotenv
 
+from app.fsperms import group_or_world_accessible
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 LOG_LEVELS = ("TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+# Контуры оплаты, см. Settings.pay_mode
+PAY_MODES = ("external", "stars", "inline")
 
 # .env подхватываем, если он есть (на VDS его создаёт deploy-скрипт)
 load_dotenv(BASE_DIR / ".env")
@@ -95,6 +100,17 @@ class Settings:
     renew_remind_days: int = 3
 
     # Оплата
+    # Где пользователь платит:
+    #   external (по умолчанию) — внутри Telegram только звёзды, карта и USDT
+    #     живут на обычной веб-странице, которая открывается во внешнем браузере;
+    #   stars    — звёзды и ручная выдача, карта и USDT выключены везде;
+    #   inline   — всё внутри бота (старое поведение).
+    # Правила Telegram (ToS для разработчиков, п. 6.2) требуют продавать
+    # цифровые товары внутри Telegram только за Stars. Режим external уносит
+    # оплату картой и криптой за пределы Telegram — это снижает риск, но не
+    # обнуляет его: решение остаётся за владельцем сервиса.
+    pay_mode: str = "external"
+    external_payments_url: str | None = None
     yookassa_shop_id: str | None = None
     yookassa_secret_key: str | None = None
     yookassa_return_url: str | None = None
@@ -173,6 +189,115 @@ class Settings:
             return "ready"
         return "setup_required"
 
+    # ─────────────────────── Готовность способов оплаты ───────────────────────
+
+    @property
+    def stars_ready(self) -> bool:
+        """Звёзды работают всегда: это встроенный механизм Bot API."""
+        return True
+
+    @property
+    def yookassa_ready(self) -> bool:
+        """Карта/СБП работают только при полной паре ключей ЮKassa.
+
+        Один ключ без второго — это не «почти работает», а гарантированная
+        ошибка на создании инвойса, поэтому такой вариант считаем выключенным.
+        """
+        return bool(
+            (self.yookassa_shop_id or "").strip()
+            and (self.yookassa_secret_key or "").strip()
+        )
+
+    @property
+    def usdt_ready(self) -> bool:
+        """USDT включается, только если задан настоящий TRC-20 кошелёк."""
+        wallet = (self.usdt_wallet or "").strip()
+        if not wallet:
+            return False
+        # TRC-20 адрес: 34 символа base58, начинается с T.
+        if len(wallet) != 34 or not wallet.startswith("T"):
+            return False
+        allowed = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+        return set(wallet) <= allowed
+
+    def payment_methods(self) -> list[str]:
+        """Список реально работающих способов оплаты в порядке показа.
+
+        Здесь только про настройки: способ попадает в список, если у него есть
+        ключи. Где именно им платят — внутри Telegram или на внешней странице —
+        решают ``inline_payment_methods`` и ``external_payment_methods``.
+
+        Ручная выдача доступна администратору всегда — это запасной путь,
+        если ни один автоматический провайдер не настроен.
+        """
+        methods = ["stars"] if self.stars_ready else []
+        if self.yookassa_ready:
+            methods.append("yookassa")
+        if self.usdt_ready:
+            methods.append("usdt")
+        methods.append("manual")
+        return methods
+
+    # ──────────────────────── Контур оплаты (где платят) ──────────────────────
+
+    @property
+    def pay_page_url(self) -> str | None:
+        """Адрес страницы оплаты картой/криптой — вне Telegram.
+
+        По умолчанию это наш же сервис по пути ``/pay``: отдельный хостинг
+        поднимать не нужно. ``EXTERNAL_PAYMENTS_URL`` перебивает адрес, если
+        оплату вынесли на другой домен.
+        """
+        if self.external_payments_url:
+            return self.external_payments_url.rstrip("/")
+        base = self._public_base()
+        if not base:
+            return None
+        return base + "/pay"
+
+    def _public_base(self) -> str | None:
+        """Публичный корень сервиса (без завершающего слеша)."""
+        if self.webapp_url:
+            base = self.webapp_url.rstrip("/")
+        elif self.webhook_url:
+            base = self.webhook_url.rstrip("/")
+        else:
+            return None
+        if base.endswith("/app"):
+            base = base[: -len("/app")]
+        return base or None
+
+    def inline_payment_methods(self) -> list[str]:
+        """Способы, которые показываем кнопками внутри Telegram.
+
+        В режимах ``external`` и ``stars`` внутри Telegram остаются звёзды и
+        заявка администратору. Карта и крипта — либо на внешней странице, либо
+        выключены совсем.
+        """
+        if self.pay_mode == "inline":
+            return self.payment_methods()
+        return [m for m in self.payment_methods() if m in ("stars", "manual")]
+
+    def external_payment_methods(self) -> list[str]:
+        """Способы, доступные на внешней странице оплаты.
+
+        Без известного адреса страницы список пуст: способ, на который некуда
+        отправить, недоступен. Иначе кнопка карты пропадала бы из меню молча —
+        ни ссылки, ни пометки «скоро».
+        """
+        if self.pay_mode != "external" or not self.pay_page_url:
+            return []
+        return [m for m in self.payment_methods() if m in ("yookassa", "usdt")]
+
+    @property
+    def external_payments_ready(self) -> bool:
+        """Есть ли куда уводить за оплатой картой/криптой."""
+        return bool(self.external_payment_methods())
+
+    def method_available(self, method: str) -> bool:
+        """Можно ли прямо сейчас платить этим способом — где угодно."""
+        return method in self.inline_payment_methods() or method in self.external_payment_methods()
+
     def require(self) -> None:
         """Проверка параметров, обязательных для запуска бота и мини-аппа.
 
@@ -223,12 +348,61 @@ class Settings:
             problems.append(
                 "ЮKassa подключена наполовину: нужен и YOOKASSA_SHOP_ID, и YOOKASSA_SECRET_KEY"
             )
+        if (self.usdt_wallet or "").strip() and not self.usdt_ready:
+            problems.append(
+                "USDT_TRC20_WALLET не похож на адрес TRC-20 "
+                "(нужны 34 символа, начиная с T) — оплата USDT отключена"
+            )
+        if self.pay_mode == "external" and not self.pay_page_url:
+            problems.append(
+                "PAY_MODE=external, но адрес страницы оплаты неизвестен — "
+                "задайте WEBAPP_URL, WEBHOOK_URL или EXTERNAL_PAYMENTS_URL, "
+                "иначе останутся только звёзды и заявка администратору"
+            )
+        if self.pay_mode == "inline" and (self.yookassa_ready or self.usdt_ready):
+            problems.append(
+                "PAY_MODE=inline: карта и USDT продаются внутри Telegram. "
+                "По правилам Telegram (ToS для разработчиков, п. 6.2) цифровые "
+                "товары внутри Telegram продают за Stars — риск блокировки бота "
+                "на вас. Безопаснее PAY_MODE=external"
+            )
+        if self.external_payments_url and not self.external_payments_url.startswith("https://"):
+            problems.append(
+                "EXTERNAL_PAYMENTS_URL без https:// — Telegram не откроет такую "
+                "ссылку, а платить по http небезопасно"
+            )
         if self.delivery_workers < 1:
             problems.append("DELIVERY_WORKERS меньше 1 — очередь доставки не сможет работать")
         if self.delivery_queue_maxsize < 10:
             problems.append("DELIVERY_QUEUE_MAXSIZE слишком мал — при всплеске посты будут отбрасываться")
         if self.send_min_interval_seconds < 0.5:
             problems.append("SEND_MIN_INTERVAL_SECONDS ниже 0.5 — высокий риск FloodWait")
+        problems.extend(self._permission_warnings())
+        return problems
+
+    def _permission_warnings(self) -> list[str]:
+        """Файлы с секретами, которые видны не только владельцу.
+
+        Точка входа сначала пытается починить права сама (fsperms), так что сюда
+        попадает только то, что починить не удалось: чужой владелец, монтирование
+        без прав POSIX. Молчать об этом нельзя — в .env лежит токен бота, а в
+        базе зашифрованные сессии пользователей.
+        """
+        problems: list[str] = []
+        for name in ("data", "logs"):
+            directory = BASE_DIR / name
+            if directory.is_dir() and group_or_world_accessible(directory):
+                problems.append(
+                    f"Папка {name}/ доступна не только владельцу — "
+                    f"выполните: chmod 700 {directory}"
+                )
+        for pattern in (".env", "data/*.db", "logs/*.log"):
+            for path in sorted(BASE_DIR.glob(pattern)):
+                if path.is_file() and group_or_world_accessible(path):
+                    problems.append(
+                        f"{path.name} читается не только владельцем — "
+                        f"выполните: chmod 600 {path}"
+                    )
         return problems
 
 
@@ -278,6 +452,8 @@ def load_settings() -> Settings:
         trial_days=_get_int("TRIAL_DAYS", 3),
         max_rules_free=_get_int("MAX_RULES_FREE", 3),
         renew_remind_days=_get_int("RENEW_REMIND_DAYS", 3),
+        pay_mode=_get_mode("PAY_MODE", PAY_MODES, "external"),
+        external_payments_url=_get("EXTERNAL_PAYMENTS_URL"),
         yookassa_shop_id=_get("YOOKASSA_SHOP_ID"),
         yookassa_secret_key=_get("YOOKASSA_SECRET_KEY"),
         yookassa_return_url=_get("YOOKASSA_RETURN_URL"),
@@ -300,6 +476,12 @@ def load_settings() -> Settings:
 def _get_choice(name: str, allowed: tuple[str, ...], default: str) -> str:
     """Значение из списка допустимых; опечатка не ломает запуск."""
     raw = (_get(name) or "").strip().upper()
+    return raw if raw in allowed else default
+
+
+def _get_mode(name: str, allowed: tuple[str, ...], default: str) -> str:
+    """То же, но для значений в нижнем регистре (``PAY_MODE``)."""
+    raw = (_get(name) or "").strip().lower()
     return raw if raw in allowed else default
 
 

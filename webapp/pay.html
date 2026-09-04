@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Оплата абонемента</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1.5rem 1rem 3rem;
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f1115; color: #e8eaed;
+  }
+  main { max-width: 30rem; margin: 0 auto; }
+  h1 { font-size: 1.35rem; margin: 0 0 .35rem; }
+  .lead { color: #9aa0a6; margin: 0 0 1.5rem; font-size: .95rem; }
+  fieldset { border: 0; padding: 0; margin: 0 0 1.5rem; }
+  legend { padding: 0 0 .6rem; font-size: .8rem; letter-spacing: .04em;
+           text-transform: uppercase; color: #9aa0a6; }
+  .grid { display: grid; gap: .5rem; grid-template-columns: repeat(2, 1fr); }
+  .choice input { position: absolute; opacity: 0; pointer-events: none; }
+  .choice span {
+    display: block; padding: .7rem .5rem; text-align: center; cursor: pointer;
+    border: 1px solid #2b2f36; border-radius: .7rem; background: #16191f;
+  }
+  .choice input:checked + span { border-color: #4c8dff; background: #1b2333; }
+  .choice input:focus-visible + span { outline: 2px solid #4c8dff; outline-offset: 2px; }
+  .choice small { display: block; color: #9aa0a6; font-size: .8rem; }
+  button {
+    width: 100%; padding: .9rem 1rem; font: inherit; font-weight: 600;
+    color: #fff; background: #2f6fed; border: 0; border-radius: .7rem; cursor: pointer;
+  }
+  button[disabled] { opacity: .55; cursor: default; }
+  .note { margin: 1rem 0 0; font-size: .85rem; color: #9aa0a6; }
+  .box { margin: 1.5rem 0 0; padding: 1rem; border: 1px solid #2b2f36;
+         border-radius: .7rem; background: #16191f; }
+  .box h2 { font-size: 1rem; margin: 0 0 .6rem; }
+  .row { display: flex; justify-content: space-between; gap: .75rem; padding: .3rem 0; }
+  .row b { font-variant-numeric: tabular-nums; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+         font-size: .85rem; word-break: break-all; }
+  .error { color: #ff8080; }
+  a { color: #6ea8ff; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Оплата абонемента</h1>
+  <p class="lead">
+    Страница сервиса вне Telegram. Внутри бота абонемент продаётся за звёзды,
+    картой и криптой платят здесь.
+  </p>
+
+  <div id="status" class="note" role="status">Загружаем условия…</div>
+
+  <form id="form" hidden>
+    <fieldset>
+      <legend>Срок</legend>
+      <div class="grid" id="periods"></div>
+    </fieldset>
+    <fieldset>
+      <legend>Способ оплаты</legend>
+      <div class="grid" id="methods"></div>
+    </fieldset>
+    <button type="submit" id="submit">Продолжить</button>
+    <p class="note" id="hint"></p>
+  </form>
+
+  <section class="box" id="result" hidden aria-live="polite"></section>
+
+  <p class="note" id="back" hidden></p>
+</main>
+
+<script>
+/* Страница живёт вне Telegram: WebApp-объекта здесь нет, авторизация — только
+   подписанный токен из адреса. Токен ничего не читает: он даёт право создать
+   счёт на своего же user_id, и живёт час. */
+const token = new URLSearchParams(location.search).get('t') || '';
+const statusEl = document.getElementById('status');
+const form = document.getElementById('form');
+const periodsEl = document.getElementById('periods');
+const methodsEl = document.getElementById('methods');
+const resultEl = document.getElementById('result');
+const submitEl = document.getElementById('submit');
+const hintEl = document.getElementById('hint');
+const backEl = document.getElementById('back');
+
+const METHOD_LABELS = { yookassa: 'Карта / СБП', usdt: 'USDT (TRC-20)' };
+
+function esc(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, (ch) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+  ));
+}
+
+async function api(path, options) {
+  const response = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  });
+  let data = {};
+  try { data = await response.json(); } catch (err) { data = {}; }
+  if (!response.ok) throw new Error(data.error || 'Не получилось. Попробуйте позже.');
+  return data;
+}
+
+function choice(name, value, label, sub, checked) {
+  const id = `${name}-${value}`;
+  return `<label class="choice" for="${id}">
+    <input type="radio" name="${name}" id="${id}" value="${esc(value)}"${checked ? ' checked' : ''}>
+    <span>${esc(label)}${sub ? `<small>${esc(sub)}</small>` : ''}</span>
+  </label>`;
+}
+
+function priceFor(period, method) {
+  if (method === 'usdt') return `${period.usdt} USDT`;
+  return `${period.rub} ₽`;
+}
+
+function selected(name) {
+  const input = form.querySelector(`input[name="${name}"]:checked`);
+  return input ? input.value : '';
+}
+
+let info = null;
+
+function renderPeriods() {
+  const method = selected('method') || (info.methods[0] || '');
+  const current = selected('months') || String(info.months);
+  periodsEl.innerHTML = info.periods.map((period) => choice(
+    'months',
+    period.months,
+    `${period.months} мес.`,
+    priceFor(period, method),
+    String(period.months) === current,
+  )).join('');
+}
+
+async function load() {
+  if (!token) {
+    statusEl.className = 'note error';
+    statusEl.textContent = 'В ссылке нет токена. Откройте оплату заново из бота.';
+    return;
+  }
+  try {
+    info = await api(`/api/pay/info?t=${encodeURIComponent(token)}`);
+  } catch (err) {
+    statusEl.className = 'note error';
+    statusEl.textContent = err.message;
+    return;
+  }
+  methodsEl.innerHTML = info.methods.map((method, index) => choice(
+    'method', method, METHOD_LABELS[method] || method, '', index === 0,
+  )).join('');
+  renderPeriods();
+  methodsEl.addEventListener('change', renderPeriods);
+  statusEl.hidden = true;
+  form.hidden = false;
+  if (info.bot_url) {
+    backEl.hidden = false;
+    backEl.innerHTML = `После оплаты доступ включится сам — подтверждение придёт
+      в <a href="${esc(info.bot_url)}">бота</a>.`;
+  }
+}
+
+function showYookassa(invoice) {
+  resultEl.hidden = false;
+  resultEl.innerHTML = `<h2>Счёт на ${esc(invoice.amount)} ₽ создан</h2>
+    <p class="note">Открываем страницу банка. Если она не открылась —
+    <a href="${esc(invoice.url)}">перейдите по ссылке</a>.</p>`;
+  /* Переход, а не автоматический popup: браузеры блокируют window.open
+     вне обработчика клика, и человек остался бы на пустой странице. */
+  location.href = invoice.url;
+}
+
+function showUsdt(invoice) {
+  resultEl.hidden = false;
+  resultEl.innerHTML = `<h2>Перевод USDT</h2>
+    <div class="row"><span>Сеть</span><b>${esc(invoice.network)}</b></div>
+    <div class="row"><span>Сумма</span><b>${esc(invoice.amount.toFixed(3))} USDT</b></div>
+    <div class="row"><span>Кошелёк</span><code>${esc(invoice.wallet)}</code></div>
+    <p class="note">Отправьте <b>ровно эту сумму</b>: последние три знака —
+    идентификатор вашего платежа. Доступ включится автоматически после
+    подтверждения в сети, обычно за 1–3 минуты.</p>`;
+  resultEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const method = selected('method');
+  const months = Number(selected('months')) || info.months;
+  submitEl.disabled = true;
+  hintEl.className = 'note';
+  hintEl.textContent = 'Создаём счёт…';
+  try {
+    const invoice = await api('/api/pay/start', {
+      method: 'POST',
+      body: JSON.stringify({ t: token, method, months }),
+    });
+    hintEl.textContent = '';
+    if (invoice.method === 'usdt') showUsdt(invoice);
+    else showYookassa(invoice);
+  } catch (err) {
+    hintEl.className = 'note error';
+    hintEl.textContent = err.message;
+  } finally {
+    submitEl.disabled = false;
+  }
+});
+
+load();
+</script>
+</body>
+</html>

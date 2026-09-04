@@ -13,9 +13,12 @@ class RuleSnapshot:
     id: int
     user_id: int
     target_id: int
-    account_id: int
     mode: str
     delay_seconds: int
+    # account_id нужен планировщику авто-постера и логам. Держим его в конце
+    # блока обязательных полей, чтобы новые поля добавлялись в конец и не
+    # ломали уже написанные вызовы (все они передают аргументы по имени).
+    account_id: int = 0
     filters: FilterConfig = field(default_factory=FilterConfig)
     # forward — обычная пересылка; остальные значения — задачи из jobs.py
     kind: str = "forward"
@@ -28,3 +31,37 @@ class RuleSnapshot:
     # не слать в паузу/архив и не держать кэш лишних правил).
     enabled: bool = True
     archived: bool = False
+
+
+# Почему сообщение не ушло. Значения попадают в /api/health, поэтому короткие
+# и стабильные: по ним видно, чинить фильтр, подписку или подключение.
+SKIP_SERVICE = "service_message"      # вступления, смена аватара и т.п.
+SKIP_EMPTY = "empty_message"          # ни текста, ни медиа
+SKIP_FILTER = "filtered"              # не прошло фильтры правила
+SKIP_NO_SUBSCRIPTION = "no_subscription"
+SKIP_FILTER_ERROR = "filter_error"    # сам фильтр упал — правило надо править
+SKIP_JOB = "job"                      # это не пересылка, а задача из jobs.py
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryResult:
+    """Итог обработки одного сообщения одним правилом.
+
+    Раньше обработчик возвращал просто bool, и все пропуски выглядели
+    одинаково: в диагностике нельзя было отличить «фильтр не пропустил» от
+    «у пользователя кончилась подписка». Первое — норма, второе — потеря денег.
+    """
+
+    sent: bool
+    reason: str = ""
+
+    def __bool__(self) -> bool:
+        """Совместимость с кодом, который ждал bool."""
+        return self.sent
+
+
+SENT = DeliveryResult(sent=True)
+
+
+def skipped(reason: str) -> DeliveryResult:
+    return DeliveryResult(sent=False, reason=reason)

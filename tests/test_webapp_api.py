@@ -5,11 +5,7 @@
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
 import time
-from urllib.parse import urlencode
 
 import pytest
 from aiohttp import web
@@ -17,49 +13,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from app.config import settings
 from app.errors import FeatureUnavailable, http_error_middleware
-from app.webapp_api import setup_webapp_routes
-
-TEST_USER_ID = 768_000_001
-
-
-def sign_init_data(
-    user_id: int = TEST_USER_ID,
-    *,
-    auth_date: int | None = None,
-    token: str | None = None,
-    corrupt_hash: bool = False,
-) -> str:
-    """Подписанный initData ровно в том формате, какой шлёт Telegram.
-
-    Важно: сервер сравнивает подпись по РАСКОДИРОВАННЫМ значениям (parse_qsl),
-    поэтому подписывать надо исходные строки, а не urlencode-результат.
-    """
-    data = {
-        "auth_date": str(auth_date if auth_date is not None else int(time.time())),
-        "query_id": "AAHdF6IQAAAAAN0XohDhrOrc",
-        "user": json.dumps(
-            {"id": user_id, "first_name": "Тест", "username": "tester"}, ensure_ascii=False
-        ),
-    }
-    check_string = "\n".join(f"{key}={value}" for key, value in sorted(data.items()))
-    secret = hmac.new(b"WebAppData", (token or settings.bot_token).encode(), hashlib.sha256).digest()
-    signature = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
-    data["hash"] = "0" * 64 if corrupt_hash else signature
-    return urlencode(data)
-
-
-@pytest.fixture
-def auth_headers() -> dict[str, str]:
-    return {"X-Telegram-Init-Data": sign_init_data()}
-
-
-@pytest.fixture
-async def client():
-    app = web.Application(middlewares=[http_error_middleware])
-    setup_webapp_routes(app, bot=None)
-    async with TestClient(TestServer(app)) as test_client:
-        yield test_client
-
+from tests.helpers import TEST_USER_ID, sign_init_data
 
 # ──────────────────────────────── авторизация ─────────────────────────────────
 
@@ -99,6 +53,34 @@ async def test_stale_init_data_is_rejected(client):
     old = int(time.time()) - 48 * 3600
     headers = {"X-Telegram-Init-Data": sign_init_data(auth_date=old)}
     assert (await client.get("/api/me", headers=headers)).status == 401
+
+
+@pytest.mark.parametrize(
+    "first_name",
+    [
+        'Ко%22т',      # после лишнего unquote получалась кавычка → битый JSON → 401
+        "%41ня",       # и «A» вместо «%41» — имя молча искажалось
+        "скидка 50%25",
+        "100%",
+    ],
+)
+async def test_percent_in_name_does_not_break_auth(client, first_name):
+    """Процент в имени — обычный символ, а не второй слой кодирования.
+
+    parse_qsl уже раскодировал значение; повторный unquote ломал и подпись
+    (JSONDecodeError → 401), и сами данные пользователя.
+    """
+    from app.webapp_api import validate_init_data
+
+    init_data = sign_init_data(first_name=first_name)
+    payload = validate_init_data(init_data)
+
+    assert payload is not None
+    assert payload["user"]["first_name"] == first_name
+
+    response = await client.get("/api/me", headers={"X-Telegram-Init-Data": init_data})
+    assert response.status == 200
+    assert (await response.json())["id"] == TEST_USER_ID
 
 
 # ───────────────────────────────── валидация ──────────────────────────────────
@@ -227,6 +209,34 @@ async def test_commands_payload_does_not_mutate_catalog(monkeypatch):
     assert {item["status"] for item in COMMANDS} == {"ready"}
 
 
+# ──────────────────────────── блоки каталога команд ───────────────────────────
+
+
+async def test_commands_answer_carries_group_order(client, auth_headers):
+    """Порядок и подписи блоков приходят с сервера.
+
+    Иначе они появились бы второй копией в мини-аппе и разошлись бы с
+    каталогом при первом же добавлении команды.
+    """
+    from app.webapp_api import COMMAND_GROUPS
+
+    body = await (await client.get("/api/commands", headers=auth_headers)).json()
+
+    assert body["groups"] == COMMAND_GROUPS
+    assert [group["id"] for group in body["groups"]][0] == "publish"
+    assert all(group["title"] for group in body["groups"])
+
+
+async def test_every_command_belongs_to_a_known_group(client, auth_headers):
+    """Команда без известной группы уехала бы в «прочее» — это заметно только глазами."""
+    body = await (await client.get("/api/commands", headers=auth_headers)).json()
+    known = {group["id"] for group in body["groups"]}
+
+    missing = [item["id"] for item in body["commands"] if item.get("group") not in known]
+    assert missing == []
+
+
+
 # ──────────────────────────────── оплата Stars ────────────────────────────────
 
 
@@ -243,34 +253,6 @@ class FakeInvoiceBot:
         if self.error is not None:
             raise self.error
         return self.link
-
-
-@pytest.fixture
-async def bot_client():
-    """Клиент, у которого есть «живой» бот.
-
-    setup_webapp_routes пишет бота в глобальную переменную модуля, поэтому
-    после теста её обязательно возвращаем в None — иначе следующий тест
-    неожиданно увидит рабочего бота там, где ожидается его отсутствие.
-    """
-    import app.webapp_api as webapp_api
-
-    started: list[TestClient] = []
-
-    async def factory(bot):
-        app = web.Application(middlewares=[http_error_middleware])
-        setup_webapp_routes(app, bot=bot)
-        test_client = TestClient(TestServer(app))
-        await test_client.start_server()
-        started.append(test_client)
-        return test_client
-
-    try:
-        yield factory
-    finally:
-        for test_client in started:
-            await test_client.close()
-        webapp_api._bot = None
 
 
 async def test_stars_invoice_requires_auth(client):
@@ -307,6 +289,26 @@ async def test_stars_invoice_error_names_available_periods(client, auth_headers)
     )
     body = await response.json()
     assert "1, 3, 6 или 12" in body["error"]
+
+
+@pytest.mark.parametrize("months", ["много", "1.5", 1.5, True, [], {}])
+async def test_stars_invoice_rejects_non_integer_months(bot_client, auth_headers, months):
+    """Мусор в ``months`` — отказ, а не молчаливый месяц по умолчанию.
+
+    Раньше нечисловое значение проваливалось в умолчание: человек выбирал год,
+    из-за опечатки клиента уезжала строка, и счёт приходил на месяц. Заплатить
+    не за то, что выбирал, — худший исход, чем понятная ошибка. ``1.5`` тоже
+    мусор: ``int()`` молча делает из него 1.
+    """
+    bot = FakeInvoiceBot()
+    test_client = await bot_client(bot)
+
+    response = await test_client.post(
+        "/api/subscription/invoice", headers=auth_headers, json={"months": months}
+    )
+
+    assert response.status == 400
+    assert bot.calls == []  # до создания счёта дело не дошло
 
 
 async def test_stars_invoice_rejects_non_object_body(client, auth_headers):

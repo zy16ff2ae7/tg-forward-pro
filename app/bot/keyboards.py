@@ -6,6 +6,7 @@ from typing import Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from app import paylink
 from app.config import settings
 from app.db.models import Rule, TelegramAccount
 from app.plans import PERIODS, stars_amount
@@ -210,12 +211,45 @@ def clean_menu(rule_id: int, filters: dict) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def payment_menu() -> InlineKeyboardMarkup:
+def payment_menu(user_id: int | None = None) -> InlineKeyboardMarkup:
+    """Способы оплаты: показываем только те, что реально работают.
+
+    Раньше кнопки карты и USDT рисовались всегда, а при нажатии пользователь
+    получал «временно недоступно». Теперь ненастроенные способы либо скрыты,
+    либо помечены как «скоро» — меню не обещает того, чего сервис не умеет.
+
+    Внутри Telegram остаются звёзды и заявка администратору. Карта и USDT в
+    режиме ``PAY_MODE=external`` уходят на обычную веб-страницу: кнопка-ссылка
+    открывает её во внешнем браузере. Ссылка подписана и живёт час, поэтому
+    её приходится собирать под конкретного пользователя — отсюда ``user_id``.
+    """
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="pay:stars"))
-    builder.row(InlineKeyboardButton(text="💳 Карта / СБП", callback_data="pay:yookassa"))
-    builder.row(InlineKeyboardButton(text="🪙 USDT (TRC-20)", callback_data="pay:usdt"))
-    builder.row(InlineKeyboardButton(text="👤 Через администратора", callback_data="pay:manual"))
+    labels = {
+        "stars": "⭐ Telegram Stars",
+        "yookassa": "💳 Карта / СБП",
+        "usdt": "🪙 USDT (TRC-20)",
+        "manual": "👤 Через администратора",
+    }
+    inline_methods = settings.inline_payment_methods()
+    for method in inline_methods:
+        builder.row(
+            InlineKeyboardButton(text=labels[method], callback_data=f"pay:{method}")
+        )
+
+    external = settings.external_payment_methods()
+    link = paylink.pay_url(user_id) if (external and user_id) else None
+    if link:
+        names = " / ".join(labels[method].split(" ", 1)[-1] for method in external)
+        builder.row(InlineKeyboardButton(text=f"🌐 {names} — на сайте", url=link))
+
+    for method in ("yookassa", "usdt"):
+        if not settings.method_available(method):
+            builder.row(
+                InlineKeyboardButton(
+                    text=labels[method] + " — скоро",
+                    callback_data=f"pay:soon:{method}",
+                )
+            )
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main"))
     return builder.as_markup()
 

@@ -14,7 +14,18 @@ from app.telegram_client.filters import (
     should_forward,
     transform_text,
 )
-from app.telegram_client.types import RuleSnapshot
+from app.telegram_client.types import (
+    SENT,
+    SKIP_EMPTY,
+    SKIP_FILTER,
+    SKIP_FILTER_ERROR,
+    SKIP_JOB,
+    SKIP_NO_SUBSCRIPTION,
+    SKIP_SERVICE,
+    DeliveryResult,
+    RuleSnapshot,
+    skipped,
+)
 
 # Если медиа весит больше — не качаем, а делаем обычный форвард
 MAX_MEDIA_BYTES = 50 * 1024 * 1024
@@ -71,12 +82,13 @@ async def _send_once(client: Any, rule: RuleSnapshot, message: Any, text: str) -
     return await send_copy(client, rule.target_id, message, text)
 
 
-async def deliver(client: Any, message: Any, rule: RuleSnapshot) -> bool:
+async def deliver(client: Any, message: Any, rule: RuleSnapshot) -> DeliveryResult:
     """Обрабатывает одно сообщение по одному правилу и отправляет его.
 
-    Возвращает True, если сообщение ушло, и False, если его пропустили
-    (служебное, не прошло фильтр, нет подписки) — в очереди доставки ``False``
-    означает «не считаем ошибкой, повторять не надо».
+    Возвращает ``DeliveryResult``: отправлено или пропущено и почему
+    (служебное, не прошло фильтр, нет подписки). Для очереди доставки пропуск —
+    не ошибка: повторять его не надо, но в счётчиках он виден отдельно, иначе
+    «ничего не пересылается» невозможно отличить от «всё отфильтровано».
 
     Ошибки отправки **не перехватываются**: повторы, паузы при FloodWait и
     запись в журнал ошибок — дело очереди (``app.telegram_client.queue``).
@@ -90,27 +102,27 @@ async def deliver(client: Any, message: Any, rule: RuleSnapshot) -> bool:
         from app.telegram_client.jobs import run_job
 
         await run_job(client, message, rule)
-        return False
+        return skipped(SKIP_JOB)
 
     # Служебные сообщения (вступления, смена аватара) не пересылаем
     if getattr(message, "action", None) is not None:
-        return False
+        return skipped(SKIP_SERVICE)
 
     raw_text = message_text(message)
     if not raw_text and getattr(message, "media", None) is None:
-        return False
+        return skipped(SKIP_EMPTY)
 
     filters: FilterConfig = rule.filters
     try:
         if not should_forward(message, filters):
-            return False
+            return skipped(SKIP_FILTER)
     except Exception as exc:  # noqa: BLE001 — фильтр не должен ронять пересылку
         logger.warning("Ошибка фильтра в правиле #{}: {}", rule.id, exc)
-        return False
+        return skipped(SKIP_FILTER_ERROR)
 
     if not await subscription_active(rule.user_id):
         logger.debug("Правило #{}: у пользователя нет активной подписки", rule.id)
-        return False
+        return skipped(SKIP_NO_SUBSCRIPTION)
 
     text = transform_text(raw_text, filters)
 
@@ -131,7 +143,7 @@ async def deliver(client: Any, message: Any, rule: RuleSnapshot) -> bool:
     logger.debug(
         "Правило #{}: переслано {} ({})", rule.id, target_msg_id, media_kind(message)
     )
-    return True
+    return SENT
 
 
 async def log_delivery_error(

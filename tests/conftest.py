@@ -21,9 +21,14 @@ os.environ["ADMIN_IDS"] = "1"
 os.environ["LOG_LEVEL"] = "WARNING"
 
 import pytest  # noqa: E402
+from aiohttp import web  # noqa: E402
+from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
 from app.db.database import Base, engine, init_db, session_scope  # noqa: E402
 from app.db.models import TelegramAccount, User  # noqa: E402
+from app.errors import http_error_middleware  # noqa: E402
+from app.webapp_api import setup_webapp_routes  # noqa: E402
+from tests.helpers import sign_init_data  # noqa: E402
 
 # Подписки, правила и платежи ссылаются на users.id внешним ключом,
 # поэтому пользователя нужно создавать до всего остального.
@@ -64,3 +69,49 @@ def create_account():
             return account.id
 
     return _create
+
+
+# ─────────────────────────── HTTP-клиенты кабинета ────────────────────────────
+
+
+@pytest.fixture
+def auth_headers() -> dict[str, str]:
+    """Подпись Telegram: без неё любой эндпоинт кабинета отвечает 401."""
+    return {"X-Telegram-Init-Data": sign_init_data()}
+
+
+@pytest.fixture
+async def client():
+    """Кабинет без живого бота — как при работе только веб-части сервиса."""
+    app = web.Application(middlewares=[http_error_middleware])
+    setup_webapp_routes(app, bot=None)
+    async with TestClient(TestServer(app)) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+async def bot_client():
+    """Клиент, у которого есть «живой» бот.
+
+    setup_webapp_routes пишет бота в глобальную переменную модуля, поэтому
+    после теста её обязательно возвращаем в None — иначе следующий тест
+    неожиданно увидит рабочего бота там, где ожидается его отсутствие.
+    """
+    import app.webapp_api as webapp_api
+
+    started: list[TestClient] = []
+
+    async def factory(bot):
+        app = web.Application(middlewares=[http_error_middleware])
+        setup_webapp_routes(app, bot=bot)
+        test_client = TestClient(TestServer(app))
+        await test_client.start_server()
+        started.append(test_client)
+        return test_client
+
+    try:
+        yield factory
+    finally:
+        for test_client in started:
+            await test_client.close()
+        webapp_api._bot = None

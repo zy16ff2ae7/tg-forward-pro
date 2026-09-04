@@ -23,7 +23,7 @@ from app.db.models import TelegramAccount
 from app.db import repo
 from app.telegram_client.filters import FilterConfig
 from app.telegram_client.forwarder import deliver, log_delivery_error
-from app.telegram_client.jobs import FLOATING_KINDS
+from app.telegram_client.jobs import FLOATING_KINDS, MANUAL_ONLY_KINDS, SCHEDULED_KINDS
 from app.telegram_client.queue import DeliveryQueue
 from app.telegram_client.types import RuleSnapshot
 
@@ -107,6 +107,9 @@ class ClientManager:
         self._rules: dict[tuple[int, int], list[RuleSnapshot]] = {}
         # account_id -> правила, слушающие все чаты аккаунта (например, ЛС)
         self._floating_rules: dict[int, list[RuleSnapshot]] = {}
+        # rule_id -> снимок: нужен восстановлению отправок после перезапуска,
+        # где на руках только id правила из БД.
+        self._rules_by_id: dict[int, RuleSnapshot] = {}
         # Авто-постеры — отдельный список: стреляют по расписанию, а не по
         # входящим сообщениям, поэтому в _rules их класть не надо.
         self._poster_rules: list[RuleSnapshot] = []
@@ -210,9 +213,17 @@ class ClientManager:
             # Не asyncio.create_task: при всплеске (сотня постов разом) задачи
             # скопом лезли в Telegram и ловили FloodWait. Очередь держит темп,
             # а при переполнении честно отбрасывает с записью в журнал.
-            delivery_queue.submit(
-                client=event.client, message=event.message, rule=rule
-            )
+            if rule.kind == "forward":
+                # Пересылку записываем в БД: перезапуск процесса (деплой,
+                # падение) не должен съедать сообщение — очередь досылает его
+                # на старте. Остальные задачи (сборщики, уведомления) не
+                # восстанавливаем: повторный проход насобирал бы дубликаты, а
+                # пропущенное уведомление уже неактуально.
+                await delivery_queue.submit_persistent(
+                    event.client, event.message, rule, source_chat_id=chat_id
+                )
+            else:
+                delivery_queue.submit(event.client, event.message, rule)
 
     async def start_account(self, account: TelegramAccount, session_string: str) -> bool:
         """Подключает один аккаунт и вешает на него обработчик."""
@@ -306,6 +317,31 @@ class ClientManager:
         if self._poster_task is None or self._poster_task.done():
             self._poster_task = asyncio.create_task(self._poster_loop())
 
+        await self._restore_deliveries()
+
+    async def _restore_deliveries(self) -> None:
+        """Досылает то, что не успел прошлый запуск.
+
+        Вызывается после подключения аккаунтов: раньше клиентов ещё нет, и
+        перечитать сообщение из источника нечем.
+        """
+        try:
+            async with session_scope() as session:
+                stale = await repo.drop_stale_pending_deliveries(session)
+            if stale:
+                logger.info("Отправок просрочено и убрано: {}", stale)
+            await delivery_queue.restore_pending(
+                self._connected_client, self._rules_by_id.get
+            )
+        except Exception as exc:  # noqa: BLE001 — старт важнее восстановления
+            logger.warning("Не восстановили отправки после перезапуска: {}", exc)
+
+    def _connected_client(self, account_id: int) -> TelegramClient | None:
+        client = self._clients.get(account_id)
+        if client is None or not client.is_connected():
+            return None
+        return client
+
     async def stop_all(self) -> None:
         # Сначала дожимаем очередь: если отключить клиенты раньше, то, что уже
         # стоит в очереди, упадёт с ошибкой соединения.
@@ -326,8 +362,13 @@ class ClientManager:
     def online_ids(self) -> Iterable[int]:
         return [acc_id for acc_id in self._clients if self.is_online(acc_id)]
 
-    def delivery_stats(self) -> dict[str, int]:
-        """Счётчики очереди доставки — для админки и /api/health."""
+    def delivery_stats(self) -> dict[str, Any]:
+        """Счётчики очереди доставки — для админки и /api/health.
+
+        Кроме сумм здесь лежит разбивка пропусков (``skips``): «отфильтровано»
+        и «нет подписки» выглядят одинаково в общем счётчике, а лечатся
+        по-разному.
+        """
         return delivery_queue.stats()
 
     async def list_dialogs(self, account_id: int, limit: int = 30) -> list[dict[str, Any]]:
@@ -445,8 +486,16 @@ class ClientManager:
 
         fresh: dict[tuple[int, int], list[RuleSnapshot]] = {}
         floating: dict[int, list[RuleSnapshot]] = {}
+        by_id: dict[int, RuleSnapshot] = {}
         for rule in rules:
             snapshot = _snapshot(rule)
+            by_id[snapshot.id] = snapshot
+            # Ручные задачи (парсер) запускаются только по кнопке, а постеры —
+            # по расписанию. Слушать входящие сообщения тем и другим незачем:
+            # иначе каждое сообщение в источнике звало бы run_job и писало
+            # «Неизвестный тип задачи».
+            if snapshot.kind in MANUAL_ONLY_KINDS or snapshot.kind in SCHEDULED_KINDS:
+                continue
             if snapshot.kind in FLOATING_KINDS:
                 floating.setdefault(rule.account_id, []).append(snapshot)
             else:
@@ -456,12 +505,13 @@ class ClientManager:
         # сообщение в приёмнике случайно бы «подхватило» постер).
         fresh_posters: list[RuleSnapshot] = []
         for rule in rules:
-            if rule.kind == "poster" and rule.enabled and not rule.archived:
+            if rule.kind in SCHEDULED_KINDS and rule.enabled and not rule.archived:
                 fresh_posters.append(_snapshot(rule))
 
         async with self._lock:
             self._rules = fresh
             self._floating_rules = floating
+            self._rules_by_id = by_id
             self._poster_rules = fresh_posters
 
     # ─────────────────────────── Авто-постер (планировщик) ───────────────────────────
@@ -502,7 +552,13 @@ class ClientManager:
                 continue
 
             interval = max(30, int(getattr(f, "interval_seconds", 120)))
-            st = self._poster_state.setdefault(rule.id, {"last": 0.0, "idx": 0, "runs": 0})
+            st = self._poster_state.setdefault(
+                rule.id, {"last": 0.0, "idx": 0, "runs": 0, "not_before": 0.0}
+            )
+            # Пауза, которую назначил сам Telegram после FloodWait: раньше этого
+            # времени не пробуем, иначе получаем отказ по кругу.
+            if time.time() < st.get("not_before", 0.0):
+                continue
             if time.time() - st["last"] < interval:
                 continue
 
@@ -518,6 +574,17 @@ class ClientManager:
                     if db_rule is not None:
                         db_rule.forwarded_count = (db_rule.forwarded_count or 0) + 1
                         await session.commit()
+            except FloodWaitError as exc:
+                # Telegram явно говорит, сколько ждать. Слушаемся: иначе на
+                # следующем тике тот же отказ и поток предупреждений в журнале.
+                wait = int(getattr(exc, "seconds", 30)) + 1
+                st["not_before"] = time.time() + wait
+                st["last"] = time.time()
+                logger.warning(
+                    "Постер #{}: Telegram просит подождать {} сек — ставлю паузу",
+                    rule.id,
+                    wait,
+                )
             except Exception as exc:  # noqa: BLE001 — не спамим при ошибке
                 logger.warning("Постер #{} не отправил: {}", rule.id, exc)
                 st["last"] = time.time()

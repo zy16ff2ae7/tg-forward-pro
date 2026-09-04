@@ -2,16 +2,19 @@
 
 Раньше каждое входящее сообщение порождало отдельную задачу
 (``asyncio.create_task``): если в канал залетала сотня постов разом, все сто
-одновременно лезли в Telegram, скопом получали FloodWait, а при перезапуске
-процесса вся неотправленное просто исчезало. Теперь отправка идёт через
-ограниченную очередь:
+одновременно лезли в Telegram и скопом получали FloodWait. Теперь отправка
+идёт через ограниченную очередь:
 
-* не больше ``SEND_GLOBAL_CONCURRENCY`` одновременных отправок;
-* не чаще одной отправки в ``SEND_MIN_INTERVAL_SECONDS`` (экономим лимиты);
+* не больше ``SEND_GLOBAL_CONCURRENCY`` одновременных отправок на весь сервис;
+* не чаще одной отправки в ``SEND_MIN_INTERVAL_SECONDS`` **на каждый аккаунт**
+  (лимиты Telegram считаются по аккаунту, а не по сервису: общий темп на всех
+  замедлял бы одного пользователя из-за активности другого);
 * при FloodWait — пауза ровно на сколько просит Telegram, затем повтор;
 * при других ошибках RPC — повтор с экспоненциальной паузой;
 * при всплеске сверх ``DELIVERY_QUEUE_MAXSIZE`` — отбрасывание с записью в лог,
-  а не бесконечный рост памяти.
+  а не бесконечный рост памяти;
+* задача может быть записана в БД (``pending_deliveries``) — тогда перезапуск
+  процесса её не теряет: см. ``submit_persistent`` и ``restore_pending``.
 
 Повторяем только ошибки Telegram (FloodWait и RPCError): сбой базы или опечатку
 в коде повторять бессмысленно, такая задача сразу уходит в журнал ошибок.
@@ -27,14 +30,28 @@ from loguru import logger
 from telethon.errors import FloodWaitError, RPCError
 
 from app.config import settings
-from app.telegram_client.types import RuleSnapshot
+from app.telegram_client.types import DeliveryResult, RuleSnapshot
 
 # Обработчик получает «живой» клиент Telethon, сообщение и снимок правила.
-#   вернул True  — отправлено;
+#   вернул DeliveryResult или True — отправлено;
 #   вернул False — пропущено (фильтр, нет подписки, служебное сообщение);
 #   бросил исключение — ошибка отправки, решает очередь: повторить или сдатьcя.
 Handler = Callable[[Any, Any, RuleSnapshot], Awaitable[Any]]
 ErrorHandler = Callable[[Any, Any, RuleSnapshot, BaseException], Awaitable[None]]
+
+
+def _interpret(result: Any) -> tuple[bool, str]:
+    """Приводит ответ обработчика к паре «отправлено, причина пропуска».
+
+    Обработчик пересылки возвращает ``DeliveryResult`` с причиной, но простой
+    ``bool`` тоже остаётся рабочим ответом — на нём держатся служебные задачи
+    и тесты очереди.
+    """
+    if isinstance(result, DeliveryResult):
+        return result.sent, result.reason
+    if result:
+        return True, ""
+    return False, "unknown"
 
 
 class _IntervalLimiter:
@@ -68,6 +85,10 @@ class _Job:
     client: Any
     message: Any
     rule: RuleSnapshot
+    # id строки в pending_deliveries: пока она есть, задача считается
+    # незавершённой и восстановится после перезапуска. None — задача нигде не
+    # записана (служебные вызовы, тесты).
+    delivery_id: int | None = None
 
 
 class DeliveryQueue:
@@ -91,7 +112,9 @@ class DeliveryQueue:
         self._workers_count = max(1, int(workers))
         self._maxsize = max(1, int(maxsize))
         self._semaphore = asyncio.Semaphore(max(1, int(concurrency)))
-        self._limiter = _IntervalLimiter(min_interval)
+        self._min_interval = max(0.0, float(min_interval))
+        # Темп считается на каждый аккаунт отдельно: лимиты Telegram — тоже.
+        self._limiters: dict[int, _IntervalLimiter] = {}
         self._attempts = max(0, int(retry_attempts))
         self._retry_base = max(0.1, float(retry_base))
         self._flood_max = max(1, int(flood_wait_max))
@@ -101,7 +124,24 @@ class DeliveryQueue:
         # Задачи, спящие в отложенной отправке (задержка из правила)
         self._pending: set[asyncio.Task] = set()
         self._started = False
-        self._counters = {"submitted": 0, "dropped": 0, "sent": 0, "failed": 0}
+        self._counters = {
+            "submitted": 0,
+            "dropped": 0,
+            "sent": 0,
+            "failed": 0,
+            "skipped": 0,
+            "restored": 0,
+        }
+        # Пропуски по причинам: «фильтр» и «нет подписки» — это разные истории,
+        # и в диагностике их надо различать.
+        self._skips: dict[str, int] = {}
+
+    def _limiter_for(self, account_id: int) -> _IntervalLimiter:
+        limiter = self._limiters.get(account_id)
+        if limiter is None:
+            limiter = _IntervalLimiter(self._min_interval)
+            self._limiters[account_id] = limiter
+        return limiter
 
     @classmethod
     def from_settings(
@@ -132,14 +172,19 @@ class DeliveryQueue:
         ]
         logger.info(
             "Очередь доставки поднята: воркеров {}, очередь до {}, темп не чаще "
-            "одной отправки в {} сек",
+            "одной отправки в {} сек на аккаунт",
             self._workers_count,
             self._maxsize,
-            self._limiter._min,
+            self._min_interval,
         )
 
     async def stop(self, *, drain: bool = True, timeout: float = 30.0) -> None:
-        """Останавливает воркеры. По умолчанию дожимает то, что уже в очереди."""
+        """Останавливает воркеры. По умолчанию дожимает то, что уже в очереди.
+
+        Отложенные задачи (задержка из правила) отменяются, но их строки в
+        ``pending_deliveries`` остаются — после запуска ``restore_pending``
+        поднимет их снова с остатком задержки.
+        """
         self._started = False
 
         for task in list(self._pending):
@@ -147,7 +192,11 @@ class DeliveryQueue:
         if self._pending:
             await asyncio.gather(*self._pending, return_exceptions=True)
 
-        if drain and not self._queue.empty():
+        if drain:
+            # join() ждёт и то, что уже взято воркером: пока не вызван
+            # task_done, задача считается незавершённой. Проверка «очередь
+            # пуста» этого не видела, и отправку, шедшую в этот момент, стоп
+            # обрывал на полпути.
             try:
                 await asyncio.wait_for(self._queue.join(), timeout=timeout)
             except TimeoutError:
@@ -166,18 +215,148 @@ class DeliveryQueue:
 
     # ───────────────────────────────── Отправка ───────────────────────────────
 
-    def submit(self, client: Any, message: Any, rule: RuleSnapshot) -> bool:
+    def submit(
+        self,
+        client: Any,
+        message: Any,
+        rule: RuleSnapshot,
+        *,
+        delivery_id: int | None = None,
+        delay_override: int | None = None,
+    ) -> bool:
         """Ставит задачу в очередь. False — очередь полна, задача отброшена.
 
         Задержка из правила (``delay_seconds``) отрабатывается до постановки
         в очередь: иначе правило с задержкой в час намертво занимало бы воркер.
+        ``delay_override`` нужен восстановлению после перезапуска — там ждать
+        осталось меньше, чем сказано в правиле.
         """
-        job = _Job(client=client, message=message, rule=rule)
-        delay = max(0, int(getattr(rule, "delay_seconds", 0) or 0))
+        job = _Job(client=client, message=message, rule=rule, delivery_id=delivery_id)
+        if delay_override is None:
+            delay = max(0, int(getattr(rule, "delay_seconds", 0) or 0))
+        else:
+            delay = max(0, int(delay_override))
         if delay:
             self._spawn_delayed(job, delay)
             return True
         return self._put(job)
+
+    async def submit_persistent(
+        self,
+        client: Any,
+        message: Any,
+        rule: RuleSnapshot,
+        *,
+        source_chat_id: int,
+    ) -> bool:
+        """Ставит задачу в очередь, предварительно записав её в БД.
+
+        Порядок именно такой: сначала запись, потом очередь. Если процесс умрёт
+        между двумя шагами, задача восстановится на старте — потеря сообщения
+        хуже, чем повторная отправка (её видно и можно удалить).
+        """
+        from app.db import repo
+        from app.db.database import session_scope
+
+        message_id = int(getattr(message, "id", 0) or 0)
+        delay = max(0, int(getattr(rule, "delay_seconds", 0) or 0))
+        delivery_id: int | None = None
+        if message_id:
+            try:
+                async with session_scope() as session:
+                    delivery_id = await repo.remember_pending_delivery(
+                        session,
+                        rule_id=rule.id,
+                        user_id=rule.user_id,
+                        account_id=rule.account_id,
+                        source_chat_id=int(source_chat_id),
+                        message_id=message_id,
+                        delay_seconds=delay,
+                    )
+            except Exception as exc:  # noqa: BLE001 — БД не должна съесть сообщение
+                logger.warning(
+                    "Правило #{}: не записали отправку в журнал ожидания: {}", rule.id, exc
+                )
+
+        ok = self.submit(client, message, rule, delivery_id=delivery_id)
+        if not ok and delivery_id is not None:
+            # Переполнение — решение осознанное, восстанавливать нечего.
+            await self._forget(delivery_id)
+        return ok
+
+    async def restore_pending(
+        self,
+        client_for: Callable[[int], Any],
+        rule_for: Callable[[int], RuleSnapshot | None],
+    ) -> int:
+        """Поднимает отправки, не доведённые до конца прошлым запуском.
+
+        ``client_for`` отдаёт живой Telethon-клиент по account_id, ``rule_for``
+        — снимок правила по rule_id (None, если правило успели удалить).
+        Сообщение перечитывается из источника: держать его копию в БД не нужно
+        и не хочется — там могут быть личные переписки пользователей.
+        """
+        from app.db import repo
+        from app.db.database import session_scope
+        from app.timeutil import utcnow
+
+        async with session_scope() as session:
+            rows = list(await repo.due_pending_deliveries(session))
+
+        if not rows:
+            return 0
+
+        restored = 0
+        for row in rows:
+            client = client_for(row.account_id)
+            rule = rule_for(row.rule_id)
+            if client is None or rule is None:
+                logger.info(
+                    "Отправка #{}: аккаунт #{} не подключён или правило #{} исчезло — "
+                    "запись убираем",
+                    row.id,
+                    row.account_id,
+                    row.rule_id,
+                )
+                await self._forget(row.id)
+                continue
+            try:
+                message = await client.get_messages(row.source_chat_id, ids=row.message_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Отправка #{}: не перечитали сообщение: {}", row.id, exc)
+                await self._forget(row.id)
+                continue
+            if message is None:
+                logger.info("Отправка #{}: сообщение удалено в источнике", row.id)
+                await self._forget(row.id)
+                continue
+
+            remaining = int((row.due_at - utcnow()).total_seconds())
+            self.submit(
+                client,
+                message,
+                rule,
+                delivery_id=row.id,
+                delay_override=max(0, remaining),
+            )
+            restored += 1
+
+        self._counters["restored"] += restored
+        logger.info("После перезапуска восстановлено отправок: {}", restored)
+        return restored
+
+    async def _forget(self, delivery_id: int | None) -> None:
+        """Убирает запись об отправке: задача доведена до конца (или отменена)."""
+        if delivery_id is None:
+            return
+        from app.db import repo
+        from app.db.database import session_scope
+
+        try:
+            async with session_scope() as session:
+                await repo.delete_pending_delivery(session, delivery_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалили запись об отправке #{}: {}", delivery_id, exc)
 
     def _put(self, job: _Job) -> bool:
         try:
@@ -221,6 +400,7 @@ class DeliveryQueue:
     async def _run(self, job: _Job) -> None:
         """Одна задача с повторами. Темп и параллелизм — здесь."""
         delay = 0.0
+        limiter = self._limiter_for(int(getattr(job.rule, "account_id", 0) or 0))
         for attempt in range(self._attempts + 1):
             if delay > 0:
                 # Паузу держим вне семафора: ждать FloodWait, занимая слот
@@ -229,8 +409,8 @@ class DeliveryQueue:
             delay = 0.0
             try:
                 async with self._semaphore:
-                    await self._limiter.acquire()
-                    sent = await self._handler(job.client, job.message, job.rule)
+                    await limiter.acquire()
+                    result = await self._handler(job.client, job.message, job.rule)
             except FloodWaitError as exc:
                 wait = int(getattr(exc, "seconds", 5)) + 1
                 if wait > self._flood_max or attempt >= self._attempts:
@@ -269,8 +449,14 @@ class DeliveryQueue:
                 await self._fail(job, exc)
                 return
             else:
+                sent, reason = _interpret(result)
                 if sent:
                     self._counters["sent"] += 1
+                else:
+                    self._counters["skipped"] += 1
+                    self._skips[reason] = self._skips.get(reason, 0) + 1
+                # Задача доведена до конца — восстанавливать её больше не нужно.
+                await self._forget(job.delivery_id)
                 return
 
         # Сюда не попадаем: в последней попытке либо return, либо _fail
@@ -278,6 +464,9 @@ class DeliveryQueue:
 
     async def _fail(self, job: _Job, error: BaseException) -> None:
         self._counters["failed"] += 1
+        # Повторы исчерпаны: держать запись дальше значит повторять отправку
+        # после каждого перезапуска.
+        await self._forget(job.delivery_id)
         if self._on_error is None:
             logger.error(
                 "Правило #{}: не удалось доставить — {}", job.rule.id, error
@@ -290,9 +479,12 @@ class DeliveryQueue:
 
     # ──────────────────────────────── Диагностика ─────────────────────────────
 
-    def stats(self) -> dict[str, int]:
-        stats = dict(self._counters)
+    def stats(self) -> dict[str, Any]:
+        stats: dict[str, Any] = dict(self._counters)
         stats["queued"] = self._queue.qsize()
         stats["workers"] = len(self._tasks)
         stats["pending_delays"] = len(self._pending)
+        # Причины пропусков: «фильтр» и «нет подписки» лечатся по-разному,
+        # поэтому в /api/health они идут раздельно.
+        stats["skips"] = dict(sorted(self._skips.items()))
         return stats

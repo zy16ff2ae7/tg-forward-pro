@@ -19,7 +19,8 @@ from app.bot.utils import ensure_user, smart_edit
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
-from app.payments import crypto, yookassa
+from app.errors import AppError
+from app.payments import crypto, service, yookassa
 from app.plans import (
     DEFAULT_MONTHS,
     STARS_DESCRIPTION,
@@ -143,7 +144,7 @@ async def show_subscription_message(message: Message) -> None:
     await ensure_user(message)
     assert message.from_user is not None
     text = await _status_text(message.from_user.id)
-    await message.answer(text, reply_markup=kb.payment_menu())
+    await message.answer(text, reply_markup=kb.payment_menu(message.from_user.id))
 
 
 async def show_subscription(callback: CallbackQuery) -> None:
@@ -151,7 +152,69 @@ async def show_subscription(callback: CallbackQuery) -> None:
     assert callback.from_user is not None
     text = await _status_text(callback.from_user.id)
     if callback.message is not None:
-        await smart_edit(callback.message, text, reply_markup=kb.payment_menu())
+        await smart_edit(
+            callback.message, text, reply_markup=kb.payment_menu(callback.from_user.id)
+        )
+
+
+@router.callback_query(F.data.startswith("pay:soon:"))
+async def pay_soon(callback: CallbackQuery) -> None:
+    """Способ оплаты ещё не подключён администратором.
+
+    Кнопка помечена «скоро», но её всё равно могут нажать — объясняем, что
+    делать, вместо молчаливого «временно недоступно».
+    """
+    await callback.answer()
+    method = (callback.data or "").split(":")[-1]
+    names = {
+        "yookassa": "Оплата картой / СБП",
+        "usdt": "Оплата USDT (TRC-20)",
+    }
+    name = names.get(method, "Этот способ оплаты")
+    if callback.message is not None:
+        await smart_edit(
+            callback.message,
+            f"{name} пока не подключена.\n\n"
+            "Сейчас доступны звёзды и ручная выдача через администратора — "
+            "этого хватит, чтобы абонемент заработал прямо сейчас.",
+            reply_markup=kb.payment_menu(callback.from_user.id),
+        )
+
+
+# ───────────────────── Оплата вне Telegram (карта и крипта) ───────────────────
+
+METHOD_NAMES = {
+    "yookassa": "Карта / СБП",
+    "usdt": "USDT (TRC-20)",
+}
+
+
+async def _offer_external(callback: CallbackQuery, method: str) -> None:
+    """Объясняет, что этим способом платят не в боте, а на странице сервиса.
+
+    Нужно для старых сообщений: кнопка «Карта / СБП» осталась в чате с тех
+    времён, когда счёт выставлялся прямо здесь. Молча выставить его снова
+    нельзя — правила Telegram (ToS, п. 6.2) оставляют внутри Telegram только
+    звёзды. Ничего не скрываем: прямо говорим, где платить и почему.
+    """
+    name = METHOD_NAMES.get(method, "Этот способ оплаты")
+    if method in settings.external_payment_methods():
+        text = (
+            f"🌐 <b>{name} — на сайте</b>\n\n"
+            "Внутри Telegram абонемент продаётся за звёзды. "
+            f"{name} работает на нашей странице оплаты: кнопка ниже открывает "
+            "её в браузере.\n\n"
+            "После оплаты доступ включится сам — уведомление придёт сюда."
+        )
+    else:
+        text = (
+            f"{name} сейчас отключена.\n\n"
+            "Внутри Telegram остаются звёзды и заявка администратору."
+        )
+    if callback.message is not None:
+        await smart_edit(
+            callback.message, text, reply_markup=kb.payment_menu(callback.from_user.id)
+        )
 
 
 # ─────────────────────────────── Telegram Stars ───────────────────────────────
@@ -250,59 +313,46 @@ async def pay_yookassa(callback: CallbackQuery) -> None:
     await callback.answer()
     assert callback.from_user is not None
 
+    # Внутри бота карта работает только в режиме PAY_MODE=inline. В остальных
+    # случаях кнопка могла достаться из старого сообщения — уводим на страницу.
+    if "yookassa" not in settings.inline_payment_methods():
+        await _offer_external(callback, "yookassa")
+        return
+
     if not yookassa.is_configured():
         if callback.message is not None:
-            await smart_edit(callback.message, 
+            await smart_edit(
+                callback.message,
                 "💳 Оплата картой временно недоступна.\n"
                 "Воспользуйтесь Stars, USDT или напишите администратору.",
-                reply_markup=kb.payment_menu(),
+                reply_markup=kb.payment_menu(callback.from_user.id),
             )
         return
 
-    async with SessionLocal() as session:
-        payment = await repo.create_payment(
-            session,
-            user_id=callback.from_user.id,
-            provider="yookassa",
-            amount=float(settings.price_rub),
-            currency="RUB",
-            months=MONTHS,
-        )
-        await session.commit()
-        payment_id = payment.id
-
+    # Счёт выставляет общий сервис — тот же, что и страница оплаты. Так у бота
+    # и страницы одна цена, одна проверка срока и один лимит висящих счетов.
     try:
-        url, external_id = await yookassa.create_invoice(
-            user_id=callback.from_user.id,
-            amount_rub=float(settings.price_rub),
-            months=MONTHS,
-            local_payment_id=payment_id,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("ЮKassa: не создали платёж")
+        invoice = await service.start_yookassa(callback.from_user.id, MONTHS)
+    except AppError as exc:
         if callback.message is not None:
-            await smart_edit(callback.message, 
-                f"❌ Не удалось создать счёт: {exc}", reply_markup=kb.payment_menu()
+            await smart_edit(
+                callback.message,
+                f"❌ {exc.message}",
+                reply_markup=kb.payment_menu(callback.from_user.id),
             )
         return
 
-    async with SessionLocal() as session:
-        pending = await repo.pending_payments(session, "yookassa")
-        for item in pending:
-            if item.id == payment_id:
-                item.external_id = external_id
-        await session.commit()
-
+    payment_id = invoice["payment_id"]
     markup = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Оплатить", url=url)],
+            [InlineKeyboardButton(text="💳 Оплатить", url=invoice["url"])],
             [InlineKeyboardButton(text="🔄 Я оплатил", callback_data=f"pay:check:{payment_id}")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu:sub")],
         ]
     )
     if callback.message is not None:
-        await smart_edit(callback.message, 
-            f"💳 Счёт на <b>{settings.price_rub} ₽</b> создан.\n\n"
+        await smart_edit(callback.message,
+            f"💳 Счёт на <b>{invoice['amount']} ₽</b> создан.\n\n"
             "После оплаты нажмите «Я оплатил» — доступ включится сразу.",
             reply_markup=markup,
         )
@@ -319,8 +369,10 @@ async def check_yookassa(callback: CallbackQuery) -> None:
         payment = next((p for p in payments if p.id == payment_id), None)
         if payment is None or not payment.external_id:
             if callback.message is not None:
-                await smart_edit(callback.message, 
-                    "Платёж не найден или уже обработан.", reply_markup=kb.payment_menu()
+                await smart_edit(
+                    callback.message,
+                    "Платёж не найден или уже обработан.",
+                    reply_markup=kb.payment_menu(callback.from_user.id),
                 )
             return
 
@@ -342,7 +394,18 @@ async def check_yookassa(callback: CallbackQuery) -> None:
                 )
             return
 
-        await repo.mark_payment_paid(session, payment)
+        # Закрываем платёж переводом состояния pending → paid: нажать «Я оплатил»
+        # можно дважды, и оба нажатия успевают увидеть pending. Начисляет тот,
+        # кому строка досталась.
+        if not await repo.claim_payment(session, payment):
+            await session.commit()
+            if callback.message is not None:
+                await smart_edit(
+                    callback.message,
+                    "✅ Этот платёж уже зачтён — абонемент продлён.",
+                    reply_markup=kb.back_to_main(),
+                )
+            return
         until = await repo.activate_subscription(session, payment.user_id, payment.months)
         await session.commit()
 
@@ -362,40 +425,40 @@ async def pay_usdt(callback: CallbackQuery) -> None:
     await callback.answer()
     assert callback.from_user is not None
 
+    if "usdt" not in settings.inline_payment_methods():
+        await _offer_external(callback, "usdt")
+        return
+
     if not crypto.is_configured():
         if callback.message is not None:
-            await smart_edit(callback.message, 
+            await smart_edit(
+                callback.message,
                 "🪙 Оплата USDT не настроена администратором.",
-                reply_markup=kb.payment_menu(),
+                reply_markup=kb.payment_menu(callback.from_user.id),
             )
         return
 
-    async with SessionLocal() as session:
-        payment = await repo.create_payment(
-            session,
-            user_id=callback.from_user.id,
-            provider="usdt",
-            amount=float(settings.price_usdt),
-            currency="USDT",
-            months=MONTHS,
-        )
-        await session.commit()
-        amount = crypto.unique_amount(float(settings.price_usdt), payment.id)
-        payment.memo = f"{amount:.3f}"
-        await session.commit()
+    try:
+        invoice = await service.start_usdt(callback.from_user.id, MONTHS)
+    except AppError as exc:
+        if callback.message is not None:
+            await smart_edit(
+                callback.message,
+                f"❌ {exc.message}",
+                reply_markup=kb.payment_menu(callback.from_user.id),
+            )
+        return
 
     text = (
         "🪙 <b>Оплата USDT (TRC-20)</b>\n\n"
-        f"Сеть: <b>Tron (TRC-20)</b>\n"
-        f"Кошелёк: <code>{settings.usdt_wallet}</code>\n"
-        f"Сумма: <b>{amount:.3f} USDT</b>\n\n"
+        f"Сеть: <b>{invoice['network']}</b>\n"
+        f"Кошелёк: <code>{invoice['wallet']}</code>\n"
+        f"Сумма: <b>{invoice['amount']:.3f} USDT</b>\n\n"
         "⚠️ Отправьте ровно эту сумму — копейки служат идентификатором платежа. "
         "Доступ включится автоматически после подтверждения в сети (обычно 1–3 минуты)."
     )
     if callback.message is not None:
-        await smart_edit(callback.message, 
-            text, reply_markup=kb.back_to_main()
-        )
+        await smart_edit(callback.message, text, reply_markup=kb.back_to_main())
 
 
 # ─────────────────────────────── Через администратора ─────────────────────────

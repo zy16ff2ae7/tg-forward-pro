@@ -192,7 +192,16 @@ button { border: none; background: none; cursor: pointer; }
 /* ─────────────────────────────── Контент ─────────────────────────────── */
 
 .content { padding: 14px 16px calc(var(--nav-h) + 28px); }
-.tab.hidden { display: none; }
+/* Плавающие кнопки (FAB на задачах, панель действий на чатах) висят поверх
+   контента, а не в потоке: без этого запаса последняя карточка списка уезжала
+   под кнопку и её нельзя было ни прочитать, ни нажать. Класс и высоту ставит
+   JS по живому элементу — подписи кнопок переносятся по-разному, и жёстко
+   заданный отступ то не спасал, то съедал пол-экрана. */
+.content--float { padding-bottom: calc(var(--nav-h) + var(--float-h, 76px)); }
+/* Скрытие через класс работает для любого элемента и бьёт собственный display
+   компонента: раньше правило было только у .tab, поэтому FAB с классом hidden
+   оставался на экране и висел поверх «Команд», закрывая последнюю карточку. */
+.hidden { display: none !important; }
 
 .section-label {
   display: flex;
@@ -275,7 +284,10 @@ button { border: none; background: none; cursor: pointer; }
 .card--cmd {
   display: flex;
   gap: 12px;
-  align-items: center;          /* шеврон выравнивается по центру строки */
+  /* Эмодзи и шеврон стоят на строке названия, а не по центру карточки: высота
+     карточек разная (описание бывает в две строки), и при align-items: center
+     они разъезжались по вертикали — список выглядел неровным. */
+  align-items: flex-start;
   width: 100%;
   text-align: left;
   cursor: pointer;
@@ -295,14 +307,20 @@ button { border: none; background: none; cursor: pointer; }
 .card--cmd:active { background: linear-gradient(158deg, rgba(16, 185, 129, 0.16), rgba(4, 18, 13, 0.6)); }
 
 .cmd__main { flex: 1; min-width: 0; }
-.cmd__head { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; flex-wrap: wrap; }
-.cmd__title { font-weight: 650; color: var(--mint); }
+/* Название, описание и статус — по одной строке каждое. Раньше статус стоял
+   рядом с названием во flex-контейнере с flex-wrap, и на 390px он срывался на
+   вторую строку, ломая ряд. Теперь у каждого своя строка и переносить нечего. */
+.cmd__title { font-weight: 650; color: var(--mint); line-height: 22px; }
 .cmd__desc { color: var(--muted); font-size: 13px; }
+.cmd__foot { margin-top: 6px; }
+/* line-height 22px — та же строка, что у .cmd__title: эмодзи и шеврон
+   выравниваются по названию, а не по верхнему краю карточки. */
+.card--cmd > .card__emoji { line-height: 22px; }
 
 /* Шеврон — главный сигнал «нажми, чтобы открыть». */
 .cmd__chevron {
   font-size: 28px;
-  line-height: 1;
+  line-height: 22px;
   color: var(--brass);
   flex: none;
   margin-left: 4px;
@@ -423,7 +441,16 @@ button { border: none; background: none; cursor: pointer; }
   white-space: nowrap;
 }
 .task__meta { color: var(--muted); font-size: 12.5px; margin-bottom: 10px; }
-.task__actions { display: flex; gap: 8px; }
+/* Кнопок у задачи от двух до пяти: у задач с результатами ряд требовал 395 px
+   при 328 px карточки — «Архив» и корзина уезжали за край. Действия
+   переносятся сами, а корзина держит свой узкий столбец справа. */
+.task__actions { display: flex; align-items: flex-start; gap: 8px; }
+.task__acts { flex: 1; display: flex; flex-wrap: wrap; gap: 8px; }
+/* Обычной задаче нужны три кнопки, и при боковых отступах 14 px им требуется
+   281 px из 274 доступных — «Архив» срывался на вторую строку. Тут кнопки
+   второстепенные, 10 px хватает: ряд укладывается в 257 px. */
+.task__acts .btn { flex: 1 1 auto; padding-left: 10px; padding-right: 10px; }
+.task__actions .btn--danger { flex: 0 0 auto; }
 
 /* ── Кнопки ── */
 
@@ -595,21 +622,21 @@ button { border: none; background: none; cursor: pointer; }
 }
 .chat-bar__btns {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr auto;
+  /* Пять кнопок на узком экране: четыре действия в два ряда, «сброс» — узкой
+     колонкой во всю высоту. В один ряд подписи переносились по слогам, панель
+     вырастала до трёх строк и закрывала последние чаты списка. */
+  grid-template-columns: 1fr 1fr auto;
   gap: 6px;
 }
 .chat-bar__btns .btn { padding: 9px 4px; font-size: 12.5px; }
 .chat-bar__clear {
+  grid-column: 3;
+  grid-row: 1 / span 2;
   width: 38px;
   padding: 9px 0;
   background: rgba(248, 113, 113, 0.12);
   border-color: rgba(248, 113, 113, 0.35);
   color: var(--red);
-}
-@media (max-width: 380px) {
-  .chat-bar__btns { grid-template-columns: 1fr 1fr; }
-  .chat-bar__btns .btn[data-chat-action="parser"] { grid-column: 1 / 2; }
-  .chat-bar__btns .chat-bar__clear { grid-column: 2 / 3; justify-self: end; width: 38px; }
 }
 
 /* ── Аккаунты ── */
@@ -657,8 +684,16 @@ button { border: none; background: none; cursor: pointer; }
 }
 .sub__badge.is-active { background: rgba(52, 211, 153, 0.14); color: var(--jade); border-color: rgba(52, 211, 153, 0.35); }
 .sub__note { position: relative; color: var(--muted); font-size: 12.5px; margin: 10px 0 14px; }
-.sub__actions { position: relative; display: flex; gap: 8px; }
-.sub__actions .btn { flex: 1; }
+/* Три кнопки в одну строку не влезают: на 390 px каждой достаётся ~100 px, и
+   подписи с ценой («Оплатить 299 звёзд») ломались на три строки — ряд вырастал
+   до 75 px рваными столбиками. Звёзды — главное действие, поэтому им целая
+   строка, а остальным двум по половине. Ширину не подгоняем медиазапросом:
+   390 px — самый обычный экран, а не узкий случай. */
+.sub__actions { position: relative; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.sub__actions .btn--primary { grid-column: 1 / -1; }
+/* Оплата на сайте — отдельной строкой под кнопками: способ уводит
+   из Telegram во внешний браузер, и путать его с остальными не надо. */
+.sub__web { position: relative; width: 100%; margin-top: 8px; }
 
 .account { display: flex; align-items: center; gap: 11px; padding: 12px 13px; }
 .account__avatar {
@@ -846,17 +881,15 @@ button { border: none; background: none; cursor: pointer; }
   transition: opacity 0.2s, transform 0.2s;
 }
 .toast.is-show { opacity: 1; transform: translateY(0); }
+/* Пока открыта шторка, тост уходит наверх: на своём месте он ложился прямо на
+   подсказку и кнопку шага — сообщение и то, что под ним, читались наперебой. */
+.sheet.is-open ~ .toast { top: 14px; bottom: auto; }
 
 /* ── Дополнения каталога команд ── */
 
-/* Подсказка под описанием команды: чем этот тип задачи отличается от остальных */
-.cmd__hint {
-  margin-top: 6px;
-  padding-left: 8px;
-  font-size: 12px;
-  color: var(--brass);
-  border-left: 2px solid rgba(198, 166, 104, 0.45);
-}
+/* Первый заголовок блока в списке команд идёт сразу под поиском — верхний
+   отступ .section-label здесь лишний. */
+.cards > .section-label:first-child { margin-top: 4px; }
 
 /* ── Архивные задачи ── */
 
@@ -876,6 +909,66 @@ button { border: none; background: none; cursor: pointer; }
   font-size: 11.5px;
   color: rgba(127, 168, 148, 0.85);
 }
+
+/* ── Шторка подключения аккаунта ── */
+
+/* Три шага входа: номер → код → пароль 2FA. Полоска показывает, где человек
+   сейчас, чтобы «введите код» не выглядело внезапным вопросом ниоткуда. */
+.steps {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+.steps__item {
+  flex: 1;
+  padding: 6px 0 0;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-top: 2px solid var(--line);
+  opacity: 0.7;
+}
+.steps__item.is-done {
+  color: var(--brass);
+  border-top-color: rgba(198, 166, 104, 0.75);
+  opacity: 1;
+}
+.steps__item.is-current {
+  color: var(--jade);
+  border-top-color: var(--jade);
+  opacity: 1;
+}
+
+/* Запасные пути: начать с другого номера или уйти в бота. Тише основной
+   кнопки — оба нужны редко. */
+.login__aside {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.login__aside .btn { flex: 1; font-size: 12.5px; padding: 9px 8px; }
+.login__aside .btn[hidden] { display: none; }
+
+/* Карточка «Продолжить вход»: незавершённый вход виден и после закрытия
+   шторки — шаг лежит в БД, а не в памяти страницы. */
+.card--resume { border-style: solid; border-color: rgba(16, 185, 129, 0.45); }
+
+/* Отключение аккаунта — редкое и необратимое действие, поэтому кнопка тихая. */
+.account__del {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  font-size: 15px;
+  color: var(--muted);
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  border-radius: 2px;
+}
+.account__del:active { transform: scale(0.94); }
 
 /* ── Шторка результатов ── */
 
@@ -1058,11 +1151,15 @@ button { border: none; background: none; cursor: pointer; }
 
 /* ═════════════════════════════ Микроанимации ═══════════════════════════ */
 
-/* Анимируем только transform и opacity — они не вызывают пересчёт layout. */
+/* Анимируем только transform и opacity — они не вызывают пересчёт layout.
+   Сама вкладка — только прозрачность: залитая (`both`) анимация transform
+   оставляет на элементе единичную матрицу, а она делает вкладку containing
+   block для `position: fixed` внутри. Именно из-за этого плавающие кнопки
+   отсчитывали низ от вкладки, а не от экрана. Движение даёт `rise` у карточек. */
 .tab:not(.hidden) { animation: tabIn 0.24s cubic-bezier(0.2, 0.8, 0.3, 1) both; }
 @keyframes tabIn {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: none; }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .cards > *, .list > * { animation: rise 0.3s cubic-bezier(0.2, 0.8, 0.3, 1) both; }
@@ -1111,12 +1208,9 @@ button { border: none; background: none; cursor: pointer; }
   .sheet__panel { left: 50%; transform: translateX(-50%); right: auto; width: 600px; }
 }
 
-/* Узкие экраны: кнопки подписки не сжимаются в нечитаемую строку */
+/* Узкие экраны: сегменты статуса задач сжимаются в подпись поменьше.
+   Кнопки подписки и задач сюда не входят — они переносятся всегда. */
 @media (max-width: 380px) {
-  .sub__actions { flex-wrap: wrap; }
-  .sub__actions .btn { flex: 1 1 100%; }
-  .task__actions { flex-wrap: wrap; }
-  .task__actions .btn { flex: 1 1 auto; }
   .segmented .seg { font-size: 11.5px; padding: 8px 4px; }
 }
 

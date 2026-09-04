@@ -139,7 +139,14 @@ class Payment(Base):
     """Платёж за абонемент (любой из провайдеров)."""
 
     __tablename__ = "payments"
-    __table_args__ = (Index("ix_payments_user", "user_id"),)
+    __table_args__ = (
+        Index("ix_payments_user", "user_id"),
+        # Один перевод в блокчейне — один зачёт. Уникальный индекс по хешу
+        # транзакции не даст засчитать один и тот же перевод дважды даже при
+        # гонке двух проверок. NULL в SQLite/Postgres не конфликтуют между собой,
+        # поэтому платежи без tx_id (звёзды, карта) индекс не трогает.
+        Index("ux_payments_tx", "tx_id", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
@@ -155,6 +162,8 @@ class Payment(Base):
     external_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # Для USDT: уникальная сумма-метка, по которой ищем перевод
     memo: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Для USDT: хеш транзакции, которой закрыт платёж
+    tx_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -201,6 +210,40 @@ class CollectedItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
 
+class PendingDelivery(Base):
+    """Отправка, поставленная в очередь, но ещё не доведённая до конца.
+
+    Очередь доставки живёт в памяти процесса: при перезапуске (деплой, падение,
+    ``systemctl restart``) всё, что стояло в ней и в отложенных задержках,
+    исчезало без следа — сообщение просто не доезжало, и пользователь узнавал
+    об этом сам. Здесь лежат ссылки на исходные сообщения; после старта очередь
+    перечитывает их из источника и досылает.
+
+    Текст и медиа сознательно не храним: это чужие переписки, и копия в нашей
+    базе — лишний риск. Достаточно ``(source_chat_id, message_id)``.
+    """
+
+    __tablename__ = "pending_deliveries"
+    __table_args__ = (
+        Index("ix_pending_delivery_due", "due_at"),
+        Index("ix_pending_delivery_account", "account_id"),
+        # Один и тот же пост по одному и тому же правилу — одна отправка.
+        # Иначе повторный запуск восстановления удвоил бы сообщения.
+        Index("ux_pending_delivery_msg", "rule_id", "source_chat_id", "message_id", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    rule_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    account_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Когда отправлять: сейчас или после задержки из правила
+    due_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
 class PendingLogin(Base):
     """Незавершённый вход по номеру телефона (код/2FA)."""
 
@@ -212,4 +255,8 @@ class PendingLogin(Base):
     phone_code_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     # waiting_code | waiting_password
     stage: Mapped[str] = mapped_column(String(32), default="waiting_code", nullable=False)
+    # Сколько раз код не подошёл. Опечатка в цифре — обычное дело, поэтому вход
+    # из-за неё не сбрасывается; счётчик нужен, чтобы перебор кода не был
+    # бесконечным. Лежит в БД, а не в памяти: шаг входа переживает перезапуск.
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)

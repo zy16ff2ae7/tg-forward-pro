@@ -32,6 +32,14 @@ FLOATING_KINDS: tuple[str, ...] = ("dialogs",)
 # Запускаются вручную и сразу возвращают результат
 ONE_SHOT_KINDS: tuple[str, ...] = ("parser", "autosubscribe")
 
+# Запускаются ТОЛЬКО вручную: у таких задач нет обработчика входящих сообщений,
+# поэтому они не должны попадать в кэш «слушающих» правил. Иначе каждое
+# сообщение в источнике звало бы run_job и писало «Неизвестный тип задачи».
+MANUAL_ONLY_KINDS: tuple[str, ...] = ("parser",)
+
+# Живут по расписанию планировщика, а не по входящим сообщениям
+SCHEDULED_KINDS: tuple[str, ...] = ("poster",)
+
 # Складывают находки в collected_items — у них есть кнопка «Результаты»
 COLLECTING_KINDS: tuple[str, ...] = ONE_SHOT_KINDS + ("checks",)
 
@@ -133,6 +141,17 @@ async def run_job(client: Any, message: Any, rule: RuleSnapshot) -> None:
 
     handler = _HANDLERS.get(rule.kind)
     if handler is None:
+        # Задачи ручного запуска и работающие по расписанию сюда долетать не
+        # должны: их отсеивает refresh_rules. Если всё же долетели — это не
+        # ошибка правила, а неверная маршрутизация: пишем в debug, чтобы не
+        # засорять журнал и не пугать пользователя красными ошибками.
+        if rule.kind in MANUAL_ONLY_KINDS or rule.kind in SCHEDULED_KINDS:
+            logger.debug(
+                "Задача #{} ({}): запускается не по сообщениям — пропускаю",
+                rule.id,
+                rule.kind,
+            )
+            return
         await record_error(rule, message, f"Неизвестный тип задачи: {rule.kind}")
         return
 

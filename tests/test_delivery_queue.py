@@ -10,14 +10,17 @@ from app.telegram_client.queue import DeliveryQueue
 from app.telegram_client.types import RuleSnapshot
 
 
-def make_rule(rule_id: int = 1, delay_seconds: int = 0) -> RuleSnapshot:
-    return RuleSnapshot(
-        id=rule_id,
-        user_id=100,
-        target_id=200,
-        mode="copy",
-        delay_seconds=delay_seconds,
-    )
+def make_rule(rule_id: int = 1, delay_seconds: int = 0, **kwargs) -> RuleSnapshot:
+    params = {
+        "id": rule_id,
+        "user_id": 100,
+        "target_id": 200,
+        "account_id": 1,
+        "mode": "copy",
+        "delay_seconds": delay_seconds,
+    }
+    params.update(kwargs)
+    return RuleSnapshot(**params)
 
 
 def make_queue(handler, **kwargs) -> DeliveryQueue:
@@ -316,3 +319,84 @@ async def test_delayed_rule_is_delivered_after_delay():
     await queue.stop()
 
     assert queue.stats()["sent"] == 1
+
+
+# ─────────────────────── Причины пропусков в счётчиках ────────────────────────
+
+
+async def test_skip_reasons_are_counted_separately():
+    """«Отфильтровано» и «нет подписки» — разные истории, и в счётчиках тоже."""
+    from app.telegram_client.types import SKIP_FILTER, SKIP_NO_SUBSCRIPTION, skipped
+
+    reasons = iter([skipped(SKIP_FILTER), skipped(SKIP_NO_SUBSCRIPTION), skipped(SKIP_FILTER)])
+
+    async def handler(client, message, rule):
+        return next(reasons)
+
+    queue = make_queue(handler, maxsize=10)
+    await queue.start()
+    for index in range(3):
+        queue.submit(None, None, make_rule(index))
+    await queue.stop()
+
+    stats = queue.stats()
+    assert stats["sent"] == 0
+    assert stats["skipped"] == 3
+    assert stats["skips"] == {"filtered": 2, "no_subscription": 1}
+
+
+async def test_bool_handler_still_works():
+    """Служебные задачи и тесты возвращают простой bool — он должен работать."""
+
+    async def handler(client, message, rule) -> bool:
+        return False
+
+    queue = make_queue(handler)
+    await queue.start()
+    queue.submit(None, None, make_rule())
+    await queue.stop()
+
+    assert queue.stats()["skips"] == {"unknown": 1}
+
+
+# ──────────────────────────── Темп на каждый аккаунт ──────────────────────────
+
+
+async def test_pace_is_per_account_not_global():
+    """Лимиты Telegram считаются по аккаунту: чужая активность не тормозит наш.
+
+    Общий лимитер делал так, что два независимых пользователя стояли в одной
+    очереди: пока один рассылает, второй ждёт, хотя его аккаунт свободен.
+    """
+
+    async def handler(client, message, rule) -> bool:
+        return True
+
+    queue = make_queue(handler, workers=2, concurrency=2, min_interval=0.4, maxsize=50)
+    await queue.start()
+
+    started = time.monotonic()
+    queue.submit(None, None, make_rule(1, account_id=1))
+    queue.submit(None, None, make_rule(2, account_id=2))
+    assert await wait_until(lambda: queue.stats()["sent"] == 2)
+    elapsed = time.monotonic() - started
+    await queue.stop()
+
+    assert elapsed < 0.4, "разные аккаунты не должны ждать друг друга"
+
+
+async def test_pace_still_holds_inside_one_account():
+    async def handler(client, message, rule) -> bool:
+        return True
+
+    queue = make_queue(handler, workers=2, concurrency=2, min_interval=0.2, maxsize=50)
+    await queue.start()
+
+    started = time.monotonic()
+    queue.submit(None, None, make_rule(1, account_id=7))
+    queue.submit(None, None, make_rule(2, account_id=7))
+    assert await wait_until(lambda: queue.stats()["sent"] == 2)
+    elapsed = time.monotonic() - started
+    await queue.stop()
+
+    assert elapsed >= 0.2

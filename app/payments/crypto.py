@@ -1,11 +1,16 @@
 """Приём USDT (TRC-20) с автопроверкой через TronGrid.
 
 Схема без генерации адресов: каждому платежу выдаётся уникальная сумма
-(например 12.017 вместо 12.00), по ней и находим перевод на общем кошельке.
+(например 12.017 вместо 12.000), по ней и находим перевод на общем кошельке.
+Отсюда два обязательных условия, без которых схема начинает зачислять чужое:
+
+* метка-сумма уникальна среди **ожидающих** платежей (``reserve_memo``);
+* найденный перевод привязывается к платежу по хешу транзакции (``tx_id``),
+  и один хеш закрывает ровно один платёж.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 from loguru import logger
@@ -15,15 +20,60 @@ from app.config import settings
 TRONGRID_URL = "https://api.trongrid.io/v1/accounts/{address}/transactions/trc20"
 USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 USDT_DECIMALS = 6
+# Шаг метки: 0.001 USDT = 1000 микроединиц контракта.
+MEMO_STEP_MICRO = 1000
+# Сколько сдвигов метки пробуем, прежде чем сдаться (0.5 USDT сверху максимум)
+MEMO_MAX_TRIES = 500
+# Сколько ждём перевод. Срок щедрый (в сети TRC-20 перевод идёт минуты), но
+# конечный: метка-сумма у брошенного счёта иначе занята навсегда, а лимит
+# висящих счетов постепенно запирает человека без нового счёта.
+PENDING_TTL = timedelta(hours=72)
 
 
 def is_configured() -> bool:
-    return bool(settings.usdt_wallet)
+    # Единый источник правды — settings.usdt_ready: он дополнительно
+    # проверяет, что кошелёк похож на настоящий адрес TRC-20.
+    return settings.usdt_ready
+
+
+def to_micro(amount: float | str) -> int:
+    """USDT → целые микроединицы контракта. Только так и можно сравнивать суммы.
+
+    Раньше перевод искался с допуском ``abs(value - expected) < 0.001``. Метки
+    соседних платежей отличаются ровно на 0.001, а разность double для таких
+    чисел выходит вроде 0.00099999999999989 — меньше допуска. То есть перевод
+    по метке 12.018 попадал и в проверку платежа с меткой 12.017: доступ
+    получал не тот, кто заплатил. В целых микроединицах этой щели нет.
+    """
+    return int(round(float(amount) * (10**USDT_DECIMALS)))
 
 
 def unique_amount(base_amount: float, payment_id: int) -> float:
     """Уникальная сумма к оплате: к базовой цене прибавляем номер платежа/1000."""
     return round(base_amount + payment_id / 1000.0, 3)
+
+
+async def reserve_memo(session, base_amount: float, payment_id: int) -> str:
+    """Подбирает метку-сумму, не занятую другим ожидающим платежом.
+
+    ``base_amount + payment_id/1000`` сам по себе уникальности не даёт: цены
+    разных тарифов отличаются на целые единицы, поэтому платёж #1500 по цене 10
+    и платёж #500 по цене 11 дают одну и ту же метку 11.500. Кто заплатит —
+    неизвестно, а зачтётся первому найденному. Поэтому занятые метки исключаем
+    и сдвигаем свою на 0.001 вверх, пока не найдём свободную.
+    """
+    from app.db import repo
+
+    taken = await repo.reserved_memos(session, "usdt")
+    micro = to_micro(unique_amount(base_amount, payment_id))
+    for _ in range(MEMO_MAX_TRIES):
+        memo = f"{micro / (10**USDT_DECIMALS):.3f}"
+        if memo not in taken:
+            return memo
+        micro += MEMO_STEP_MICRO
+    # Столько одновременных платежей — это уже не «занято», а что-то не так.
+    logger.error("USDT: не нашли свободную метку для платежа #{}", payment_id)
+    return f"{micro / (10**USDT_DECIMALS):.3f}"
 
 
 async def _fetch_transactions(session: aiohttp.ClientSession, since_ms: int = 0) -> list[dict]:
@@ -48,66 +98,152 @@ async def _fetch_transactions(session: aiohttp.ClientSession, since_ms: int = 0)
     return payload.get("data") or []
 
 
-async def find_incoming(expected_amount: float, since: datetime | None = None) -> dict | None:
-    """Ищет входящий перевод на сумму expected_amount (с допуском 0.001 USDT)."""
-    if not is_configured():
-        return None
+def _since_ms(since: datetime | None) -> int:
+    """Метка времени для TronGrid. В БД даты — UTC без tzinfo."""
+    if since is None:
+        return 0
+    moment = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+    # Минута назад: между записью платежа и появлением перевода в индексе
+    # TronGrid бывает расхождение часов, и слишком строгая граница режет свой же
+    # перевод.
+    return max(0, int(moment.timestamp() * 1000) - 60_000)
 
-    since_ms = int(since.timestamp() * 1000) if since else 0
+
+def _is_our_usdt(tx: dict) -> bool:
+    """Наш ли это перевод: тот контракт, тот кошелёк, тот токен.
+
+    Символ токена подделывается тривиально — свой контракт с символом «USDT»
+    выпускает любой. Поэтому решает адрес контракта, а получатель проверяется
+    отдельно: ``only_to`` в запросе — обещание TronGrid, а не наша проверка.
+    """
+    info = tx.get("token_info") or {}
+    if (info.get("address") or "") != USDT_CONTRACT:
+        return False
+    wallet = (settings.usdt_wallet or "").strip()
+    return bool(wallet) and (tx.get("to") or "") == wallet
+
+
+async def find_incoming_matches(
+    expected_amount: float | str, since: datetime | None = None
+) -> list[dict]:
+    """Все входящие переводы ровно на ``expected_amount`` (свежие — первыми).
+
+    Список, а не первый попавшийся: если две метки всё же совпали, по сумме
+    подойдут два разных перевода, и платёж должен взять тот, который ещё никому
+    не зачтён. С единственным результатом второй плательщик остался бы без
+    доступа при том, что деньги пришли.
+    """
+    if not is_configured():
+        return []
+
     try:
-        async with aiohttp.ClientSession() as session:
-            transactions = await _fetch_transactions(session, since_ms)
+        async with aiohttp.ClientSession() as http:
+            transactions = await _fetch_transactions(http, _since_ms(since))
     except Exception as exc:  # noqa: BLE001
         logger.warning("TronGrid недоступен: {}", exc)
-        return None
+        return []
 
+    expected_micro = to_micro(expected_amount)
+    matches: list[dict] = []
     for tx in transactions:
-        token = (tx.get("token_info") or {}).get("symbol", "")
-        if token.upper() != "USDT":
+        if not _is_our_usdt(tx):
             continue
         try:
-            value = int(tx.get("value", 0)) / (10**USDT_DECIMALS)
+            value_micro = int(tx.get("value", 0))
         except (TypeError, ValueError):
             continue
-        if abs(value - expected_amount) < 0.001:
-            return tx
-    return None
+        if value_micro == expected_micro:
+            matches.append(tx)
+    return matches
+
+
+async def find_incoming(
+    expected_amount: float | str, since: datetime | None = None
+) -> dict | None:
+    """Первый входящий перевод ровно на ``expected_amount``."""
+    matches = await find_incoming_matches(expected_amount, since)
+    return matches[0] if matches else None
 
 
 async def check_pending(bot) -> int:
     """Проверяет ожидающие крипто-платежи. Возвращает количество зачисленных."""
     from app.db import repo
-    from app.db.database import SessionLocal
+    from app.db.database import SessionLocal, session_scope
+    from app.db.models import Payment
 
     if not is_configured():
         return 0
 
-    activated = 0
-    async with SessionLocal() as session_local:
-        payments = list(await repo.pending_payments(session_local, "usdt"))
-        for payment in payments:
-            if not payment.memo:
-                continue
-            try:
-                expected = float(payment.memo)
-            except ValueError:
-                continue
-            tx = await find_incoming(expected, since=payment.created_at)
-            if tx is None:
-                continue
+    # Брошенные счёта закрываем сразу: каждый из них — занятая метка-сумма и
+    # лишний запрос в TronGrid на каждом проходе.
+    async with session_scope() as session:
+        dropped = await repo.expire_stale_payments(session, "usdt", older_than=PENDING_TTL)
+    if dropped:
+        logger.info("USDT: закрыли {} брошенных счетов", dropped)
 
-            await repo.mark_payment_paid(session_local, payment)
-            until = await repo.activate_subscription(session_local, payment.user_id, payment.months)
-            activated += 1
-            try:
-                await bot.send_message(
-                    payment.user_id,
-                    "✅ <b>Оплата USDT получена</b>\n\n"
-                    f"Абонемент активен до <b>{until:%d.%m.%Y %H:%M}</b> (UTC).\n"
-                    "Пересылка продолжает работать.",
-                )
-            except Exception:  # noqa: BLE001
-                logger.debug("Не смогли уведомить {} об оплате", payment.user_id)
-        if activated:
-            await session_local.commit()
+    async with SessionLocal() as session:
+        payments = list(await repo.pending_payments(session, "usdt"))
+
+    activated = 0
+    for payment in payments:
+        if not payment.memo:
+            continue
+        try:
+            to_micro(payment.memo)
+        except (TypeError, ValueError):
+            logger.warning("Платёж #{}: метка «{}» не похожа на сумму", payment.id, payment.memo)
+            continue
+
+        matches = await find_incoming_matches(payment.memo, since=payment.created_at)
+        candidates = [
+            tx_id
+            for tx_id in (str(tx.get("transaction_id") or "").strip() for tx in matches)
+            if tx_id
+        ]
+        if not candidates:
+            continue
+
+        # Каждый платёж считается отдельной транзакцией БД: сбой на одном не
+        # должен откатывать зачисление остальных.
+        until = None
+        try:
+            async with session_scope() as session:
+                fresh = await session.get(Payment, payment.id)
+                if fresh is None or fresh.status != "pending":
+                    continue
+                # Один перевод закрывает ровно один платёж: берём первый хеш,
+                # который ещё никому не зачтён. Иначе повторная проверка
+                # начисляла бы месяц за тот же перевод по кругу.
+                free = None
+                for tx_id in candidates:
+                    if await repo.payment_with_tx(session, tx_id) is None:
+                        free = tx_id
+                        break
+                if free is None:
+                    logger.warning(
+                        "Платёж #{}: все переводы на {} USDT уже зачтены другим платежам",
+                        payment.id,
+                        payment.memo,
+                    )
+                    continue
+                if not await repo.claim_payment(session, fresh, tx_id=free):
+                    logger.info("Платёж #{} закрыт кем-то другим — пропускаем", payment.id)
+                    continue
+                until = await repo.activate_subscription(session, fresh.user_id, fresh.months)
+        except Exception as exc:  # noqa: BLE001 — один платёж не рушит проверку
+            logger.exception("Платёж #{}: не смогли зачислить: {}", payment.id, exc)
+            continue
+
+        if until is None:
+            continue
+        activated += 1
+        try:
+            await bot.send_message(
+                payment.user_id,
+                "✅ <b>Оплата USDT получена</b>\n\n"
+                f"Абонемент активен до <b>{until:%d.%m.%Y %H:%M}</b> (UTC).\n"
+                "Пересылка продолжает работать.",
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Не смогли уведомить {} об оплате", payment.user_id)
     return activated

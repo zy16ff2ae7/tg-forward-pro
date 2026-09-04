@@ -1,34 +1,77 @@
-"""Подключение личных Telegram-аккаунтов (вход по номеру телефона)."""
-from __future__ import annotations
+"""Подключение личных Telegram-аккаунтов в боте (вход по номеру телефона).
 
-import re
+Сами шаги входа живут в ``app/accounts_login.py`` — тот же сценарий работает в
+кабинете, а состояние шага лежит в БД, а не в памяти процесса. Здесь остаётся
+только разговор: какой текст показать и какого ввода ждать дальше.
+
+Отсюда же правило обработки ошибок, одинаковое на всех шагах:
+
+* ``ValidationError`` — ввод не подошёл, но шаг остаётся тем же. Опечатка в
+  одной цифре кода больше не сбрасывает вход и не заставляет ждать новый код;
+* ``ConflictError`` и ``FeatureUnavailable`` — продолжать нечего (код устарел,
+  сессия побилась, шлюз выключен), поэтому FSM чистим и уводим в меню.
+"""
+from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
-from loguru import logger
-from telethon.errors import (
-    PhoneCodeExpiredError,
-    PhoneCodeInvalidError,
-    PhoneNumberBannedError,
-    PhoneNumberInvalidError,
-    SessionPasswordNeededError,
-)
 
+from app import accounts_login as login
 from app.bot import keyboards as kb
 from app.bot.states import LoginStates
 from app.bot.utils import ensure_user, smart_edit
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
-from app.db.models import TelegramAccount
-from app.security import decrypt_session, encrypt_session
+from app.errors import AppError, ValidationError
 from app.telegram_client.manager import manager
 
 router = Router(name="accounts")
 
-PHONE_RE = re.compile(r"^\+?\d{10,15}$")
+PHONE_PROMPT = (
+    "📱 Введите номер телефона в международном формате:\n\n"
+    "<code>+79001234567</code>\n\n"
+    "Код подтверждения придёт в официальном приложении Telegram."
+)
+CODE_PROMPT = (
+    "Введите код подряд без пробелов: код вида <code>1 2 3 4 5</code> — "
+    "это <code>12345</code>."
+)
+PASSWORD_PROMPT = "🔐 На аккаунте включён облачный пароль (2FA). Введите его:"
+
+SETUP_TEXT = (
+    "⚙️ <b>Подключение аккаунта пока недоступно</b>\n\n"
+    "Кабинет, меню, подписка и платежи уже работают. Вход личных аккаунтов по "
+    "телефону включится, когда сервис подключит MTProto-шлюз.\n\n"
+    "Сценарий будет такой: номер телефона → код из Telegram → облачный пароль "
+    "2FA, если он включён."
+)
+
+async def _accounts_text(user_id: int) -> tuple[str, object]:
+    """Текст и клавиатура списка аккаунтов — общие для команды и для кнопки."""
+    async with SessionLocal() as session:
+        accounts = list(await repo.list_accounts(session, user_id))
+        pending = await repo.get_pending_login(session, user_id)
+
+    lines = [
+        "👤 <b>Ваши аккаунты</b>",
+        "",
+        "Подключённые номера читают источники и пересылают посты.",
+        f"Подключено: {len(accounts)}",
+    ]
+    if pending is not None:
+        step = "код из Telegram" if pending.stage == login.STAGE_CODE else "облачный пароль"
+        lines += ["", f"▶️ Незавершённый вход {pending.phone}: ждём {step}."]
+    if not settings.public_login_enabled:
+        lines += [
+            "",
+            "⚙️ <b>Подключение аккаунтов временно на настройке</b>",
+            "Кабинет, меню, подписки и платежи работают. Вход по номеру "
+            "откроется после подключения MTProto-шлюза сервиса.",
+        ]
+    return "\n".join(lines), kb.accounts_menu(accounts, pending_login=pending is not None)
 
 
 @router.message(Command("accounts"))
@@ -40,340 +83,161 @@ async def show_accounts_message(message: Message) -> None:
     """Список аккаунтов. Используется и из /accounts, и из диплинка мини-аппа."""
     await ensure_user(message)
     assert message.from_user is not None
-    async with SessionLocal() as session:
-        accounts = await repo.list_accounts(session, message.from_user.id)
-        pending = await repo.get_pending_login(session, message.from_user.id)
-    text = (
-        "👤 <b>Ваши аккаунты</b>\n\n"
-        "Подключённые номера читают источники и пересылают посты."
-    )
-    if not settings.public_login_enabled:
-        text += (
-            "\n\n⚙️ <b>Подключение аккаунтов временно на настройке</b>\n"
-            "Кабинет, меню, подписки и платежи работают. "
-            "Вход по номеру откроется после подключения MTProto-шлюза сервиса."
-        )
-    await message.answer(text, reply_markup=kb.accounts_menu(accounts, pending_login=pending is not None))
+    text, markup = await _accounts_text(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
 
 
 async def show_accounts(callback: CallbackQuery) -> None:
     await callback.answer()
     assert callback.from_user is not None
-    async with SessionLocal() as session:
-        accounts = await repo.list_accounts(session, callback.from_user.id)
-        pending = await repo.get_pending_login(session, callback.from_user.id)
-    text = (
-        "👤 <b>Ваши аккаунты</b>\n\n"
-        "Здесь подключаются личные аккаунты Telegram — именно они читают каналы-источники.\n"
-        f"Подключено: {len(accounts)}"
-    )
-    if not settings.public_login_enabled:
-        text += (
-            "\n\n⚙️ <b>Подключение аккаунтов временно на настройке</b>\n"
-            "Кабинет, меню, подписки и платежи уже доступны. "
-            "Вход по номеру откроется после подключения MTProto-шлюза сервиса."
-        )
+    text, markup = await _accounts_text(callback.from_user.id)
     if callback.message is not None:
-        await smart_edit(callback.message, text, reply_markup=kb.accounts_menu(accounts, pending_login=pending is not None))
+        await smart_edit(callback.message, text, reply_markup=markup)
+
+
+# ─────────────────────────────── Начало входа ─────────────────────────────────
+
+
+async def _open_login(user_id: int, state: FSMContext) -> tuple[str, object]:
+    """Куда поставить человека: на новый вход или на середину незавершённого."""
+    if not settings.public_login_enabled:
+        await state.clear()
+        return SETUP_TEXT, kb.back_to_main()
+
+    pending = await login.pending(user_id)
+    if pending is None:
+        await state.set_state(LoginStates.phone)
+        return PHONE_PROMPT, kb.cancel_kb()
+
+    if pending.stage == "password":
+        await state.set_state(LoginStates.password)
+        return PASSWORD_PROMPT, kb.cancel_kb()
+
+    await state.set_state(LoginStates.code)
+    return (
+        f"▶️ Продолжаем вход для <b>{pending.phone}</b>.\n\n"
+        "Введите код из Telegram подряд без пробелов.\n"
+        f"Осталось попыток: {pending.attempts_left}.",
+        kb.cancel_kb(),
+    )
 
 
 @router.callback_query(F.data == "acc:add")
 async def add_account_start(callback: CallbackQuery, state: FSMContext) -> None:
+    assert callback.from_user is not None
+    text, markup = await _open_login(callback.from_user.id, state)
     if not settings.public_login_enabled:
         await callback.answer("Вход по номеру пока на настройке", show_alert=True)
-        if callback.message is not None:
-            await smart_edit(callback.message, 
-                "⚙️ <b>Подключение аккаунта пока недоступно</b>\n\n"
-                "Я продолжаю собирать сервис как публичный платный бот. Сейчас можно "
-                "проверять кабинет, меню, подписку и платежи, но вход личных аккаунтов "
-                "по телефону требует MTProto-шлюз на стороне сервиса.\n\n"
-                "Как только шлюз будет подключён, пользовательский сценарий будет таким: "
-                "номер телефона → код из Telegram → облачный пароль 2FA, если он включён.",
-                reply_markup=kb.back_to_main(),
-            )
-        return
-
-    await callback.answer()
-    await state.set_state(LoginStates.phone)
-    if callback.message is not None:
-        await smart_edit(callback.message, 
-            "📱 Введите номер телефона в международном формате:\n\n"
-            "<code>+79001234567</code>\n\n"
-            "Код подтверждения придёт в официальном приложении Telegram.",
-            reply_markup=kb.cancel_kb(),
-        )
-
-
-async def _resume_account_login(user_id: int, state: FSMContext, send) -> None:
-    """Общая логика восстановления незавершённого входа."""
-    async with SessionLocal() as session:
-        pending = await repo.get_pending_login(session, user_id)
-
-    if pending is None:
-        await send(
-            "Незавершённого входа не найдено. Начните заново: «Подключить аккаунт».",
-            kb.back_to_main(),
-        )
-        return
-
-    try:
-        session_string = decrypt_session(pending.session_encrypted)
-    except Exception:  # noqa: BLE001
-        async with SessionLocal() as session:
-            await repo.delete_pending_login(session, user_id)
-            await session.commit()
-        await send(
-            "Не удалось восстановить временную сессию. Начните подключение заново.",
-            kb.back_to_main(),
-        )
-        return
-
-    await state.update_data(
-        phone=pending.phone,
-        session=session_string,
-        hash=pending.phone_code_hash,
-    )
-
-    if pending.stage == "waiting_password":
-        await state.set_state(LoginStates.password)
-        text = "🔐 Введите облачный пароль (2FA), чтобы завершить подключение аккаунта."
     else:
-        await state.set_state(LoginStates.code)
-        text = (
-            f"▶️ Продолжаем вход для <b>{pending.phone}</b>.\n\n"
-            "Введите код из Telegram подряд без пробелов."
-        )
+        await callback.answer()
+    if callback.message is not None:
+        await smart_edit(callback.message, text, reply_markup=markup)
 
-    await send(text, kb.cancel_kb())
+
+async def begin_login_message(message: Message, state: FSMContext) -> None:
+    """Вход из кабинета: диплинк ``/start add_account`` ведёт прямо на шаг.
+
+    Раньше диплинк открывал список аккаунтов, и человек, нажавший в мини-аппе
+    «Подключить аккаунт», оказывался в чате бота перед меню — без подсказки,
+    что делать дальше. Теперь бот сразу спрашивает номер (или продолжает
+    начатый вход).
+    """
+    await ensure_user(message)
+    assert message.from_user is not None
+    text, markup = await _open_login(message.from_user.id, state)
+    await message.answer(text, reply_markup=markup)
 
 
 @router.message(Command("resume_login"))
 async def cmd_resume_login(message: Message, state: FSMContext) -> None:
     """Команда на случай, если пользователь потерял кнопку в меню."""
-    if message.from_user is None:
-        return
-    await _resume_account_login(
-        user_id=message.from_user.id,
-        state=state,
-        send=lambda text, markup: message.answer(text, reply_markup=markup),
-    )
+    await begin_login_message(message, state)
 
 
 @router.callback_query(F.data == "acc:resume")
 async def resume_account_login(callback: CallbackQuery, state: FSMContext) -> None:
-    """Восстанавливает незавершённый вход после перезапуска бота или потери FSM."""
-    await callback.answer()
-    if callback.from_user is None or callback.message is None:
+    """Продолжает вход после перезапуска бота или потери FSM."""
+    await add_account_start(callback, state)
+
+
+# ──────────────────────────────── Шаги входа ──────────────────────────────────
+
+
+async def _step_failed(
+    error: AppError, wait_msg: Message, state: FSMContext, *, stay: bool
+) -> None:
+    """Показывает отказ и решает, остаётся ли человек на этом шаге.
+
+    ``stay`` — шаг тот же (ошибка ввода), иначе вход закончился и FSM чистим.
+    """
+    if stay:
+        await wait_msg.edit_text(f"❌ {error.message}", reply_markup=kb.cancel_kb())
         return
-    await _resume_account_login(
-        user_id=callback.from_user.id,
-        state=state,
-        send=lambda text, markup: smart_edit(callback.message, text, reply_markup=markup),
+    await state.clear()
+    await wait_msg.edit_text(f"❌ {error.message}", reply_markup=kb.back_to_main())
+
+
+def _finish_text(step: login.LoginStep) -> str:
+    return (
+        f"✅ Аккаунт <b>{step.phone}</b> подключён ({step.name}).\n\n"
+        "Дальше — правило: 📡 Мои правила → ➕ Создать правило. "
+        "Или всё то же в кабинете: /app."
     )
 
 
 @router.message(LoginStates.phone)
 async def process_phone(message: Message, state: FSMContext) -> None:
-    phone = (message.text or "").strip().replace(" ", "")
-    if not PHONE_RE.match(phone):
-        await message.answer(
-            "Похоже, это не номер. Нужно в формате <code>+79001234567</code>. Попробуйте ещё раз:",
-            reply_markup=kb.cancel_kb(),
-        )
-        return
-
-    if not phone.startswith("+"):
-        phone = "+" + phone
-
     assert message.from_user is not None
     wait_msg = await message.answer("⏳ Отправляю код…")
-
     try:
-        session_string, phone_code_hash = await manager.send_code(phone)
-    except PhoneNumberInvalidError:
-        await wait_msg.edit_text("❌ Telegram не знает такой номер. Проверьте и введите заново:")
-        return
-    except PhoneNumberBannedError:
-        await state.clear()
-        await wait_msg.edit_text(
-            "❌ Этот номер заблокирован в Telegram. Подключите другой.",
-            reply_markup=kb.back_to_main(),
-        )
-        return
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Не удалось отправить код")
-        await state.clear()
-        await wait_msg.edit_text(
-            f"❌ Не удалось отправить код: {type(exc).__name__}: {exc}",
-            reply_markup=kb.back_to_main(),
-        )
+        step = await login.start(message.from_user.id, message.text)
+    except AppError as exc:
+        # Неверный формат номера — остаёмся на шаге. Всё остальное (номер
+        # заблокирован, шлюз выключен, Telegram не ответил) — конец попытки.
+        await _step_failed(exc, wait_msg, state, stay=isinstance(exc, ValidationError))
         return
 
-    async with SessionLocal() as session:
-        await repo.save_pending_login(
-            session,
-            user_id=message.from_user.id,
-            phone=phone,
-            session_encrypted=encrypt_session(session_string),
-            phone_code_hash=phone_code_hash,
-            stage="waiting_code",
-        )
-        await session.commit()
-
-    await state.update_data(phone=phone, session=session_string, hash=phone_code_hash)
     await state.set_state(LoginStates.code)
     await wait_msg.edit_text(
-        "✅ Код отправлен в Telegram.\n\n"
-        "Введите его подряд без пробелов. Если код вида <code>1 2 3 4 5</code> — "
-        "пришлите <code>12345</code>.",
+        f"✅ Код отправлен на <b>{step.phone}</b>.\n\n{CODE_PROMPT}",
         reply_markup=kb.cancel_kb(),
     )
 
 
 @router.message(LoginStates.code)
 async def process_code(message: Message, state: FSMContext) -> None:
-    code = re.sub(r"\D", "", message.text or "")
-    if not code:
-        await message.answer("Нужны только цифры кода. Попробуйте ещё раз:")
-        return
-
-    data = await state.get_data()
-    phone: str = data.get("phone", "")
-    session_string: str = data.get("session", "")
-    phone_code_hash: str = data.get("hash", "")
     assert message.from_user is not None
-
     wait_msg = await message.answer("⏳ Проверяю код…")
     try:
-        session_string = await manager.sign_in_code(
-            phone=phone, code=code, session_string=session_string,
-            phone_code_hash=phone_code_hash,
-        )
-    except (PhoneCodeInvalidError, PhoneCodeExpiredError):
-        async with SessionLocal() as session:
-            await repo.delete_pending_login(session, message.from_user.id)
-            await session.commit()
-        await wait_msg.edit_text(
-            "❌ Код не подошёл или устарел. Запросите новый: /accounts → «Подключить аккаунт».",
-            reply_markup=kb.back_to_main(),
-        )
-        await state.clear()
-        return
-    except SessionPasswordNeededError:
-        await state.update_data(session=session_string)
-        async with SessionLocal() as session:
-            await repo.save_pending_login(
-                session,
-                user_id=message.from_user.id,
-                phone=phone,
-                session_encrypted=encrypt_session(session_string),
-                phone_code_hash=phone_code_hash,
-                stage="waiting_password",
-            )
-            await session.commit()
-        await state.set_state(LoginStates.password)
-        await wait_msg.edit_text(
-            "🔐 На аккаунте включён облачный пароль (2FA). Введите его:",
-            reply_markup=kb.cancel_kb(),
-        )
-        return
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Ошибка входа по коду")
-        async with SessionLocal() as session:
-            await repo.delete_pending_login(session, message.from_user.id)
-            await session.commit()
-        await state.clear()
-        await wait_msg.edit_text(
-            f"❌ Ошибка входа: {type(exc).__name__}: {exc}",
-            reply_markup=kb.back_to_main(),
-        )
+        step = await login.submit_code(message.from_user.id, message.text)
+    except AppError as exc:
+        await _step_failed(exc, wait_msg, state, stay=isinstance(exc, ValidationError))
         return
 
-    await _finish_login(message, state, session_string, phone, wait_msg)
+    if step.stage == "password":
+        await state.set_state(LoginStates.password)
+        await wait_msg.edit_text(PASSWORD_PROMPT, reply_markup=kb.cancel_kb())
+        return
+
+    await state.clear()
+    await wait_msg.edit_text(_finish_text(step), reply_markup=kb.back_to_main())
 
 
 @router.message(LoginStates.password)
 async def process_password(message: Message, state: FSMContext) -> None:
-    password = (message.text or "").strip()
-    data = await state.get_data()
-    session_string: str = data.get("session", "")
-    phone: str = data.get("phone", "")
     assert message.from_user is not None
-
-    if not session_string or not phone:
-        async with SessionLocal() as session:
-            pending = await repo.get_pending_login(session, message.from_user.id)
-        if pending is not None:
-            try:
-                session_string = decrypt_session(pending.session_encrypted)
-                phone = pending.phone
-            except Exception:  # noqa: BLE001
-                session_string = ""
-
-    if not session_string or not phone:
-        await state.clear()
-        await message.answer(
-            "Не удалось восстановить вход. Начните заново: /accounts → «Подключить аккаунт».",
-            reply_markup=kb.back_to_main(),
-        )
-        return
-
     wait_msg = await message.answer("⏳ Проверяю пароль…")
     try:
-        session_string = await manager.sign_in_password(password, session_string)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Ошибка ввода облачного пароля")
-        await wait_msg.edit_text(
-            f"❌ Пароль не подошёл: {type(exc).__name__}. Попробуйте снова:",
-            reply_markup=kb.cancel_kb(),
-        )
+        step = await login.submit_password(message.from_user.id, message.text or "")
+    except AppError as exc:
+        await _step_failed(exc, wait_msg, state, stay=isinstance(exc, ValidationError))
         return
 
-    await _finish_login(message, state, session_string, phone, wait_msg)
-
-
-async def _finish_login(
-    message: Message,
-    state: FSMContext,
-    session_string: str,
-    phone: str,
-    wait_msg: Message,
-) -> None:
-    """Сохраняет аккаунт, поднимает клиент и показывает результат."""
-    assert message.from_user is not None
-    ok, name, error = await manager.check_session(session_string)
-
-    if not ok:
-        await state.clear()
-        await wait_msg.edit_text(
-            f"❌ Аккаунт не подтверждён: {error}\n\nПопробуйте подключить заново.",
-            reply_markup=kb.back_to_main(),
-        )
-        return
-
-    async with SessionLocal() as session:
-        await repo.delete_pending_login(session, message.from_user.id)
-        account = await repo.add_account(
-            session,
-            user_id=message.from_user.id,
-            phone=phone,
-            session_encrypted=encrypt_session(session_string),
-        )
-        await session.commit()
-        account_id = account.id
-        db_account = await session.get(TelegramAccount, account_id)
-        assert db_account is not None
-        started = await manager.start_account(db_account, session_string)
-        await repo.set_account_error(session, db_account, None if started else "Не запустился")
-        await session.commit()
-
-    await manager.refresh_rules()
     await state.clear()
-    await wait_msg.edit_text(
-        f"✅ Аккаунт <b>{phone}</b> подключён ({name}).\n\n"
-        "Теперь создайте правило: 📡 Мои правила → ➕ Создать правило.",
-        reply_markup=kb.back_to_main(),
-    )
+    await wait_msg.edit_text(_finish_text(step), reply_markup=kb.back_to_main())
+
+
+# ────────────────────────── Подключённый аккаунт ──────────────────────────────
 
 
 @router.callback_query(F.data.startswith("acc:open:"))
@@ -412,9 +276,7 @@ async def account_chats(callback: CallbackQuery) -> None:
     text = "📋 <b>Чаты аккаунта</b>\n\n" + "\n".join(lines)
     text += "\n\nID пригодится, если не хотите вводить @username при создании правила."
     if callback.message is not None:
-        await smart_edit(callback.message, 
-            text, reply_markup=kb.account_menu(account_id)
-        )
+        await smart_edit(callback.message, text, reply_markup=kb.account_menu(account_id))
 
 
 @router.callback_query(F.data.startswith("acc:delete:"))
@@ -422,14 +284,14 @@ async def delete_account(callback: CallbackQuery) -> None:
     await callback.answer()
     account_id = int(callback.data.split(":")[2])
     assert callback.from_user is not None
-    await manager.stop_account(account_id)
-    async with SessionLocal() as session:
-        account = await repo.get_account(session, account_id, callback.from_user.id)
-        if account is not None:
-            await session.delete(account)
-            await session.commit()
-    await manager.refresh_rules()
+    try:
+        phone = await login.disconnect(callback.from_user.id, account_id)
+    except AppError as exc:
+        await callback.answer(exc.message, show_alert=True)
+        return
     if callback.message is not None:
-        await smart_edit(callback.message, 
-            "🗑 Аккаунт отключён.", reply_markup=kb.back_to_main()
+        await smart_edit(
+            callback.message,
+            f"🗑 Аккаунт <b>{phone}</b> отключён. Сохранённая сессия удалена.",
+            reply_markup=kb.back_to_main(),
         )

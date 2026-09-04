@@ -23,9 +23,18 @@ class AppError(Exception):
 
     status = 500
 
-    def __init__(self, message: str, *, status: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
+        # details — машиночитаемая часть отказа (например, остаток попыток кода).
+        # Клиенту нельзя разбирать текст сообщения, чтобы достать из него число.
+        self.details = dict(details or {})
         if status is not None:
             self.status = status
 
@@ -69,7 +78,8 @@ def _dumps(value: Any) -> str:
 
 def error_payload(error: AppError) -> dict[str, Any]:
     """Тело JSON-ответа для известной ошибки."""
-    payload: dict[str, Any] = {"error": error.message}
+    # Ключ error ставим последним: details не должны его переопределить.
+    payload: dict[str, Any] = {**error.details, "error": error.message}
     if isinstance(error, FeatureUnavailable):
         payload["feature"] = error.feature
         payload["status"] = error.feature_status

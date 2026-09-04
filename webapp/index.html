@@ -97,10 +97,9 @@
     </section>
 
     <!--
-      Кнопка «Запустить задачу» намеренно вынесена из #tab-tasks:
-      у вкладки есть анимация `tabIn` с `transform`, а это создаёт containing
-      block для `position: fixed` потомков — и FAB прилипал к низу самой
-      вкладки, а не вьюпорта, наезжая на пустое состояние.
+      Кнопка «Запустить задачу» намеренно вынесена из #tab-tasks: плавающие
+      элементы с `position: fixed` держим вне вкладок, чтобы низ считался от
+      экрана, а не от вкладки (её стили и анимации на это влияют).
       Показываем только когда активна вкладка «Задачи» (см. switchTab).
     -->
     <button class="fab hidden" id="addTaskBtn" aria-hidden="true">＋ Запустить задачу</button>
@@ -117,23 +116,25 @@
       </div>
       <div class="chips" id="chatTags"></div>
       <div class="list" id="chatList"></div>
-
-      <!-- Плавающая панель действий над нижней навигацией.
-           Появляется только когда выбран хотя бы один чат. -->
-      <div class="chat-bar" id="chatBar" role="region" aria-label="Действия с выбранными чатами">
-        <div class="chat-bar__count">
-          Выбрано: <b id="chatBarCount">0</b>
-          <span class="chat-bar__sum" id="chatBarSummary"></span>
-        </div>
-        <div class="chat-bar__btns">
-          <button class="btn btn--primary" data-chat-action="broadcast" title="Рассылка в выбранные чаты">📣 Рассылка</button>
-          <button class="btn" data-chat-action="forward" title="Переслать в выбранный чат">🔁 Пересылка</button>
-          <button class="btn" data-chat-action="poster" title="Авто-постинг в выбранный чат">📤 Авто-постинг</button>
-          <button class="btn" data-chat-action="parser" title="Спарсить аудиторию выбранного чата">🕵️ Парсер</button>
-          <button class="btn chat-bar__clear" data-chat-action="clear" title="Сбросить выбор">✕</button>
-        </div>
-      </div>
     </section>
+
+    <!-- Панель действий над выбранными чатами вынесена из #tab-chats по той же
+         причине, что и FAB: `position: fixed` внутри вкладки считался от самой
+         вкладки, и панель зависала посреди списка, закрывая чаты.
+         Показываем только на вкладке «Чаты» с выбором (см. updateChatBar). -->
+    <div class="chat-bar" id="chatBar" role="region" aria-label="Действия с выбранными чатами">
+      <div class="chat-bar__count">
+        Выбрано: <b id="chatBarCount">0</b>
+        <span class="chat-bar__sum" id="chatBarSummary"></span>
+      </div>
+      <div class="chat-bar__btns">
+        <button class="btn btn--primary" data-chat-action="broadcast" title="Рассылка в выбранные чаты">📣 Рассылка</button>
+        <button class="btn" data-chat-action="forward" title="Переслать в выбранный чат">🔁 Пересылка</button>
+        <button class="btn" data-chat-action="poster" title="Авто-постинг в выбранный чат">📤 Авто-постинг</button>
+        <button class="btn" data-chat-action="parser" title="Спарсить аудиторию выбранного чата">🕵️ Парсер</button>
+        <button class="btn chat-bar__clear" data-chat-action="clear" title="Сбросить выбор">✕</button>
+      </div>
+    </div>
 
     <!-- ── Вкладка: Аккаунты ── -->
     <section class="tab hidden" id="tab-accounts" aria-label="Аккаунты">
@@ -152,6 +153,10 @@
           <button class="btn" id="distributeBtn">Распределить подписку</button>
           <button class="btn" id="freezeBtn">❄️ Заморозить дни</button>
         </div>
+        <!-- Карта и крипта живут на странице сервиса вне Telegram: внутри
+             Telegram абонемент продаётся только за звёзды (ToS, п. 6.2).
+             Кнопку показывает renderWebPayButton, если контур включён. -->
+        <button class="btn sub__web" id="webPayBtn" hidden>🌐 Оплатить на сайте</button>
       </div>
 
       <div class="section-label">возможности</div>
@@ -217,6 +222,40 @@
         <button class="icon-btn" data-close aria-label="Закрыть">✕</button>
       </div>
       <div class="results" id="resultsBody"></div>
+    </div>
+  </div>
+
+  <!-- Подключение аккаунта: номер → код из Telegram → облачный пароль 2FA.
+       Вход проходит здесь целиком. Раньше кнопка «Добавить аккаунт» умела
+       единственное — открыть чат с ботом, и человек уходил из кабинета на
+       середине пути. Кнопка «Продолжить в боте» осталась как запасной путь. -->
+  <div class="sheet" id="loginSheet" role="dialog" aria-modal="true" aria-label="Подключение аккаунта">
+    <div class="sheet__backdrop" data-close></div>
+    <div class="sheet__panel">
+      <div class="sheet__head">
+        <div class="sheet__title" id="loginTitle">Подключение аккаунта</div>
+        <button class="icon-btn" data-close aria-label="Закрыть">✕</button>
+      </div>
+      <div class="form">
+        <ol class="steps" id="loginSteps">
+          <li class="steps__item" data-step="phone">Номер</li>
+          <li class="steps__item" data-step="code">Код</li>
+          <li class="steps__item" data-step="password">Пароль 2FA</li>
+        </ol>
+        <div class="sheet__lead" id="loginLead"></div>
+        <label class="field">
+          <span id="loginLabel">Номер телефона</span>
+          <input id="loginInput" type="tel" inputmode="tel" autocomplete="off"
+                 placeholder="+79001234567" aria-describedby="loginError">
+          <i class="field__note" id="loginNote"></i>
+        </label>
+        <button class="btn btn--primary btn--block" id="loginSubmit">Получить код</button>
+        <div class="login__aside">
+          <button class="btn" id="loginRestart">Другой номер</button>
+          <button class="btn" id="loginInBot">Продолжить в боте</button>
+        </div>
+        <div class="error" id="loginError" role="alert"></div>
+      </div>
     </div>
   </div>
 

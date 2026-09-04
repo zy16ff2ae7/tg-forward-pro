@@ -147,7 +147,7 @@ async def set_target(message: Message, state: FSMContext) -> None:
             await wait.edit_text(
                 f"🔒 На бесплатном режиме доступно только {settings.max_rules_free} правила.\n"
                 "Оформите абонемент, чтобы снять ограничение.",
-                reply_markup=kb.payment_menu(),
+                reply_markup=kb.payment_menu(message.from_user.id),
             )
             return
 

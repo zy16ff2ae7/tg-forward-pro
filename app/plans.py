@@ -52,6 +52,21 @@ def stars_amount(months: int) -> int:
     return settings.price_stars * months
 
 
+def rub_amount(months: int) -> int:
+    """Сумма в рублях за срок (карта/СБП и заявка администратору)."""
+    return settings.price_rub * months
+
+
+def usdt_amount(months: int) -> float:
+    """Сумма в USDT за срок.
+
+    Округление до цента: метка платежа занимает третий знак после запятой
+    (``12.017``), поэтому в самой цене третьего знака быть не должно — иначе
+    метка и цена перепутаются.
+    """
+    return round(settings.price_usdt * months, 2)
+
+
 def periods_text() -> str:
     """Список сроков для сообщения: «1, 3, 6 или 12 месяцев»."""
     head, last = ", ".join(str(item) for item in PERIODS[:-1]), PERIODS[-1]
