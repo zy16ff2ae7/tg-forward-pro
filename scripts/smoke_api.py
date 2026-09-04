@@ -58,6 +58,7 @@ from app.payments import crypto, service, yookassa  # noqa: E402
 from app.plans import PERIODS, rub_amount, usdt_amount  # noqa: E402
 from app.telegram_client.manager import manager  # noqa: E402
 from app.webapp_api import COMMAND_GROUPS, COMMANDS, setup_webapp_routes  # noqa: E402
+from app.webapp_build import build_stamp  # noqa: E402
 from tests.helpers import sign_init_data  # noqa: E402
 
 # Логи приложения в отчёте только мешают: INFO о раздаче статики и обновлении
@@ -166,6 +167,16 @@ class Cabinet:
     async def get(self, path: str, **kwargs: Any) -> tuple[int, Any]:
         return await self.request("GET", path, **kwargs)
 
+    async def get_headers(self, path: str, **kwargs: Any) -> tuple[int, dict[str, str]]:
+        """Только статус и заголовки — нужно проверкам кэша мини-аппа."""
+        auth = kwargs.pop("auth", True)
+        headers: dict[str, str] = dict(self.headers) if auth else {}
+        headers.update(kwargs.pop("headers", None) or {})
+        async with self._session.get(
+            self._base + path, headers=headers, allow_redirects=False, **kwargs
+        ) as response:
+            return response.status, dict(response.headers)
+
     async def post(self, path: str, **kwargs: Any) -> tuple[int, Any]:
         return await self.request("POST", path, **kwargs)
 
@@ -243,6 +254,38 @@ async def check_static(cab: Cabinet, rep: Report) -> None:
 
     status, _ = await cab.get("/app/no-such-file.js", auth=False)
     rep.check("Несуществующий файл — 404", status == 404, f"статус {status}")
+
+    # Кэш WebView: без метки в адресе Telegram показывает вёрстку из своего
+    # кэша, и выкат «не виден». Метка приходит вместе с HTML, поэтому сам HTML
+    # кэшировать нельзя, а помеченные файлы, наоборот, можно навсегда.
+    stamp = build_stamp(settings.webapp_dir)
+    rep.check("Метка сборки мини-аппа посчитана", bool(stamp), "метка пустая")
+    rep.check(
+        "GET /app/ — ссылки на css/js с меткой сборки",
+        f"styles.css?v={stamp}" in str(body) and f"app.js?v={stamp}" in str(body),
+        "в HTML нет помеченных адресов",
+    )
+
+    status, headers = await cab.get_headers("/app/", auth=False)
+    rep.check(
+        "GET /app/ — Cache-Control: no-store",
+        headers.get("Cache-Control") == "no-store",
+        f"заголовок {headers.get('Cache-Control')!r}",
+    )
+
+    status, headers = await cab.get_headers("/app/styles.css", auth=False)
+    rep.check(
+        "Статика без метки — Cache-Control: no-cache",
+        headers.get("Cache-Control") == "no-cache",
+        f"заголовок {headers.get('Cache-Control')!r}",
+    )
+
+    status, headers = await cab.get_headers(f"/app/styles.css?v={stamp}", auth=False)
+    rep.check(
+        "Статика с меткой — кэшируется навсегда",
+        "immutable" in (headers.get("Cache-Control") or ""),
+        f"заголовок {headers.get('Cache-Control')!r}",
+    )
 
 
 async def check_health(cab: Cabinet, rep: Report) -> None:

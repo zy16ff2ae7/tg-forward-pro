@@ -18,7 +18,7 @@ from aiogram.types import LabeledPrice
 from aiohttp import web
 from loguru import logger
 
-from app import accounts_login, paylink
+from app import accounts_login, paylink, webapp_build
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
@@ -1280,11 +1280,33 @@ async def _webapp_no_slash(_request: web.Request) -> web.Response:
 
 @routes.get("/app/")
 async def _webapp_index(_request: web.Request) -> web.Response:
-    """Главная мини-аппа. Telegram открывает ровно этот адрес."""
+    """Главная мини-аппа. Telegram открывает ровно этот адрес.
+
+    Отдаём не файл как есть, а с метками сборки в ссылках на css/js — иначе
+    WebView Telegram показывает вёрстку из своего кэша и выкат «не виден».
+    Сам документ не кэшируем: только через него клиент узнаёт новые адреса.
+    """
     index = settings.webapp_dir / "index.html"
     if not index.exists():
         raise web.HTTPNotFound()
-    return web.FileResponse(index)
+    stamp = webapp_build.build_stamp(settings.webapp_dir)
+    html = webapp_build.add_version(index.read_text("utf-8"), stamp)
+    return web.Response(
+        text=html,
+        content_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@web.middleware
+async def _webapp_cache_headers(request: web.Request, handler: Any) -> Any:
+    """Проставляет статике мини-аппа `Cache-Control` (aiohttp его не ставит)."""
+    response = await handler(request)
+    if request.path.startswith("/app/") and "Cache-Control" not in response.headers:
+        response.headers["Cache-Control"] = webapp_build.cache_control_for(
+            bool(request.query.get("v"))
+        )
+    return response
 
 
 def setup_webapp_routes(app: web.Application, bot: Any = None) -> None:
@@ -1292,9 +1314,15 @@ def setup_webapp_routes(app: web.Application, bot: Any = None) -> None:
     global _bot
     _bot = bot
     app.add_routes(routes)
+    if _webapp_cache_headers not in app.middlewares:
+        app.middlewares.append(_webapp_cache_headers)
 
     if settings.webapp_dir.exists():
         app.router.add_static("/app/", path=str(settings.webapp_dir), name="webapp")
-        logger.info("Мини-апп раздаётся из {}", settings.webapp_dir)
+        logger.info(
+            "Мини-апп раздаётся из {} (метка сборки {})",
+            settings.webapp_dir,
+            webapp_build.build_stamp(settings.webapp_dir) or "нет файлов",
+        )
     else:
         logger.warning("Папка мини-аппа не найдена: {}", settings.webapp_dir)

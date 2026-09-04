@@ -9,6 +9,7 @@ from cryptography.fernet import Fernet
 from dotenv import load_dotenv
 
 from app.fsperms import group_or_world_accessible
+from app.webapp_build import build_stamp
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -147,6 +148,11 @@ class Settings:
         Мини-апп всегда раздаётся по пути /app/ — открываем сразу туда,
         без редиректа с корня (надёжнее внутри Telegram WebView, где
         initData передаётся через объект WebApp, а не через URL).
+
+        В адресе стоит метка сборки. WebView помнит документ по URL и после
+        выката открывает его из кэша — со старой вёрсткой; новый адрес не
+        оставляет ему выбора. Метка считается по содержимому файлов, так что
+        меняется она только вместе с самим мини-аппом.
         """
         if self.webapp_url:
             base = self.webapp_url.rstrip("/")
@@ -155,8 +161,11 @@ class Settings:
         else:
             return None
         if base.endswith("/app"):
-            return base + "/"
-        return base + "/app/"
+            url = base + "/"
+        else:
+            url = base + "/app/"
+        stamp = build_stamp(self.webapp_dir)
+        return f"{url}?v={stamp}" if stamp else url
 
     @property
     def mtproto_ready(self) -> bool:

@@ -193,8 +193,10 @@ def test_mtproto_ready_rejects_placeholders():
     assert Settings(api_id=1, api_hash="a" * 32).mtproto_ready is True
 
 
-def test_mini_app_url_falls_back_to_webhook_url():
-    settings = Settings(webhook_url="https://example.com/")
+def test_mini_app_url_falls_back_to_webhook_url(tmp_path):
+    # Папка мини-аппа пустая: метке сборки браться не от чего, адрес чистый.
+    # Саму метку проверяет tests/test_webapp_cache.py.
+    settings = Settings(webhook_url="https://example.com/", webapp_dir=tmp_path)
     assert settings.mini_app_url == "https://example.com/app/"
     assert settings.public_url == "https://example.com/webhook"
 
