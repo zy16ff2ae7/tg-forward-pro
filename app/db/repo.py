@@ -363,8 +363,25 @@ async def add_rule(
     return rule
 
 
+# Таблицы, строки которых принадлежат задаче и без неё не имеют смысла:
+# журнал пересылок, находки («Результаты») и отложенные отправки.
+RULE_OWNED = (ForwardLog, CollectedItem, PendingDelivery)
+
+
 async def delete_rule(session: AsyncSession, rule: Rule) -> None:
+    """Удаляет задачу вместе со всем, что она за собой оставила.
+
+    Внешнего ключа на ``rules`` у этих таблиц нет, и удаление задачи оставляло
+    их строки в базе навсегда. Само по себе это был мусор, но SQLite выдаёт
+    задачам id по принципу «наибольший плюс один» — без ``AUTOINCREMENT`` номер
+    удалённой задачи достаётся следующей созданной. Она получала вместе с ним
+    чужую историю: красный «сбой» от предшественницы и её находки в
+    «Результатах». Поэтому чистим здесь, в единственном месте удаления.
+    """
+    rule_id = rule.id
     await session.delete(rule)
+    for model in RULE_OWNED:
+        await session.execute(delete(model).where(model.rule_id == rule_id))
     await session.flush()
 
 
@@ -905,3 +922,23 @@ async def trim_forward_logs(
     )
     await session.flush()
     return int(result.rowcount or 0)
+
+
+async def drop_orphan_records(session: AsyncSession) -> dict[str, int]:
+    """Убирает строки, чья задача уже удалена. Возвращает ``{таблица: сколько}``.
+
+    Удаление задачи чистит их само (см. :func:`delete_rule`), но в базах, где
+    задачи удаляли до этого, мусор уже лежит — и достанется следующей задаче с
+    тем же номером. Поэтому проход зовётся из фонового цикла: базы вылечиваются
+    сами, без ручных запросов на сервере.
+    """
+    alive = select(Rule.id)
+    dropped: dict[str, int] = {}
+    for model in RULE_OWNED:
+        result = await session.execute(
+            delete(model).where(model.rule_id.not_in(alive))
+        )
+        if result.rowcount:
+            dropped[model.__tablename__] = int(result.rowcount)
+    await session.flush()
+    return dropped

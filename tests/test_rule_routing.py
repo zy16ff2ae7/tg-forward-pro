@@ -7,11 +7,18 @@
 """
 from __future__ import annotations
 
-import pytest
+from datetime import timedelta
+from types import SimpleNamespace
 
+import pytest
+from sqlalchemy import select
+
+from app.db import repo
 from app.db.database import session_scope
-from app.db.models import Rule
+from app.db.models import ForwardLog, Rule, Subscription
+from app.telegram_client import jobs
 from app.telegram_client.manager import manager
+from app.telegram_client.types import RuleSnapshot
 
 pytestmark = pytest.mark.asyncio
 
@@ -93,3 +100,42 @@ async def test_disabled_rule_does_not_listen(create_user, create_account):
     await manager.refresh_rules()
 
     assert not _listening_rule_ids()
+
+
+async def test_manual_task_writes_nothing_to_the_journal(create_user, create_account):
+    """Даже если сообщение до парсера долетело, в журнал оно попасть не должно.
+
+    Карточка задачи читает журнал и по последней записи решает, сломана задача
+    или работает. Пока внутренняя «Неизвестный тип задачи» писалась туда как
+    обычный сбой, у живого парсера навсегда оставался красный «сбой» с текстом,
+    который человеку ничего не говорит и починить который он не может.
+    """
+    user_id = await create_user()
+    account_id = await create_account(user_id)
+    rule_id = await _add_rule(user_id, account_id, "parser")
+    async with session_scope() as session:
+        session.add(
+            Subscription(user_id=user_id, active_until=repo.utcnow() + timedelta(days=1))
+        )
+
+    await jobs.run_job(
+        client=None,
+        message=SimpleNamespace(id=1, text="привет", action=None, media=None),
+        rule=RuleSnapshot(
+            id=rule_id,
+            user_id=user_id,
+            target_id=-1002,
+            mode="copy",
+            delay_seconds=0,
+            account_id=account_id,
+            kind="parser",
+        ),
+    )
+
+    async with session_scope() as session:
+        rows = (
+            await session.execute(select(ForwardLog).where(ForwardLog.rule_id == rule_id))
+        ).scalars().all()
+    assert rows == []
+    async with session_scope() as session:
+        assert await repo.task_health(session, [rule_id]) == {}

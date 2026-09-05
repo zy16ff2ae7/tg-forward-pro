@@ -638,10 +638,17 @@ class ClientManager:
             self._poster_rules = fresh_posters
             self._mailing_rules = fresh_mailings
             # Правило выключили или удалили — состояние планировщика ему больше
-            # не нужно. Иначе словари растут весь uptime процесса.
-            live = {snapshot.id for snapshot in fresh_mailings}
-            for rule_id in [key for key in self._mailing_state if key not in live]:
-                self._mailing_state.pop(rule_id, None)
+            # не нужно. Иначе словари растут весь uptime процесса, а номер
+            # удалённой задачи SQLite отдаёт следующей созданной: та получала
+            # чужую очередь чатов и чужой текст в первом же круге, а заодно
+            # чужую паузу после FloodWait. Выключенная задача круг начинает
+            # заново — это дешевле, чем помнить её место неделю.
+            for state, live in (
+                (self._poster_state, {snapshot.id for snapshot in fresh_posters}),
+                (self._mailing_state, {snapshot.id for snapshot in fresh_mailings}),
+            ):
+                for rule_id in [key for key in state if key not in live]:
+                    state.pop(rule_id, None)
 
     # ─────────────────────────── Авто-постер (планировщик) ───────────────────────────
 

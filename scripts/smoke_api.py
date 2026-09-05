@@ -49,14 +49,14 @@ os.environ["LOG_LEVEL"] = "WARNING"
 import aiohttp  # noqa: E402
 from aiohttp import web  # noqa: E402
 from loguru import logger  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import func, select  # noqa: E402
 from telethon.errors import PhoneCodeInvalidError, SessionPasswordNeededError  # noqa: E402
 
 from app import accounts_login, paylink  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db import repo  # noqa: E402
 from app.db.database import dispose_db, init_db, session_scope  # noqa: E402
-from app.db.models import ForwardLog  # noqa: E402
+from app.db.models import CollectedItem, ForwardLog, PendingDelivery  # noqa: E402
 from app.errors import http_error_middleware  # noqa: E402
 from app.payments import crypto, service, yookassa  # noqa: E402
 from app.plans import PERIODS, rub_amount, usdt_amount  # noqa: E402
@@ -1348,6 +1348,151 @@ async def check_task_health(cab: Cabinet, rep: Report, account_id: int) -> None:
     rep.note("журнал наполнен вручную: планировщик и Telegram в разделе не участвуют")
 
 
+async def check_task_cleanup(cab: Cabinet, rep: Report, account_id: int) -> None:
+    """Удалённая задача не оставляет следов, а её номер достаётся следующей.
+
+    Три таблицы ссылаются на задачу номером без внешнего ключа: журнал
+    пересылок, находки и очередь недосланных сообщений. SQLite выдаёт номера по
+    правилу «наибольший плюс один», поэтому номер удалённой задачи получает
+    следующая созданная — вместе с чужим сбоем на карточке и чужими находками в
+    «Результатах». Проверяем на живом сокете обе половины: удаление чистит за
+    собой, а фоновый проход лечит базы, где задачи удаляли раньше.
+    """
+    rep.section("Следы удалённой задачи")
+
+    async def resolve_many(_account_id: int, queries) -> dict[str, tuple[int, str]]:
+        asked = [str(raw or "").strip() for raw in queries]
+        return {ref: (-1005550001, "Старый источник") for ref in asked if ref == "@gone"}
+
+    async def rows(rule_id: int) -> dict[str, int]:
+        async with session_scope() as session:
+            counts = {}
+            for model in (ForwardLog, CollectedItem, PendingDelivery):
+                counts[model.__tablename__] = int(
+                    (
+                        await session.execute(
+                            select(func.count())
+                            .select_from(model)
+                            .where(model.rule_id == rule_id)
+                        )
+                    ).scalar_one()
+                )
+            return counts
+
+    async def make_parser() -> tuple[int, dict]:
+        """Парсер: у него на карточке видны и сбой, и число находок."""
+        with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
+            resolve_many=resolve_many
+        ):
+            status, body = await cab.post(
+                "/api/tasks",
+                json={
+                    "command": "parser",
+                    "account_id": account_id,
+                    "source": "@gone",
+                    "limit": 100,
+                },
+            )
+        task = (body or {}).get("task") or {}
+        return status, task
+
+    async def fill(rule_id: int) -> None:
+        """Задача поработала: сбой в журнале, находка и недосланное сообщение."""
+        async with session_scope() as session:
+            await repo.log_forward(
+                session,
+                rule_id=rule_id,
+                user_id=SMOKE_USER_ID,
+                source_msg_id=1,
+                target_msg_id=None,
+                status="error",
+                error="чат закрыт",
+            )
+            session.add(
+                CollectedItem(
+                    rule_id=rule_id,
+                    user_id=SMOKE_USER_ID,
+                    kind="parser",
+                    payload={"id": 7, "username": "gone"},
+                )
+            )
+            await repo.remember_pending_delivery(
+                session,
+                rule_id=rule_id,
+                user_id=SMOKE_USER_ID,
+                account_id=account_id,
+                source_chat_id=-1005550001,
+                message_id=900,
+            )
+
+    status, task = await make_parser()
+    doomed = int(task.get("id") or 0)
+    if not rep.check(
+        "парсер для проверки создан — 201",
+        status == 201 and bool(doomed),
+        f"статус {status}, {(task or {}).get('error') or ''}",
+    ):
+        return
+
+    await fill(doomed)
+    _, body = await cab.get(f"/api/tasks/{doomed}/results")
+    before = (await cab.get("/api/tasks"))[1] or {}
+    card = next(
+        (item for item in (before.get("tasks") or []) if item.get("id") == doomed), {}
+    )
+    rep.check(
+        "у задачи есть история: сбой и находка",
+        (card.get("health") or {}).get("failing") is True
+        and (card.get("progress") or {}).get("done") == 1
+        and (body or {}).get("total") == 1,
+        f"{card.get('health')}, найдено {(card.get('progress') or {}).get('done')}",
+    )
+
+    status, _ = await cab.delete(f"/api/tasks/{doomed}")
+    left = await rows(doomed)
+    rep.check(
+        "удаление унесло журнал, находки и очередь",
+        status == 200 and set(left.values()) == {0},
+        f"статус {status}, осталось {left}",
+    )
+
+    status, reborn_task = await make_parser()
+    reborn = int(reborn_task.get("id") or 0)
+    rep.check(
+        "номер удалённой задачи достался новой",
+        reborn == doomed,
+        f"было #{doomed}, стало #{reborn}",
+    )
+    rep.check(
+        "новая задача с тем же номером — с чистой карточкой",
+        reborn_task.get("health")
+        == {"ok_at": None, "error": None, "error_at": None, "failing": False}
+        and (reborn_task.get("progress") or {}).get("done") == 0,
+        f"{reborn_task.get('health')}, найдено "
+        f"{(reborn_task.get('progress') or {}).get('done')}",
+    )
+
+    # База после старого удаления: строки есть, задачи нет. Так выглядели все
+    # базы до этой правки — их лечит фоновый проход, а не ручные запросы.
+    await fill(reborn)
+    async with session_scope() as session:
+        rule = await repo.get_rule(session, reborn, SMOKE_USER_ID)
+        await session.delete(rule)
+    async with session_scope() as session:
+        dropped = await repo.drop_orphan_records(session)
+    rep.check(
+        "фоновый проход убирает следы задач, которых уже нет",
+        dropped == {"forward_logs": 1, "collected_items": 1, "pending_deliveries": 1},
+        f"{dropped}",
+    )
+    async with session_scope() as session:
+        rep.check(
+            "на чистой базе проход молчит",
+            await repo.drop_orphan_records(session) == {},
+            "проход нашёл лишнее",
+        )
+
+
 async def check_chats_and_accounts(cab: Cabinet, rep: Report, account_id: int) -> None:
     """Чаты и аккаунты: пустой список тут — честный ответ, а не поломка."""
     rep.section("Чаты и аккаунты")
@@ -2013,6 +2158,7 @@ async def run_all(rep: Report) -> None:
             await check_mailing_and_library(cab, rep, account_id)
             await check_task_edit(cab, rep, account_id)
             await check_task_health(cab, rep, account_id)
+            await check_task_cleanup(cab, rep, account_id)
             await check_chats_and_accounts(cab, rep, account_id)
             await check_account_login(cab, rep)
             await check_subscription(cab, rep, me)

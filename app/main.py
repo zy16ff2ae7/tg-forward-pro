@@ -57,17 +57,28 @@ async def notify_expiring(bot: Bot) -> None:
 
 
 async def trim_logs(_bot: Bot) -> None:
-    """Подрезает журнал пересылок: он растёт с каждой отправкой.
+    """Подрезает журнал пересылок и убирает строки удалённых задач.
 
     Раньше не чистился никем: рассылка по сотне чатов пишет по строке на каждую
     отправку, и за месяцы таблица становилась самой большой в базе, хотя нужна
     только для ответа «работает ли задача и на чём сломалась».
+
+    Заодно уходят находки и записи журнала задач, которых больше нет: SQLite
+    отдаёт номер удалённой задачи следующей созданной, и она получала вместе с
+    ним чужой сбой на карточке. Новые удаления чистят за собой сами, этот
+    проход лечит базы, где задачи удаляли раньше.
     """
     async with SessionLocal() as session:
         dropped = await repo.trim_forward_logs(session)
+        orphans = await repo.drop_orphan_records(session)
         await session.commit()
     if dropped:
         logger.info("Журнал пересылок: убрано старых записей — {}", dropped)
+    if orphans:
+        logger.info(
+            "Убраны следы удалённых задач: {}",
+            ", ".join(f"{table} — {count}" for table, count in orphans.items()),
+        )
 
 
 async def run_background_checks(bot: Bot) -> None:
@@ -82,7 +93,7 @@ async def run_background_checks(bot: Bot) -> None:
         ("USDT", crypto.check_pending),
         ("ЮKassa", yookassa.check_pending),
         ("напоминания о продлении", notify_expiring),
-        ("чистка журнала", trim_logs),
+        ("уборка базы", trim_logs),
     )
     for name, check in checks:
         try:
@@ -96,7 +107,7 @@ async def run_background_checks(bot: Bot) -> None:
 
 
 async def background_loop(bot: Bot) -> None:
-    """Фоновые дела: оплата USDT и картой, напоминания о продлении, чистка журнала.
+    """Фоновые дела: оплата USDT и картой, напоминания о продлении, уборка базы.
 
     Первый проход — сразу, без ожидания: пока сервис перезапускался, перевод
     мог уже прийти, и заставлять человека ждать пять минут не за что.
