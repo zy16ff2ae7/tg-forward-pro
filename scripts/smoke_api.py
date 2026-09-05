@@ -899,6 +899,104 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
             f"статус {status}, {saved}",
         )
 
+        # Библиотека говорит, кто её рассылает, и правится на месте. Раньше
+        # запись умели только добавить и удалить: опечатку исправляли «удалить и
+        # добавить заново», у новой записи новый id — задача помнила старый и
+        # молча оставалась без сообщения.
+        status, body = await cab.get("/api/tasks")
+        card = next(
+            (t for t in (body or {}).get("tasks") or [] if t.get("id") == mailing_id), {}
+        )
+        title = str(card.get("title") or "")
+        status, body = await cab.get("/api/library")
+        row = next(
+            (
+                item
+                for item in (body or {}).get("items") or []
+                if item.get("text") == "снова с нуля"
+            ),
+            {},
+        )
+        rep.check(
+            "список называет задачу, которая рассылает запись",
+            bool(title) and row.get("used_by") == [title],
+            f"{row.get('used_by')} против {title!r}",
+        )
+        row_id = int(row.get("id") or 0)
+        status, body = await cab.patch(f"/api/library/{row_id}", json={"text": "  "})
+        rep.check(
+            "пустой текст — это удаление записи, а не правка",
+            status == 400 and "удалите" in str((body or {}).get("error")),
+            f"статус {status}, {(body or {}).get('error')}",
+        )
+        status, body = await cab.patch(
+            f"/api/library/{row_id}", json={"text": "исправленный текст"}
+        )
+        fixed = (body or {}).get("item") or {}
+        rep.check(
+            "правка на месте: id тот же, текст и имя новые",
+            status == 200
+            and fixed.get("id") == row_id
+            and fixed.get("text") == "исправленный текст"
+            and fixed.get("title") == "исправленный текст",
+            f"статус {status}, {fixed}",
+        )
+        status, body = await cab.get("/api/tasks")
+        card = next(
+            (t for t in (body or {}).get("tasks") or [] if t.get("id") == mailing_id), {}
+        )
+        rep.check(
+            "рассылка сразу шлёт исправленное, настройки не тронуты",
+            (card.get("edit") or {}).get("message") == "исправленный текст"
+            and (card.get("mailing") or {}).get("messages_count") == 1,
+            f"{(card.get('edit') or {}).get('message')!r}",
+        )
+        status, body = await cab.patch(
+            f"/api/library/{row_id}", json={"title": "Осеннее объявление"}
+        )
+        renamed = (body or {}).get("item") or {}
+        rep.check(
+            "переименование текст не трогает",
+            status == 200
+            and renamed.get("title") == "Осеннее объявление"
+            and renamed.get("text") == "исправленный текст",
+            f"статус {status}, {renamed}",
+        )
+        status, body = await cab.patch(
+            f"/api/library/{row_id}", json={"text": "текст поменяли ещё раз"}
+        )
+        rep.check(
+            "имя, заданное руками, правку текста переживает",
+            status == 200
+            and ((body or {}).get("item") or {}).get("title") == "Осеннее объявление",
+            f"{(body or {}).get('item')}",
+        )
+
+        # Готовый пост правят в канале, где он лежит: своего текста у записи нет.
+        status, body = await cab.post(
+            "/api/library", json={"chat_id": -1001, "message_id": 77}
+        )
+        post_id = int(((body or {}).get("item") or {}).get("id") or 0)
+        rep.check("сохранённый пост добавлен — 201", status == 201 and bool(post_id), f"статус {status}")
+        status, body = await cab.patch(f"/api/library/{post_id}", json={"text": "подмена"})
+        rep.check(
+            "готовый пост текстом не подменить",
+            status == 400 and "пост" in str((body or {}).get("error")),
+            f"статус {status}, {(body or {}).get('error')}",
+        )
+        status, body = await cab.patch(
+            f"/api/library/{post_id}", json={"title": "Пост про скидки"}
+        )
+        rep.check(
+            "а имя у поста своё — правится",
+            status == 200
+            and ((body or {}).get("item") or {}).get("title") == "Пост про скидки",
+            f"статус {status}",
+        )
+        await cab.delete(f"/api/library/{post_id}")
+        status, _ = await cab.patch(f"/api/library/{post_id}", json={"title": "нет такой"})
+        rep.check("правка удалённой записи — 404", status == 404, f"статус {status}")
+
         status, body = await cab.post(
             "/api/tasks",
             json={

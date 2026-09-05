@@ -51,6 +51,9 @@ const state = {
   picker: { mode: 'chats', key: null, multi: false, chosen: [], chats: [] },
   library: [],             // сохранённые сообщения (/api/library)
   libraryPick: [],         // id сообщений, выбранных в форме рассылки
+  // Запись библиотеки, которую правят прямо сейчас: {id, post}. Правка идёт тем
+  // же полем, что и добавление, поэтому подписи и кнопка смотрят сюда.
+  libraryEdit: null,
   features: {
     account_login_enabled: true,
     account_login_status: 'ready',
@@ -272,8 +275,30 @@ const DEMO_STATE = {
       },
       edit: { account_id: 1, names: {}, source: 'Конкуренты', limit: 1000 },
       created_at: '2026-08-25T11:00:00' },
+    // Рассылка своих сообщений: единственная задача, которая берёт тексты из
+    // библиотеки. Без неё в демо не видно ни счёта сообщений на карточке, ни
+    // строки «рассылают» в библиотеке — а именно из-за неё удаление записи там
+    // и опасно. library_ids — то же, что filters.library_ids у правила.
+    { id: 5, title: 'Рассылка по очереди: 2 чата', kind: 'mailing', kind_label: 'рассылка по очереди',
+      source: 'рассылка по очереди', target: 'Команда (чат)', archived: false, oneshot: false,
+      enabled: true, mode: 'copy', delay: 0, forwarded: 4, account_id: 1,
+      progress: { done: 4, total: 2 * 3 },
+      health: { ok_at: demoAgo(9), error: null, error_at: null, failing: false },
+      library_ids: [1],
+      targets_count: 2,
+      chats: [{ id: '1006', title: 'Команда (чат)' }, { id: '1005', title: 'Подборки' }],
+      mailing: {
+        recipients: 2, messages_count: 1, whole_library: false, messages_gone: 0,
+        gap_seconds: 8, cycle_seconds: 60, repeats: 3, typing: true, random_pick: false,
+      },
+      edit: {
+        account_id: 1, names: { 1006: 'Команда (чат)', 1005: 'Подборки' },
+        targets: ['1006', '1005'], message: 'Напоминаем: показ сегодня в 19:00.',
+        library_ids: [], gap: 8, cycle: 60, repeats: 3, typing: true, random_pick: false,
+      },
+      created_at: '2026-08-29T14:15:00' },
   ],
-  nextId: 5,
+  nextId: 6,
 };
 
 /* Метки времени в демо считаем от «сейчас»: зашитая дата через месяц показала бы
@@ -478,6 +503,41 @@ const DEMO_LIBRARY = {
   ],
 };
 
+/* Кто рассылает записи библиотеки — тем же правилом, что _library_usage на
+   сервере: считаем только живые задачи-рассылки (архивная не работает, и пугать
+   ею при удалении незачем), а рассылка с пустым списком записей держит всю
+   библиотеку целиком, включая запись, которую добавят следующей. */
+function demoLibraryUsage() {
+  const used = new Map();
+  const whole = [];
+  DEMO_STATE.tasks.forEach((task) => {
+    if (task.kind !== 'mailing' || task.archived) return;
+    const ids = (task.library_ids || []).map(Number).filter(Boolean);
+    if (!ids.length) {
+      whole.push(task.title);
+      return;
+    }
+    ids.forEach((id) => {
+      if (!used.has(id)) used.set(id, []);
+      used.get(id).push(task.title);
+    });
+  });
+  return { used, whole };
+}
+
+function demoLibraryItems() {
+  const { used, whole } = demoLibraryUsage();
+  return DEMO_LIBRARY.items.map((item) => ({
+    ...item,
+    used_by: [...(used.get(item.id) || []), ...whole],
+  }));
+}
+
+function demoLibraryItem(item) {
+  const { used, whole } = demoLibraryUsage();
+  return { ...item, used_by: [...(used.get(item.id) || []), ...whole] };
+}
+
 function demoLibrary(clean, options, method) {
   if (method === 'POST') {
     const body = JSON.parse(options.body || '{}');
@@ -492,7 +552,28 @@ function demoLibrary(clean, options, method) {
       created_at: new Date().toISOString(),
     };
     DEMO_LIBRARY.items.unshift(item);
-    return { item };
+    return { item: demoLibraryItem(item) };
+  }
+  // Правка записи на месте: id остаётся, и исправленный текст сразу уходит из
+  // всех задач, где запись выбрана. Отказы те же, что у сервера, — иначе демо
+  // обещало бы то, чего кабинет с сервером не делает.
+  if (method === 'PATCH') {
+    const body = JSON.parse(options.body || '{}');
+    const id = Number(clean.split('/')[3]);
+    const item = DEMO_LIBRARY.items.find((row) => row.id === id);
+    if (!item) demoFail(404, 'Сообщение не найдено');
+    const post = Boolean(Number(item.chat_id || 0) && Number(item.message_id || 0));
+    if ('text' in body) {
+      const text = String(body.text || '').trim();
+      if (!text) demoFail(400, 'Текст пустой: чтобы убрать сообщение, удалите запись');
+      if (post) demoFail(400, 'Это готовый пост: его правят в канале, где он лежит');
+      // Имя, собранное из текста, идёт за текстом; заданное руками — остаётся.
+      const followsText = String(item.title || '') === messageTitle(item.text || '');
+      item.text = text;
+      if (followsText && !('title' in body)) item.title = messageTitle(text);
+    }
+    if ('title' in body) item.title = messageTitle(body.title, 128);
+    return { item: demoLibraryItem(item) };
   }
   if (method === 'DELETE') {
     const id = Number(clean.split('/')[3]);
@@ -501,19 +582,44 @@ function demoLibrary(clean, options, method) {
     DEMO_LIBRARY.items.splice(idx, 1);
     return { ok: true };
   }
-  return { items: DEMO_LIBRARY.items };
+  return { items: demoLibraryItems() };
+}
+
+
+/* Карточка рассылки читает библиотеку заново на каждом показе — как _task_view с
+   _edit_view на сервере. Задача держит только ссылки, а текст и счёт живых
+   записей лежат в библиотеке: без этого правка текста до карточки не доходила
+   бы, и в демо она выглядела бы бесполезной. */
+function demoMailingRefresh(task) {
+  if (task.kind !== 'mailing') return task;
+  const ids = (task.library_ids || []).map(Number).filter(Boolean);
+  const items = ids
+    .map((id) => DEMO_LIBRARY.items.find((row) => row.id === id))
+    .filter(Boolean);
+  const info = task.mailing || (task.mailing = {});
+  info.messages_count = items.length;
+  // Пустой список ссылок планировщик читает как «вся библиотека», а пропавшие
+  // записи — это «рассылать нечего»: два разных случая, и путать их нельзя.
+  info.whole_library = !ids.length;
+  info.messages_gone = ids.length - items.length;
+  const edit = task.edit || (task.edit = {});
+  edit.message = items.map(libraryText).filter(Boolean).join('\n\n');
+  edit.library_ids = items.filter((item) => !libraryText(item)).map((item) => item.id);
+  return task;
 }
 
 function demoTasks(path) {
   const status = new URLSearchParams(path.split('?')[1] || '').get('status') || 'active';
+  const pick = (filter) => DEMO_STATE.tasks.filter(filter).map(demoMailingRefresh);
   if (status === 'active') {
-    return { tasks: DEMO_STATE.tasks.filter((t) => t.enabled && !t.archived) };
+    return { tasks: pick((t) => t.enabled && !t.archived) };
   }
   if (status === 'paused') {
-    return { tasks: DEMO_STATE.tasks.filter((t) => !t.enabled && !t.archived) };
+    return { tasks: pick((t) => !t.enabled && !t.archived) };
   }
-  return { tasks: DEMO_STATE.tasks.filter((t) => t.archived) };
+  return { tasks: pick((t) => t.archived) };
 }
+
 
 const DEMO_RESULTS = {
   4: {
@@ -632,6 +738,9 @@ function demoTaskFill(task, body, command) {
   }
   if (kind === 'mailing') {
     const repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
+    // Ссылки на записи библиотеки держит сама задача (на сервере это
+    // filters.library_ids). По ним библиотека и говорит, кто её рассылает.
+    task.library_ids = libraryIds.slice();
     // Живые записи считаем отдельно от ссылок: сообщение могли удалить из
     // библиотеки, и на карточке нужен честный счёт (на сервере — _task_view).
     const alive = libraryIds.filter((id) => DEMO_LIBRARY.items.some((item) => item.id === id));
@@ -2010,6 +2119,20 @@ function libraryLines(item, max = 90) {
   return sameThing ? { head: preview, sub: '' } : { head: title, sub: preview };
 }
 
+/* Кто рассылает запись — строкой в её карточке. Библиотека одна на все задачи,
+   поэтому правка и удаление здесь меняют то, что уходит из работающей рассылки:
+   без этой строки удаление читалось как безобидная уборка. */
+function libraryUsers(item) {
+  return (item.used_by || []).filter(Boolean);
+}
+
+function libraryUseLine(item) {
+  const users = libraryUsers(item);
+  if (!users.length) return '';
+  const word = users.length === 1 ? 'задача' : 'задачи';
+  return `<div class="lib__use" title="${esc(users.join(', '))}">📨 рассылают: ${users.length} ${word}</div>`;
+}
+
 function renderLibrary() {
   const holder = $('libraryList');
   const label = $('libraryLabel');
@@ -2028,14 +2151,20 @@ function renderLibrary() {
   }
   holder.innerHTML = state.library.map((item) => {
     const { head, sub } = libraryLines(item);
+    const editing = state.libraryEdit && Number(state.libraryEdit.id) === Number(item.id);
     return `
-    <div class="lib">
+    <div class="lib${editing ? ' is-editing' : ''}">
       <div class="lib__body">
         <div class="lib__title">${esc(head)}</div>
         ${sub ? `<div class="lib__text">${esc(sub)}</div>` : ''}
+        ${libraryUseLine(item)}
       </div>
-      <button class="lib__del" data-action="delete-library" data-id="${item.id}"
-              aria-label="Удалить сообщение" title="Удалить из библиотеки">🗑</button>
+      <div class="lib__acts">
+        <button class="lib__del" data-action="edit-library" data-id="${item.id}"
+                aria-label="Исправить сообщение" title="Исправить на месте">✏️</button>
+        <button class="lib__del" data-action="delete-library" data-id="${item.id}"
+                aria-label="Удалить сообщение" title="Удалить из библиотеки">🗑</button>
+      </div>
     </div>`;
   }).join('');
 }
@@ -2074,7 +2203,9 @@ async function addLibraryItems(button) {
 function renderLibraryDraft() {
   const holder = $('libraryDraft');
   if (!holder) return;
-  const blocks = splitMessages(($('libraryText') || {}).value);
+  // В правке запись одна, и пустая строка внутри исправленного текста её не
+  // делит: счёт «столько записей появится» здесь только сбивал бы с толку.
+  const blocks = state.libraryEdit ? [] : splitMessages(($('libraryText') || {}).value);
   holder.hidden = !blocks.length;
   if (!blocks.length) {
     holder.innerHTML = '';
@@ -2086,14 +2217,113 @@ function renderLibraryDraft() {
     <span>${esc(heads.join(' · ') + tail)}</span>`;
 }
 
+/* Правка записи идёт тем же полем, что и добавление: запись меняется на месте,
+   id остаётся, и исправленный текст сразу уходит из всех задач, где эта запись
+   выбрана. Раньше опечатку исправляли «удалить и добавить заново»: у новой
+   записи новый id, задача помнила старый и молча оставалась без сообщения. */
+function startLibraryEdit(id) {
+  const item = state.library.find((row) => Number(row.id) === Number(id));
+  if (!item) return;
+  // У готового поста своего текста нет — он лежит в канале, и править здесь
+  // можно только имя, по которому его узнают в списке.
+  const post = !libraryText(item);
+  state.libraryEdit = { id: Number(item.id), post };
+  const field = $('libraryText');
+  field.value = post ? item.title || '' : item.text || '';
+  applyLibraryMode();
+  renderLibrary();
+  field.focus();
+  field.scrollIntoView({ block: 'center' });
+}
+
+function cancelLibraryEdit() {
+  state.libraryEdit = null;
+  $('libraryText').value = '';
+  applyLibraryMode();
+  renderLibrary();
+}
+
+/* Подписи поля и кнопок под то, что ими сейчас делают: добавляют или правят.
+   Одно поле на два дела без подписей читалось бы как «добавить ещё одну». */
+function applyLibraryMode() {
+  const edit = state.libraryEdit;
+  const label = $('libraryFieldLabel');
+  const note = $('libraryNote');
+  const add = $('libraryAdd');
+  const cancel = $('libraryCancel');
+  if (label) {
+    label.textContent = edit
+      ? (edit.post ? 'Имя готового поста' : 'Правим сообщение')
+      : 'Новое сообщение';
+  }
+  if (note) {
+    note.textContent = edit
+      ? (edit.post
+        ? 'сам пост правят в канале, где он лежит'
+        : 'запись меняется на месте: текст поменяется во всех задачах, где она выбрана')
+      : 'пустая строка делит сообщения, простой перенос — нет';
+  }
+  if (add) add.textContent = edit ? '💾 Сохранить правку' : '＋ Сохранить в библиотеку';
+  if (cancel) cancel.hidden = !edit;
+  renderLibraryDraft();
+}
+
+/* Кнопка под полем: в правке сохраняет запись, иначе добавляет новые. */
+function submitLibraryField(button) {
+  return state.libraryEdit ? saveLibraryEdit(button) : addLibraryItems(button);
+}
+
+async function saveLibraryEdit(button) {
+  const edit = state.libraryEdit;
+  const field = $('libraryText');
+  const value = field.value.trim();
+  if (!value) {
+    // Пустое поле — это удаление записи, а не правка: так и говорим, а стирать
+    // текст у работающей рассылки молча не станем.
+    toast(edit.post ? 'Дайте посту имя' : 'Текст пустой: чтобы убрать сообщение, удалите запись');
+    field.focus();
+    return;
+  }
+  try {
+    const data = await withLoading(button, () => api(`/api/library/${edit.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(edit.post ? { title: value } : { text: value }),
+    }));
+    const users = ((data.item || {}).used_by || []).length;
+    state.libraryEdit = null;
+    field.value = '';
+    applyLibraryMode();
+    toast(users ? `Исправлено — уйдёт в задачах: ${users}` : 'Сообщение исправлено');
+    await loadLibrary();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 async function deleteLibraryItem(id, button) {
-  const agreed = await confirmAction('Убрать сообщение из библиотеки? Задачи не остановятся — рассылка возьмёт то, что осталось.');
+  const item = state.library.find((row) => Number(row.id) === Number(id));
+  const users = item ? libraryUsers(item) : [];
+  // Называем последствие: если запись держит рассылка, после удаления ей может
+  // стать нечего отправлять. Обещать «задачи не остановятся» в этом случае —
+  // неправда: задача останется в работе, но с пустой очередью.
+  const shown = users.slice(0, 2).join(', ');
+  const tail = users.length > 2 ? ` и ещё ${users.length - 2}` : '';
+  const agreed = await confirmAction(
+    users.length
+      ? `Убрать сообщение из библиотеки? Его рассылают: ${shown}${tail}. Останутся без него — если других сообщений в задаче нет, рассылать будет нечего.`
+      : 'Убрать сообщение из библиотеки? Задачи не остановятся — рассылка возьмёт то, что осталось.'
+  );
   if (!agreed) return;
   try {
     await withLoading(button, () => api(`/api/library/${id}`, { method: 'DELETE' }));
     // Выбор в открытой форме тоже чистим: id больше не существует.
-    state.libraryPick = state.libraryPick.filter((item) => String(item) !== String(id));
+    state.libraryPick = state.libraryPick.filter((row) => String(row) !== String(id));
     renderLibraryPicks();
+    if (state.libraryEdit && Number(state.libraryEdit.id) === Number(id)) {
+      state.libraryEdit = null;
+      $('libraryText').value = '';
+      applyLibraryMode();
+    }
     await loadLibrary();
   } catch (error) {
     toast(error.message);
@@ -3805,14 +4035,16 @@ function bindEvents() {
   });
 
   // библиотека сообщений
-  $('libraryAdd').addEventListener('click', (event) => addLibraryItems(event.currentTarget));
+  $('libraryAdd').addEventListener('click', (event) => submitLibraryField(event.currentTarget));
+  $('libraryCancel').addEventListener('click', cancelLibraryEdit);
   // Счёт под полем библиотеки живой: правило «делит пустая строка» видно сразу,
   // а не после сохранения десятка лишних записей.
   $('libraryText').addEventListener('input', renderLibraryDraft);
   $('libraryList').addEventListener('click', (event) => {
-    const button = event.target.closest('[data-action="delete-library"]');
+    const button = event.target.closest('[data-action="delete-library"], [data-action="edit-library"]');
     if (!button) return;
-    deleteLibraryItem(button.dataset.id, button);
+    if (button.dataset.action === 'edit-library') startLibraryEdit(button.dataset.id);
+    else deleteLibraryItem(button.dataset.id, button);
   });
 
   // «Повторить» в состоянии ошибки. Один delegated-слушатель на весь документ:

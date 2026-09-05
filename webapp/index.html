@@ -229,13 +229,19 @@
 
       <div class="card">
         <label class="field">
-          <span>Новое сообщение</span>
+          <span id="libraryFieldLabel">Новое сообщение</span>
           <textarea id="libraryText" rows="3"
                     placeholder="Текст сообщения — переносы строк сохраняются.&#10;&#10;Пустая строка = второе сообщение."></textarea>
           <div class="field__count" id="libraryDraft" hidden></div>
-          <i class="field__note">пустая строка делит сообщения, простой перенос — нет</i>
+          <i class="field__note" id="libraryNote">пустая строка делит сообщения, простой перенос — нет</i>
         </label>
         <button class="btn btn--primary btn--block" id="libraryAdd">＋ Сохранить в библиотеку</button>
+        <!-- Правка записи идёт этим же полем: запись меняется на месте, id
+             остаётся, и исправленный текст сразу уходит из всех задач, где эта
+             запись выбрана. Раньше опечатку правили «удалить и добавить
+             заново» — у новой записи новый id, и рассылка оставалась без
+             сообщения. -->
+        <button class="btn btn--block lib__cancel" id="libraryCancel" hidden>Отмена</button>
       </div>
 
       <div class="section-label" id="libraryLabel">сохранённые</div>

@@ -299,5 +299,130 @@ async def test_form_values_return_unchanged(
     assert saved["title"] == task["title"]
 
 
+# ───────────────────── каждое поле создания правится ──────────────────────────
 
+# Форма правки обязана показывать ВСЕ поля создания и принимать по ним новое
+# значение. Поле, которого в правке нет, поменять нельзя вообще никак — задачу
+# приходится создавать заново, теряя счётчики и место в круге. Ровно так и было
+# с текстом рассылки: форма его не отдавала, а набранный в ней текст пропадал.
+# Таблица: чем создаём (все поля, включая необязательные) и чем это меняем.
+FULL_FORM: list[tuple[str, dict, dict]] = [
+    (
+        "copy_channel",
+        {"source": "@ch-1", "target": "@ch-2", "mode": "copy"},
+        {"source": "@ch-5", "target": "@ch-6", "mode": "forward"},
+    ),
+    (
+        "broadcast",
+        {"source": "@ch-1", "targets": ["@ch-2", "@ch-3"]},
+        {"source": "@ch-5", "targets": ["@ch-6"]},
+    ),
+    ("parser", {"source": "@ch-1", "limit": 50}, {"source": "@ch-5", "limit": 700}),
+    (
+        "autosubscribe",
+        {"targets": ["@ch-1", "@ch-2"], "source": "@ch-3"},
+        {"targets": ["@ch-6"], "source": "@ch-5"},
+    ),
+    (
+        "checks",
+        {"source": "@ch-1", "target": "@ch-2", "keywords": "чек, подарок"},
+        {"source": "@ch-5", "target": "@ch-6", "keywords": "перевод"},
+    ),
+    (
+        "dialogs",
+        {"target": "@ch-2", "keywords": "оплата"},
+        {"target": "@ch-6", "keywords": "заказ, счёт"},
+    ),
+    (
+        "baiting",
+        {"source": "@ch-1", "target_user": "@ch-4", "reaction": "🔥"},
+        {"source": "@ch-5", "target_user": "@ch-7", "reaction": "👍"},
+    ),
+    (
+        "mute",
+        {"source": "@ch-1", "target_user": "@ch-4", "keywords": "реклама"},
+        {"source": "@ch-5", "target_user": "@ch-7", "keywords": "спам, ставки"},
+    ),
+    (
+        "poster",
+        {"targets": ["@ch-1"], "message": "прайс", "interval": 9,
+         "start": "08:00", "end": "22:30"},
+        {"targets": ["@ch-6"], "message": "новый прайс\n\nвторое", "interval": 15,
+         "start": "10:00", "end": "20:00"},
+    ),
+    (
+        "mailing",
+        {"targets": ["@ch-1", "@ch-2"], "message": "текст", "gap": 7, "cycle": 30,
+         "repeats": 3, "typing": True, "random_pick": True},
+        {"targets": ["@ch-6"], "message": "другой текст", "gap": 11, "cycle": 40,
+         "repeats": 0, "typing": False, "random_pick": False},
+    ),
+]
+
+FULL_IDS = [item[0] for item in FULL_FORM]
+
+
+def _chat_id(ref: str) -> str:
+    """Числовой id ссылки — тем же правилом, каким её «находит» заглушка."""
+    return str(-9000 - int(ref.split("-")[-1]))
+
+
+def _expected(command: str, key: str, value):
+    """Чем поле станет в форме правки после сохранения.
+
+    Ссылки задача запоминает числовым id — кроме автоподписки: в её списке
+    остаются сами ссылки, ведь канала ещё нет в диалогах аккаунта.
+    """
+    if key == "targets":
+        return list(value) if command == "autosubscribe" else [_chat_id(ref) for ref in value]
+    if key in ("source", "target", "target_user"):
+        return _chat_id(value)
+    if key == "keywords":
+        return ", ".join(part.strip() for part in value.split(","))
+    return value
+
+
+@pytest.mark.parametrize("command,fields,changes", FULL_FORM, ids=FULL_IDS)
+async def test_edit_form_shows_every_creation_field(
+    client, auth_headers, create_account, login_open, many_chats_resolved, one_shot_stubbed,
+    command, fields, changes,
+):
+    """Все поля, которые спрашивает создание, видны в форме правки."""
+    from app.webapp_api import COMMANDS_BY_ID
+
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    task = await make_task(client, auth_headers, account_id, command=command, **fields)
+
+    spec = COMMANDS_BY_ID[command]
+    # «account» в форме правки называется account_id: аккаунт задачи не меняется,
+    # но показать, на каком она работает, всё равно надо.
+    wanted = {*spec["needs"], *spec["optional"], "account_id"} - {"account"}
+    assert wanted <= set(task["edit"]), f"в форме правки нет полей: {wanted - set(task['edit'])}"
+    # И это те самые значения, с которыми задачу создали, а не умолчания.
+    for key, value in fields.items():
+        assert task["edit"][key] == _expected(command, key, value), key
+
+
+@pytest.mark.parametrize("command,fields,changes", FULL_FORM, ids=FULL_IDS)
+async def test_every_field_takes_a_new_value(
+    client, auth_headers, create_account, login_open, many_chats_resolved, one_shot_stubbed,
+    command, fields, changes,
+):
+    """Новое значение доходит до задачи по каждому полю формы.
+
+    Кабинет присылает форму целиком, поэтому проверяем именно так: берём форму
+    правки, меняем в ней всё сразу и смотрим, что задача стала другой по всем
+    полям — а не по тем, которые сервер догадался прочитать.
+    """
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    task = await make_task(client, auth_headers, account_id, command=command, **fields)
+
+    response = await patch_task(client, auth_headers, task["id"], **{**task["edit"], **changes})
+
+    assert response.status == 200, await response.text()
+    edit = (await response.json())["task"]["edit"]
+    for key, value in changes.items():
+        assert edit[key] == _expected(command, key, value), key
 

@@ -11,6 +11,7 @@ import hmac
 import json
 import re
 import time
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import parse_qsl
@@ -1185,8 +1186,14 @@ def _message_title(text: str, limit: int = 48) -> str:
     return head[:limit] + ("…" if len(head) > limit else "")
 
 
-def _library_view(item) -> dict:
-    """Сохранённое сообщение → вид для кабинета."""
+def _library_view(item, used_by: Sequence[str] = ()) -> dict:
+    """Сохранённое сообщение → вид для кабинета.
+
+    ``used_by`` — названия задач, которые эту запись рассылают. Библиотека одна
+    на все задачи, поэтому «убрать текст» здесь — это правка работающей
+    рассылки: пока список этого не показывал, удаление выглядело безобидной
+    уборкой, а задача оставалась без сообщений.
+    """
     text = (item.text or "").strip()
     return {
         "id": item.id,
@@ -1195,7 +1202,32 @@ def _library_view(item) -> dict:
         "chat_id": int(item.chat_id or 0),
         "message_id": int(item.message_id or 0),
         "created_at": item.created_at.isoformat() if item.created_at else None,
+        "used_by": list(used_by),
     }
+
+
+async def _library_usage(session, user_id: int) -> tuple[dict[int, list[str]], list[str]]:
+    """Кто рассылает записи библиотеки: (id записи → названия задач, «вся библиотека»).
+
+    Архивные задачи не считаем: они не работают, и пугать ими при удалении
+    незачем. Рассылка без выбранных записей берёт всю библиотеку — такие задачи
+    идут вторым списком: они держат каждую запись, в том числе ту, которую
+    добавят завтра.
+    """
+    from app.telegram_client.jobs import task_title
+
+    used: dict[int, list[str]] = {}
+    whole: list[str] = []
+    for rule in await repo.list_rules(session, user_id, include_archived=False):
+        if (rule.kind or "forward") != "mailing":
+            continue
+        ids = _as_ids((rule.filters or {}).get("library_ids"))
+        if not ids:
+            whole.append(task_title(rule))
+            continue
+        for item_id in ids:
+            used.setdefault(item_id, []).append(task_title(rule))
+    return used, whole
 
 
 @routes.get("/api/library")
@@ -1206,8 +1238,12 @@ async def list_library(request: web.Request) -> web.Response:
 
     async with SessionLocal() as session:
         items = list(await repo.list_saved_messages(session, user_id))
+        used, whole = await _library_usage(session, user_id)
 
-    return _json({"items": [_library_view(item) for item in items]})
+    return _json(
+        {"items": [_library_view(item, [*used.get(item.id, []), *whole]) for item in items]}
+    )
+
 
 
 @routes.post("/api/library")
@@ -1239,16 +1275,81 @@ async def add_library_item(request: web.Request) -> web.Response:
             message_id=message_id,
         )
         await session.commit()
-        view = _library_view(item)
+        # Рассылка без выбранных записей берёт всю библиотеку: новая запись уже
+        # стоит в её очереди, и человек должен видеть это сразу, а не по факту
+        # отправки.
+        _, whole = await _library_usage(session, user_id)
+        view = _library_view(item, whole)
 
     return _json({"item": view}, status=201)
+
+
+@routes.patch("/api/library/{item_id}")
+@require_auth
+async def update_library_item(request: web.Request) -> web.Response:
+    """Правит сохранённое сообщение на месте: текст и название.
+
+    Опечатку в тексте раньше можно было исправить только «удалить и добавить
+    заново». Новая запись — это новый id, а рассылки помнят старый: задача молча
+    оставалась без сообщения. Правка на месте id сохраняет, поэтому исправленный
+    текст сразу уходит из всех задач, где эта запись выбрана, — очередь
+    планировщик читает из библиотеки на каждом проходе.
+    """
+    user_id = request[USER_ID_KEY]
+    item_id = _as_int(request.match_info.get("item_id"), 0)
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return _json({"error": "Нужен JSON"}, status=400)
+    if not isinstance(payload, dict):
+        return _json({"error": "Нужен JSON-объект"}, status=400)
+
+    async with SessionLocal() as session:
+        item = await repo.get_saved_message(session, item_id, user_id)
+        if item is None:
+            return _json({"error": "Сообщение не найдено"}, status=404)
+
+        post = bool(int(item.chat_id or 0) and int(item.message_id or 0))
+        if "text" in payload:
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                # Пустой текст — это удаление записи, а не правка: так и говорим.
+                # Молча стереть его нельзя, рассылке было бы нечего отправлять.
+                return _json(
+                    {"error": "Текст пустой: чтобы убрать сообщение, удалите запись"},
+                    status=400,
+                )
+            if post:
+                # У готового поста своего текста нет — уходит сам пост из канала.
+                # Подменив его текстом, мы бы тихо превратили запись в другую.
+                return _json(
+                    {"error": "Это готовый пост: его правят в канале, где он лежит"},
+                    status=400,
+                )
+            # Название, собранное из прежнего текста, идёт за текстом: иначе в
+            # списке осталась бы старая первая строка при новом тексте. Своё имя,
+            # которое человек задал руками, не трогаем.
+            follows_text = (item.title or "") == _message_title(item.text or "")
+            item.text = text
+            if follows_text and "title" not in payload:
+                # Тем же вызовом, каким имя собирали при создании записи: с другой
+                # длиной оно перестало бы совпадать с текстом и замерло навсегда.
+                item.title = _message_title(text)
+        if "title" in payload:
+            item.title = _message_title(payload.get("title"), 128)
+        await session.commit()
+        used, whole = await _library_usage(session, user_id)
+        view = _library_view(item, [*used.get(item.id, []), *whole])
+
+    return _json({"item": view})
 
 
 @routes.delete("/api/library/{item_id}")
 @require_auth
 async def delete_library_item(request: web.Request) -> web.Response:
     """Убирает сообщение из библиотеки. Задачи при этом не падают: рассылка
-    просто берёт то, что осталось."""
+    просто берёт то, что осталось, а если не осталось ничего — пишет об этом на
+    карточке («рассылать нечего») вместо бодрого «работает»."""
     user_id = request[USER_ID_KEY]
     item_id = int(request.match_info["item_id"])
 
