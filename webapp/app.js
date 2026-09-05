@@ -468,8 +468,11 @@ function demoChats(path) {
 
 /* Библиотека сообщений в демо: живёт в памяти страницы, как и задачи. */
 const DEMO_LIBRARY = {
-  nextId: 3,
+  nextId: 4,
   items: [
+    // Запись без текста — сохранённый пост: его не набрать руками, поэтому в
+    // форме рассылки он стоит чипсом, а не текстом в поле.
+    { id: 3, title: 'Готовый пост из канала', text: '', chat_id: -1002001, message_id: 314, created_at: '2026-09-04T11:00:00' },
     { id: 2, title: 'Приглашение на спектакль', text: 'Приглашаем на премьеру! Билеты по ссылке в описании.', chat_id: 0, message_id: 0, created_at: '2026-09-03T18:10:00' },
     { id: 1, title: 'Короткое напоминание', text: 'Напоминаем: показ сегодня в 19:00.', chat_id: 0, message_id: 0, created_at: '2026-09-02T09:30:00' },
   ],
@@ -566,12 +569,21 @@ function demoChatName(ref) {
 
 /* Тексты рассылки в демо живут там же, где на сервере: в библиотеке. Набранный
    текст становится её записями, а задача держит ссылки на них — поэтому правка
-   тем же текстом не плодит копий (на сервере это делает _mailing_texts). */
+   тем же текстом не плодит копий (на сервере это делает _mailing_texts).
+   Готовые посты (записи без текста) руками не набрать: они приходят списком id и
+   остаются при задаче, даже когда текст поменяли. */
 function demoMailingTexts(body) {
-  const picked = (body.library_ids || []).map(Number).filter(Boolean);
-  if (picked.length) return picked;
-  return splitMessages(body.message).map((text) => {
-    const found = DEMO_LIBRARY.items.find((item) => item.text === text);
+  const picked = (body.library_ids || []).map(Number).filter(Boolean)
+    .filter((id) => DEMO_LIBRARY.items.some((item) => item.id === id));
+  const msgs = splitMessages(body.message);
+  // Текста нет — уйдут выбранные записи. Пусто = вся библиотека.
+  if (!msgs.length) return picked;
+  const posts = picked.filter((id) => {
+    const item = DEMO_LIBRARY.items.find((row) => row.id === id);
+    return item && !libraryText(item);
+  });
+  const texts = msgs.map((text) => {
+    const found = DEMO_LIBRARY.items.find((item) => libraryText(item) === text);
     if (found) return found.id;
     const item = {
       id: DEMO_LIBRARY.nextId++,
@@ -584,6 +596,7 @@ function demoMailingTexts(body) {
     DEMO_LIBRARY.items.unshift(item);
     return item.id;
   });
+  return texts.concat(posts);
 }
 
 /* Тело запроса → поля задачи. Одна функция и на создание, и на правку: демо
@@ -621,7 +634,10 @@ function demoTaskFill(task, body, command) {
     const repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
     task.mailing = {
       recipients: chats.length,
-      messages_count: libraryIds.length || msgs,
+      messages_count: libraryIds.length,
+      // Пустой список записей планировщик читает как «вся библиотека», и
+      // карточка обязана сказать это словами, а не показывать ноль.
+      whole_library: !libraryIds.length,
       gap_seconds: Number(body.gap) || 5,
       cycle_seconds: Number(body.cycle) || 10,
       repeats,
@@ -671,9 +687,14 @@ function demoTaskEdit(body, command, chats, libraryIds) {
     edit.start = body.start || '00:00';
     edit.end = body.end || '23:59';
   } else if (kind === 'mailing') {
-    // Текст рассылки живёт в библиотеке, поэтому в форму идут ссылки на записи,
-    // а не сам текст: иначе «Сохранить» плодило бы их копии.
-    edit.library_ids = libraryIds.slice();
+    // Текст рассылки лежит в библиотеке, но в форме стоит он сам: поле
+    // показывает то, что уйдёт, — как у постинга. Чипсами рядом остаются только
+    // записи без текста, готовые посты: их руками не набрать.
+    const items = libraryIds
+      .map((id) => DEMO_LIBRARY.items.find((row) => row.id === id))
+      .filter(Boolean);
+    edit.message = items.map(libraryText).filter(Boolean).join('\n\n');
+    edit.library_ids = items.filter((item) => !libraryText(item)).map((item) => item.id);
     edit.gap = Number(body.gap) || 5;
     edit.cycle = Number(body.cycle) || 10;
     edit.repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
@@ -1518,6 +1539,7 @@ function taskMetaLines(task) {
     const info = task.mailing || {};
     lines.push(`пауза ${info.gap_seconds || 5} сек`);
     if (info.messages_count) lines.push(`${info.messages_count} сообщ.`);
+    else if (info.whole_library) lines.push('вся библиотека');
     lines.push(info.repeats ? `${info.repeats} круг(ов)` : 'круги без конца');
   } else if (task.oneshot) {
     lines.push('запуск по кнопке');
@@ -2758,8 +2780,9 @@ function openFieldPicker(key, multi) {
   loadPickerChats();
 }
 
-/* Сообщения для рассылки. Отмеченные уходят в задачу ссылками на библиотеку:
-   пополнили библиотеку — рассылка подхватит новое, пересоздавать не нужно. */
+/* Сообщения для рассылки. Текст отмеченной записи встаёт прямо в поле — его
+   видно и можно поправить, — а готовый пост уходит в задачу ссылкой: своего
+   текста у него нет. */
 function openLibraryPicker() {
   state.picker = {
     mode: 'library',
@@ -2783,7 +2806,7 @@ function renderPickerFooter() {
   const apply = $('pickerApply');
   if (mode === 'library') {
     $('pickerLead').textContent =
-      `Отметьте сообщения — рассылка отправит их по очереди. Отмечено: ${chosen.length}.`;
+      `Отметьте сообщения — текст встанет в поле, готовый пост уйдёт ссылкой. Отмечено: ${chosen.length}.`;
   } else {
     $('pickerLead').textContent = multi
       ? `${label}: отмечайте — уйдут в поле через запятую. Чатов можно сколько угодно.`
@@ -2866,6 +2889,8 @@ async function loadPickerLibrary() {
     const data = await api('/api/library');
     endLoad(holder);
     state.library = data.items || [];
+    // Отметки ставим по тому, что уже уйдёт: тексты видно в поле, посты — в чипсах.
+    if (state.picker.mode === 'library') syncLibraryChosen();
     renderPickerList();
   } catch (error) {
     failLoad(holder, error, 'loadPickerLibrary');
@@ -2967,8 +2992,7 @@ function markPickerRow(ref, on) {
 function applyPicker() {
   const { mode, key, chosen } = state.picker;
   if (mode === 'library') {
-    state.libraryPick = chosen.map(Number).filter(Boolean);
-    renderLibraryPicks();
+    applyLibraryPick(chosen.map(Number).filter(Boolean));
     closePicker();
     return;
   }
@@ -2976,6 +3000,53 @@ function applyPicker() {
   if (node) node.value = chosen.join(', ');
   renderFieldCount(key);
   closePicker();
+}
+
+/* Отмеченное в библиотеке: текст встаёт прямо в поле, а сохранённые посты —
+   чипсами рядом. Раньше и то и другое уходило чипсами, поле оставалось пустым, и
+   что именно отправится, было видно только по заголовкам записей — а набранный в
+   поле текст молча пропадал, потому что выбор считался важнее.
+
+   Набранное руками не трогаем: убираем из поля только те тексты, что сами и
+   поставили, — то есть отметку с записи можно снять и она уйдёт из поля. */
+function applyLibraryPick(ids) {
+  const items = ids
+    .map((id) => state.library.find((row) => Number(row.id) === id))
+    .filter(Boolean);
+  const texts = items.map(libraryText).filter(Boolean);
+  state.libraryPick = items.filter((item) => !libraryText(item)).map((item) => Number(item.id));
+  const node = $('task_message');
+  if (node) {
+    const known = new Set(state.library.map(libraryText).filter(Boolean));
+    const parts = splitMessages(node.value).filter(
+      (part) => !known.has(part) || texts.includes(part)
+    );
+    texts.forEach((text) => {
+      if (!parts.includes(text)) parts.push(text);
+    });
+    node.value = parts.join('\n\n');
+  }
+  renderLibraryPicks();
+  renderFieldCount('message');
+}
+
+/* Текст записи библиотеки — тем же правилом, каким его сравнивает сервер. У
+   сохранённого поста своего текста нет: он лежит ссылкой на чат и сообщение. */
+function libraryText(item) {
+  return String((item && item.text) || '').trim();
+}
+
+/* Отметки в шторке — то, что уже уйдёт: посты стоят чипсами, тексты — в поле.
+   Без этого повторный заход в шторку показывал пустой список отметок, и снять
+   лишнее сообщение можно было только правкой поля. */
+function syncLibraryChosen() {
+  const inField = splitMessages(fieldValue('message'));
+  const chosen = new Set(state.libraryPick.map(String));
+  state.library.forEach((item) => {
+    if (inField.includes(libraryText(item))) chosen.add(String(item.id));
+  });
+  state.picker.chosen = [...chosen];
+  renderPickerFooter();
 }
 
 /* Отмеченные сообщения рядом с полем: видно, что уйдёт, и можно снять по одному
@@ -2994,7 +3065,7 @@ function renderLibraryPicks() {
       data-library-drop="${id}" aria-label="Убрать сообщение">✕</button></span>`;
   }).join('');
   holder.innerHTML =
-    '<i class="field__note">уйдут из библиотеки — поле выше можно оставить пустым</i>' + chips;
+    '<i class="field__note">готовые посты — уйдут вместе с текстом из поля</i>' + chips;
 }
 
 /* Своя кнопка закрытия: общий обработчик [data-close] гасит все шторки сразу

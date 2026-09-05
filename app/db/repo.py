@@ -515,6 +515,28 @@ async def add_saved_message(
     return item
 
 
+async def find_saved_message_by_text(
+    session: AsyncSession, user_id: int, text: str
+) -> SavedMessage | None:
+    """Запись с ровно таким текстом — чтобы не заводить её второй раз.
+
+    Текст рассылки живёт в библиотеке, и человек правит его в форме задачи. Без
+    этой проверки каждое «Сохранить» кладло бы в библиотеку ещё одну копию того
+    же сообщения, а список сохранённых после пяти правок читался бы как пять
+    разных текстов. Берём самую раннюю запись: она и была первой.
+    """
+    body = (text or "").strip()
+    if not body:
+        return None
+    result = await session.execute(
+        select(SavedMessage)
+        .where(SavedMessage.user_id == user_id, SavedMessage.text == body)
+        .order_by(SavedMessage.id)
+        .limit(1)
+    )
+    return result.scalars().first()
+
+
 async def get_saved_message(
     session: AsyncSession, item_id: int, user_id: int
 ) -> SavedMessage | None:

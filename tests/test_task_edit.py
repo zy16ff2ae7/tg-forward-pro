@@ -226,20 +226,21 @@ async def test_same_text_does_not_pile_up_in_the_library(
         return len((await response.json())["items"])
 
     assert await library_size() == 2, "пустая строка разделила текст на два сообщения"
-    before = task["edit"]["library_ids"]
+    # Форма правки показывает сам текст: он и есть то, что уйдёт.
+    assert task["edit"]["message"] == "первое\n\nвторое"
 
     same = await patch_task(
         client, auth_headers, task["id"], message="первое\n\nвторое", gap=9
     )
     assert same.status == 200, await same.text()
     assert await library_size() == 2, "тот же текст — те же записи"
-    assert (await same.json())["task"]["edit"]["library_ids"] == before
+    assert (await same.json())["task"]["edit"]["message"] == "первое\n\nвторое"
     assert (await same.json())["task"]["mailing"]["gap_seconds"] == 9
 
     other = await patch_task(client, auth_headers, task["id"], message="третье")
     assert other.status == 200, await other.text()
     assert await library_size() == 3, "новый текст — новая запись"
-    assert (await other.json())["task"]["edit"]["library_ids"] != before
+    assert (await other.json())["task"]["edit"]["message"] == "третье"
 
 
 async def test_task_remembers_the_names_of_all_its_chats(client, auth_headers, poster):

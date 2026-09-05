@@ -416,11 +416,14 @@ async def list_tasks(request: web.Request) -> web.Response:
         # Журнал по всем задачам сразу: запрос на карточку превратил бы один
         # ответ в двадцать походов в базу.
         health = await repo.task_health(session, [rule.id for rule in rules])
+        # Тексты рассылок — тем же одним запросом: форма правки показывает
+        # текст, а он лежит в библиотеке.
+        texts = await _mailing_library(session, user_id, rules)
 
     return _json(
         {
             "tasks": [
-                _task_view(rule, collected.get(rule.id), health.get(rule.id))
+                _task_view(rule, collected.get(rule.id), health.get(rule.id), texts)
                 for rule in rules
             ]
         }
@@ -437,7 +440,8 @@ async def _task_json(
     """
     async with SessionLocal() as session:
         health = await repo.task_health(session, [rule.id])
-    body: dict[str, Any] = {"task": _task_view(rule, collected, health.get(rule.id))}
+        texts = await _mailing_library(session, rule.user_id, [rule])
+    body: dict[str, Any] = {"task": _task_view(rule, collected, health.get(rule.id), texts)}
     if extra:
         body.update(extra)
     return _json(body, status=status)
@@ -492,36 +496,81 @@ def _stored_chats(rule) -> list[tuple[int, str]]:
 
 
 async def _mailing_texts(payload: dict, filters: dict, *, user_id: int, partial: bool) -> None:
-    """Тексты рассылки: набранное в форме — в библиотеку, ссылки на записи — в задачу.
+    """Что рассылает задача: текст из поля плюс сохранённые посты из библиотеки.
 
-    Рассылка берёт сообщения только из библиотеки, поэтому текст из поля сначала
-    становится её записями. При правке тот же самый текст не должен плодить
-    копии: если он совпадает с уже привязанными записями, остаются прежние
-    ссылки — иначе каждое «Сохранить» добавляло бы в библиотеку ещё один
-    комплект тех же сообщений.
+    Рассылка отправляет записи библиотеки, поэтому набранный текст сначала
+    становится её записями, а в задаче остаются ссылки на них.
+
+    Главное здесь — текст в поле. Раньше выбор из библиотеки был важнее, и в
+    форме правки поле «Сообщение» стояло пустым: человек вписывал новый текст,
+    видел «Сохранено», а рассылка продолжала слать старый — набранное молча
+    уходило в библиотеку никому не нужной записью. Теперь поле показывает то,
+    что уйдёт, и правка поля меняет рассылку.
+
+    Записи без текста — это сохранённые посты, руками их не набрать: они
+    приходят отдельным списком id (чипсы рядом с полем) и остаются при задаче,
+    даже когда текст поменяли.
+
+    Тот же текст копий не плодит: сначала ищем запись с ровно таким текстом и
+    только потом добавляем новую — иначе библиотека после пяти правок интервала
+    выглядела бы как пять одинаковых сообщений.
     """
-    picked = _as_ids(payload.get("library_ids"))
-    if partial and not picked and "message" not in payload:
-        return  # правка не про тексты — оставляем как было
+    if partial and "message" not in payload and "library_ids" not in payload:
+        return  # правка не про сообщения — оставляем как было
 
+    # Пришедший список важнее прежнего: это и есть новый выбор. Не пришёл —
+    # смотрим, что у задачи уже привязано.
+    base = (
+        _as_ids(payload.get("library_ids"))
+        if "library_ids" in payload
+        else _as_ids(filters.get("library_ids"))
+    )
     msgs = _split_messages(payload.get("message"))
-    saved_ids: list[int] = []
-    if msgs:
-        current = _as_ids(filters.get("library_ids"))
-        async with SessionLocal() as session:
-            if current:
-                rows = await repo.saved_messages_by_ids(session, user_id, current)
-                if [row.text for row in rows] == msgs:
-                    saved_ids = [row.id for row in rows]
-            if not saved_ids:
-                for text in msgs:
-                    item = await repo.add_saved_message(
-                        session, user_id=user_id, title=_message_title(text), text=text
-                    )
-                    saved_ids.append(item.id)
-                await session.commit()
-    # Явный выбор из библиотеки важнее только что набранного текста.
-    filters["library_ids"] = picked or saved_ids
+    async with SessionLocal() as session:
+        # Удалённые из библиотеки записи отбрасываются сами: их здесь уже нет.
+        rows = await repo.saved_messages_by_ids(session, user_id, base)
+        if not msgs:
+            # Текста нет — уйдут выбранные записи. Пустой список означает «вся
+            # библиотека»: так его читает планировщик.
+            filters["library_ids"] = [row.id for row in rows]
+            return
+        posts = [row.id for row in rows if not (row.text or "").strip()]
+        texts = [row for row in rows if (row.text or "").strip()]
+        if [row.text for row in texts] == msgs:
+            filters["library_ids"] = [row.id for row in rows]  # текст не менялся
+            return
+        fresh: list[int] = []
+        for text in msgs:
+            item = await repo.find_saved_message_by_text(session, user_id, text)
+            if item is None:
+                item = await repo.add_saved_message(
+                    session, user_id=user_id, title=_message_title(text), text=text
+                )
+            fresh.append(item.id)
+        await session.commit()
+    filters["library_ids"] = fresh + posts
+
+
+async def _mailing_library(session, user_id: int, rules) -> dict[int, str]:
+    """Записи библиотеки, на которые ссылаются рассылки: id → текст.
+
+    Форма правки показывает текст рассылки, а лежит он в библиотеке — значит
+    карточке нужны сами тексты, а не только номера записей. Читаем их одним
+    запросом на все задачи: чтение на карточку превратило бы один ответ со
+    списком задач в двадцать походов в базу.
+
+    Записи без текста (сохранённые посты) остаются в ответе с пустой строкой:
+    по ней ``_edit_view`` и отличает их от текста, который можно набрать.
+    """
+    wanted: set[int] = set()
+    for rule in rules:
+        if (rule.kind or "forward") != "mailing":
+            continue
+        wanted.update(_as_ids((rule.filters or {}).get("library_ids")))
+    if not wanted:
+        return {}
+    rows = await repo.saved_messages_by_ids(session, user_id, sorted(wanted))
+    return {row.id: row.text or "" for row in rows}
 
 
 async def _apply_task_settings(
@@ -1785,7 +1834,12 @@ async def _bot_username() -> str | None:
         return None
 
 
-def _task_view(rule, collected: int | None = None, health: dict | None = None) -> dict:
+def _task_view(
+    rule,
+    collected: int | None = None,
+    health: dict | None = None,
+    texts: dict[int, str] | None = None,
+) -> dict:
     """Правило → вид задачи для мини-аппа.
 
     ``collected`` — сколько записей задача уже собрала (только для парсера,
@@ -1793,6 +1847,8 @@ def _task_view(rule, collected: int | None = None, health: dict | None = None) -
     ``health`` — чем закончились последние срабатывания (``repo.task_health``):
     без него карточка бодро показывала «работает» задаче, которая последние
     сутки только падает, а причину было видно лишь в логе службы на сервере.
+    ``texts`` — тексты записей библиотеки (``_mailing_library``): из них форма
+    правки собирает поле «Сообщение» рассылки.
     """
     from app.telegram_client.filters import FilterConfig
     from app.telegram_client.jobs import (
@@ -1858,6 +1914,10 @@ def _task_view(rule, collected: int | None = None, health: dict | None = None) -
         view["mailing"] = {
             "recipients": recipients,
             "messages_count": len(conf.library_ids),
+            # Пустой список записей означает «вся библиотека» — так его читает
+            # планировщик. Карточка обязана сказать это словами: без пометки она
+            # молчала о том, что уйдёт, а счёт сообщений показывал ноль.
+            "whole_library": not conf.library_ids,
             "gap_seconds": conf.gap_seconds,
             "cycle_seconds": conf.cycle_seconds,
             "repeats": conf.repeats,
@@ -1884,7 +1944,7 @@ def _task_view(rule, collected: int | None = None, health: dict | None = None) -
             for chat_id in chats
         ]
     view["health"] = _health_view(health, names)
-    view["edit"] = _edit_view(rule, kind, conf, chats, names)
+    view["edit"] = _edit_view(rule, kind, conf, chats, names, texts or {})
     return view
 
 
@@ -1930,12 +1990,16 @@ def _health_view(health: dict | None, names: dict[str, str]) -> dict:
     }
 
 
-def _edit_view(rule, kind: str, conf, chats: list[int], names: dict[str, str]) -> dict:
+def _edit_view(
+    rule, kind: str, conf, chats: list[int], names: dict[str, str], texts: dict[int, str]
+) -> dict:
     """Значения задачи для формы правки — ровно те, что принимает /api/tasks.
 
     Форма правки в кабинете — это форма создания с подставленными значениями,
     поэтому и поля здесь называются так же, как в теле запроса: второй набор
     имён означал бы второй разбор на сервере и вечные расхождения между ними.
+
+    ``texts`` — тексты записей библиотеки (``_mailing_library``), нужны рассылке.
     """
     edit: dict[str, Any] = {"account_id": rule.account_id, "names": names}
     if kind in MULTI_CHAT_KINDS:
@@ -1966,9 +2030,20 @@ def _edit_view(rule, kind: str, conf, chats: list[int], names: dict[str, str]) -
         edit["start"] = conf.window_start
         edit["end"] = conf.window_end
     elif kind == "mailing":
-        # Текст рассылки живёт в библиотеке, поэтому в форму идут ссылки на
-        # записи, а не сам текст: иначе «Сохранить» плодило бы их копии.
-        edit["library_ids"] = [int(value) for value in (conf.library_ids or [])]
+        # Текст рассылки лежит в библиотеке, но правят его здесь: поле показывает
+        # то, что уйдёт, — как у постинга, и сообщения так же делит пустая
+        # строка. Раньше поле стояло пустым, а набранный в нём текст пропадал.
+        # Чипсами рядом остаются только записи без текста — сохранённые посты:
+        # их руками не набрать, поэтому они идут списком id.
+        ids = [int(value) for value in (conf.library_ids or [])]
+        edit["message"] = "\n\n".join(
+            texts[item_id] for item_id in ids if (texts.get(item_id) or "").strip()
+        )
+        edit["library_ids"] = [
+            item_id
+            for item_id in ids
+            if item_id in texts and not (texts[item_id] or "").strip()
+        ]
         edit["gap"] = conf.gap_seconds
         edit["cycle"] = conf.cycle_seconds
         edit["repeats"] = conf.repeats

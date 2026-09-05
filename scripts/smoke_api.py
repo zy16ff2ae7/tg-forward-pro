@@ -787,10 +787,9 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
         for item in saved:
             await cab.delete(f"/api/library/{int(item.get('id') or 0)}")
 
-        # Кабинет умеет не перепечатывать сохранённое: отмеченные в библиотеке
-        # сообщения уходят в задачу ссылками (library_ids), а поле «Сообщение»
-        # остаётся пустым. Проверяем, что такая задача заводится и знает, сколько
-        # у неё текстов. Список берём свежий: выше библиотеку успели пополнить и
+        # Отмеченное в библиотеке не надо перепечатывать: задача заводится по
+        # ссылкам (library_ids), а форма правки показывает их текст — видно, что
+        # уйдёт. Список берём свежий: выше библиотеку успели пополнить и
         # почистить, и ссылка на удалённую запись сбила бы счёт.
         status, body = await cab.get("/api/library")
         lib_ids = [int(item.get("id") or 0) for item in (body or {}).get("items") or []]
@@ -810,9 +809,59 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
             status == 201 and lib_info.get("messages_count") == len(lib_ids),
             f"статус {status}, {lib_info}",
         )
+        shown = (lib_task.get("edit") or {}).get("message") or ""
+        rep.check(
+            "и в форме правки виден текст выбранных записей",
+            set(shown.split("\n\n")) == {"первое", "второе"},
+            f"{shown!r}",
+        )
         lib_task_id = int(lib_task.get("id") or 0)
         if lib_task_id:
             await cab.delete(f"/api/tasks/{lib_task_id}")
+
+        # Текст рассылки живёт в библиотеке, но правят его в поле задачи. Раньше
+        # форма правки приходила без текста, а набранный в ней текст сервер
+        # выбрасывал — прежние ссылки считались важнее, и рассылку было не
+        # переписать. Кабинет присылает форму целиком: и новый текст, и старые
+        # ссылки; побеждать обязан текст.
+        mailing_id = int(task.get("id") or 0)
+        form = dict(task.get("edit") or {})
+        rep.check(
+            "форма правки показывает то, что рассылка отправляет",
+            form.get("message") == "первое\n\nвторое",
+            f"{form.get('message')!r}",
+        )
+        status, body = await cab.get("/api/library")
+        was = len((body or {}).get("items") or [])
+        status, body = await cab.patch(
+            f"/api/tasks/{mailing_id}", json={**form, "message": "переписанный текст"}
+        )
+        saved = (body or {}).get("task") or {}
+        rep.check(
+            "новый текст победил прежние ссылки",
+            status == 200
+            and (saved.get("edit") or {}).get("message") == "переписанный текст"
+            and (saved.get("mailing") or {}).get("messages_count") == 1,
+            f"статус {status}, {(saved.get('edit') or {}).get('message')!r}",
+        )
+        status, body = await cab.patch(
+            f"/api/tasks/{mailing_id}", json={"message": "переписанный текст", "gap": 11}
+        )
+        saved = (body or {}).get("task") or {}
+        status, body = await cab.get("/api/library")
+        now = len((body or {}).get("items") or [])
+        rep.check(
+            "тот же текст не ложится в библиотеку второй раз",
+            now == was + 1 and (saved.get("mailing") or {}).get("gap_seconds") == 11,
+            f"было {was}, стало {now}, пауза {(saved.get('mailing') or {}).get('gap_seconds')}",
+        )
+        status, body = await cab.patch(f"/api/tasks/{mailing_id}", json={"gap": 7})
+        saved = (body or {}).get("task") or {}
+        rep.check(
+            "правка настроек текст не трогает",
+            (saved.get("edit") or {}).get("message") == "переписанный текст",
+            f"{(saved.get('edit') or {}).get('message')!r}",
+        )
 
         status, body = await cab.post(
             "/api/tasks",
