@@ -997,6 +997,145 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
         status, _ = await cab.patch(f"/api/library/{post_id}", json={"title": "нет такой"})
         rep.check("правка удалённой записи — 404", status == 404, f"статус {status}")
 
+        # ── Постинг по расписанию берёт тексты из той же библиотеки ──
+        # Раньше он держал копии текстов в своих настройках: одну опечатку
+        # правили дважды, правка записи до постинга не доходила, библиотека не
+        # знала, что запись кто-то постит, а пост с медиа постингу был недоступен.
+        status, body = await cab.get("/api/library")
+        was = len((body or {}).get("items") or [])
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "poster",
+                "account_id": account_id,
+                "targets": ["@smoke-one", "@smoke-two"],
+                "message": "постим первое\n\nпостим второе",
+                "interval": 5,
+            },
+        )
+        post_task = (body or {}).get("task") or {}
+        post_id_task = int(post_task.get("id") or 0)
+        rep.check(
+            "постинг создан — 201, и на карточке счёт своих сообщений",
+            status == 201
+            and post_task.get("messages_count") == 2
+            and post_task.get("whole_library") is False,
+            f"статус {status}, {(body or {}).get('error') or post_task.get('messages_count')}",
+        )
+        rep.check(
+            "форма правки постинга показывает то, что уйдёт",
+            (post_task.get("edit") or {}).get("message") == "постим первое\n\nпостим второе",
+            f"{(post_task.get('edit') or {}).get('message')!r}",
+        )
+        status, body = await cab.get("/api/library")
+        rows = (body or {}).get("items") or []
+        poster_row = next((item for item in rows if item.get("text") == "постим первое"), {})
+        rep.check(
+            "тексты постинга легли в библиотеку — там же, где у рассылки",
+            len(rows) == was + 2 and bool(poster_row),
+            f"было {was}, стало {len(rows)}",
+        )
+        rep.check(
+            "и библиотека называет постинг, который держит запись",
+            poster_row.get("used_by") == [str(post_task.get("title") or "")],
+            f"{poster_row.get('used_by')} против {post_task.get('title')!r}",
+        )
+
+        # Одна запись на две задачи: постинг и рассылка делят текст, а не плодят копии.
+        poster_row_id = int(poster_row.get("id") or 0)
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "mailing",
+                "account_id": account_id,
+                "targets": ["@smoke-two"],
+                "library_ids": [poster_row_id],
+            },
+        )
+        shared = (body or {}).get("task") or {}
+        status, body = await cab.get("/api/library")
+        again = next(
+            (item for item in (body or {}).get("items") or [] if item.get("id") == poster_row_id),
+            {},
+        )
+        rep.check(
+            "один текст на постинг и рассылку — обе задачи названы, копий нет",
+            status == 200
+            and sorted(again.get("used_by") or [])
+            == sorted([str(post_task.get("title") or ""), str(shared.get("title") or "")]),
+            f"{again.get('used_by')}",
+        )
+        shared_id = int(shared.get("id") or 0)
+        if shared_id:
+            await cab.delete(f"/api/tasks/{shared_id}")
+
+        # Правка записи меняет то, что постинг отправит: копии в настройках нет.
+        status, body = await cab.patch(
+            f"/api/library/{poster_row_id}", json={"text": "постим исправленное"}
+        )
+        status, body = await cab.get("/api/tasks")
+        card = next(
+            (t for t in (body or {}).get("tasks") or [] if t.get("id") == post_id_task), {}
+        )
+        rep.check(
+            "исправили запись — постинг шлёт исправленное",
+            (card.get("edit") or {}).get("message", "").startswith("постим исправленное"),
+            f"{(card.get('edit') or {}).get('message')!r}",
+        )
+
+        # Сохранённый пост постингу теперь доступен: с копиями текстов в
+        # настройках пост с картинкой в задачу не помещался.
+        status, body = await cab.post("/api/library", json={"chat_id": -1002, "message_id": 88})
+        saved_post_id = int(((body or {}).get("item") or {}).get("id") or 0)
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "poster",
+                "account_id": account_id,
+                "targets": ["@smoke-one"],
+                "library_ids": [saved_post_id],
+            },
+        )
+        from_post = (body or {}).get("task") or {}
+        rep.check(
+            "постинг сохранённого поста — 201 и без текста в форме",
+            status == 201 and from_post.get("messages_count") == 1,
+            f"статус {status}, {(body or {}).get('error') or from_post.get('messages_count')}",
+        )
+        rep.check(
+            "пост стоит чипсом рядом с полем, а не подделан текстом",
+            (from_post.get("edit") or {}).get("library_ids") == [saved_post_id]
+            and not (from_post.get("edit") or {}).get("message"),
+            f"{from_post.get('edit')}",
+        )
+        from_post_id = int(from_post.get("id") or 0)
+        if from_post_id:
+            await cab.delete(f"/api/tasks/{from_post_id}")
+        await cab.delete(f"/api/library/{saved_post_id}")
+
+        # Записи убрали — карточка постинга обязана сказать, что постить нечего.
+        status, body = await cab.get("/api/library")
+        mine = [
+            int(item.get("id") or 0)
+            for item in (body or {}).get("items") or []
+            if str(item.get("text") or "").startswith("постим ")
+        ]
+        for item_id in mine:
+            await cab.delete(f"/api/library/{item_id}")
+        status, body = await cab.get("/api/tasks")
+        card = next(
+            (t for t in (body or {}).get("tasks") or [] if t.get("id") == post_id_task), {}
+        )
+        rep.check(
+            "сообщения удалили — на карточке постинга нечего постить",
+            card.get("messages_count") == 0
+            and card.get("messages_gone") == len(mine)
+            and card.get("whole_library") is False,
+            f"{ {k: card.get(k) for k in ('messages_count', 'messages_gone', 'whole_library')} }",
+        )
+        if post_id_task:
+            await cab.delete(f"/api/tasks/{post_id_task}")
+
         status, body = await cab.post(
             "/api/tasks",
             json={

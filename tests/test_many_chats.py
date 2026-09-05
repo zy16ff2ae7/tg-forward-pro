@@ -156,14 +156,26 @@ async def make_poster(
     *,
     chats: list[int],
     messages: list[str],
+    legacy: bool = False,
     **settings,
 ) -> tuple[int, int, int]:
-    """Кладёт в базу авто-постинг по списку чатов. → (rule_id, user_id, account_id)."""
+    """Кладёт в базу авто-постинг по списку чатов. → (rule_id, user_id, account_id).
+
+    Свои тексты постинга живут в библиотеке — там же, где у рассылки, поэтому по
+    умолчанию раскладываем их записями и оставляем в задаче только ссылки. С
+    `legacy=True` получается задача из прошлой версии, с копиями текстов в
+    настройках: такие в базе у людей уже лежат, и слать они обязаны по-прежнему.
+    """
     user_id = await create_user()
     account_id = await create_account(user_id)
 
     async with session_scope() as session:
         session.add(Subscription(user_id=user_id, active_until=repo.utcnow() + timedelta(days=1)))
+        library_ids: list[int] = []
+        if not legacy:
+            for text in messages:
+                item = await repo.add_saved_message(session, user_id=user_id, text=text)
+                library_ids.append(item.id)
         rule = Rule(
             user_id=user_id,
             account_id=account_id,
@@ -175,7 +187,7 @@ async def make_poster(
         session.add(rule)
         await session.flush()
         rule.filters = {
-            "messages": list(messages),
+            **({"messages": list(messages)} if legacy else {"library_ids": library_ids}),
             "targets": list(chats[1:]),
             "interval_seconds": 60,
             "window_start": "00:00",
@@ -436,6 +448,7 @@ async def test_poster_keeps_a_multiline_message_whole(
     разбитый по переносам прайс уходил бы четырьмя кругами по кусочку.
     """
     from app.db.database import SessionLocal
+    from app.telegram_client.jobs import load_mailing_library
 
     await client.get("/api/me", headers=auth_headers)
     account_id = await create_account(TEST_USER_ID)
@@ -457,7 +470,11 @@ async def test_poster_keeps_a_multiline_message_whole(
     async with SessionLocal() as session:
         rule = await session.get(Rule, rule_id)
         assert rule is not None
-        assert rule.filters["messages"] == [price, "второе сообщение"]
+        ids = rule.filters["library_ids"]
+    # Свой текст постинга лежит в библиотеке — там же, где у рассылки, и деление
+    # на сообщения происходит до неё: в записях уже готовые куски.
+    sending = await load_mailing_library(TEST_USER_ID, ids)
+    assert [row.text for row in sending] == [price, "второе сообщение"]
 
 
 async def test_broadcast_takes_the_whole_chat_list(

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+from types import SimpleNamespace
 from typing import Any, Callable, Awaitable, Sequence
 
 from loguru import logger
@@ -355,6 +356,17 @@ def mailing_pick(
     if random_pick:
         return random.choice(list(items))
     return list(items)[max(0, int(step or 0)) % len(items)]
+
+
+def own_text_item(text: str) -> SimpleNamespace:
+    """Свой текст в виде записи библиотеки — для задач, чей текст ещё не переехал.
+
+    Постинг раньше держал копии своих текстов в настройках задачи
+    (``filters.messages``), а теперь их место — библиотека. Отправляет и те и
+    другие один ``mailing_send``, а ему нужна запись с полями, а не строка:
+    иначе для старых задач пришлось бы держать вторую ветку отправки.
+    """
+    return SimpleNamespace(id=0, title="", text=text, chat_id=0, message_id=0)
 
 
 async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: int) -> None:

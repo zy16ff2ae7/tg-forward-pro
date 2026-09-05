@@ -153,6 +153,11 @@ const KIND_EMOJI = {
 
 const kindEmoji = (kind) => KIND_EMOJI[kind] || '⚙️';
 
+/* Задачи, которые шлют СВОИ сообщения: их тексты лежат в библиотеке, а не в
+   настройках задачи. Тот же набор, что OWN_TEXT_KINDS на сервере. От него
+   зависит кнопка «📚 из библиотеки» в форме и сброс выбора при правке. */
+const OWN_TEXT_KINDS = ['poster', 'mailing'];
+
 /* Плитки «быстрый старт» на Главной: восемь слотов, последний — весь каталог.
    Подписи короткие: на 390 px в четыре столбца длинное название не влезает.
    Двух «пересылок» и двух «рассылок» здесь быть не должно — плитки называются
@@ -202,7 +207,7 @@ const SETTINGS = [
 const MORE_ITEMS = [
   { emoji: '👤', title: 'Аккаунты и подписка', desc: 'Номера, копилка дней, оплата', tab: 'accounts' },
   { emoji: '💬', title: 'Чаты', desc: 'Выбрать чаты и запустить задачу по ним', tab: 'chats' },
-  { emoji: '📚', title: 'Библиотека сообщений', desc: 'Тексты, которые уходят в рассылку', tab: 'library' },
+  { emoji: '📚', title: 'Библиотека сообщений', desc: 'Тексты для рассылки и постинга', tab: 'library' },
   { emoji: '📦', title: 'Архив задач', desc: 'Завершённые и остановленные', tab: 'tasks', status: 'done' },
 ];
 
@@ -356,13 +361,13 @@ const DEMO_COMMANDS = [
     tags: ['один человек', 'нужны права админа'] },
   { id: 'poster', group: 'own', kind: 'poster', emoji: '📤', title: 'Постинг по расписанию', status: 'ready',
     needs: ['account', 'targets', 'message'], optional: ['interval', 'start', 'end'],
-    description: 'Ваше объявление висит в чатах постоянно: сам шлёт его во все выбранные каждые N минут, пока открыто окно времени.',
-    hint: 'Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Переносы строк внутри сообщения сохраняются как есть — прайс уйдёт целиком. Нужно второе сообщение — отделите его пустой строкой: за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ.',
+    description: 'Ваше объявление висит в чатах постоянно: сам шлёт его во все выбранные каждые N минут, пока открыто окно времени. Текст берётся здесь или из библиотеки.',
+    hint: 'Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Текст наберите здесь либо возьмите из библиотеки — она общая с рассылкой, и правка записи меняет обе задачи. Переносы строк внутри сообщения сохраняются как есть — прайс уйдёт целиком. Нужно второе сообщение — отделите его пустой строкой: за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ.',
     tags: ['ваш текст', 'каждые N минут', 'окно времени'] },
   { id: 'mailing', group: 'own', kind: 'mailing', emoji: '📨', title: 'Рассылка по очереди', status: 'ready',
     needs: ['account', 'targets', 'message'], optional: ['gap', 'cycle', 'repeats', 'typing', 'random_pick'],
     description: 'Обход чатов по одному: чат — пауза — следующий, и так круг за кругом. Текст берётся здесь или из библиотеки.',
-    hint: 'Получателей отмечайте кнопкой «выбрать» — или заранее во вкладке «Чаты». Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, а пустая строка делит текст на два сообщения — уходят по очереди, первое всем, затем второе. Пауза между чатами в секундах, «кругов 0» — крутить без конца.',
+    hint: 'Получателей отмечайте кнопкой «выбрать» — или заранее во вкладке «Чаты». Текст наберите здесь либо возьмите из библиотеки — она общая с постингом: переносы строк сохраняются, а пустая строка делит текст на два сообщения — уходят по очереди, первое всем, затем второе. Пауза между чатами в секундах, «кругов 0» — крутить без конца.',
     tags: ['ваш текст', 'по одному чату', 'пауза и круги'] },
 ];
 
@@ -503,15 +508,15 @@ const DEMO_LIBRARY = {
   ],
 };
 
-/* Кто рассылает записи библиотеки — тем же правилом, что _library_usage на
-   сервере: считаем только живые задачи-рассылки (архивная не работает, и пугать
-   ею при удалении незачем), а рассылка с пустым списком записей держит всю
-   библиотеку целиком, включая запись, которую добавят следующей. */
+/* Кто отправляет записи библиотеки — тем же правилом, что _library_usage на
+   сервере: считаем только живые рассылки и постинги (архивная задача не
+   работает, и пугать ею при удалении незачем), а задача с пустым списком записей
+   держит всю библиотеку целиком, включая запись, которую добавят следующей. */
 function demoLibraryUsage() {
   const used = new Map();
   const whole = [];
   DEMO_STATE.tasks.forEach((task) => {
-    if (task.kind !== 'mailing' || task.archived) return;
+    if (!OWN_TEXT_KINDS.includes(task.kind) || task.archived) return;
     const ids = (task.library_ids || []).map(Number).filter(Boolean);
     if (!ids.length) {
       whole.push(task.title);
@@ -586,20 +591,22 @@ function demoLibrary(clean, options, method) {
 }
 
 
-/* Карточка рассылки читает библиотеку заново на каждом показе — как _task_view с
-   _edit_view на сервере. Задача держит только ссылки, а текст и счёт живых
-   записей лежат в библиотеке: без этого правка текста до карточки не доходила
-   бы, и в демо она выглядела бы бесполезной. */
-function demoMailingRefresh(task) {
-  if (task.kind !== 'mailing') return task;
+/* Карточка рассылки и постинга читает библиотеку заново на каждом показе — как
+   _task_view с _edit_view на сервере. Задача держит только ссылки, а текст и
+   счёт живых записей лежат в библиотеке: без этого правка текста до карточки не
+   доходила бы, и в демо она выглядела бы бесполезной. */
+function demoOwnTextsRefresh(task) {
+  if (!OWN_TEXT_KINDS.includes(task.kind)) return task;
   const ids = (task.library_ids || []).map(Number).filter(Boolean);
   const items = ids
     .map((id) => DEMO_LIBRARY.items.find((row) => row.id === id))
     .filter(Boolean);
-  const info = task.mailing || (task.mailing = {});
+  // У рассылки счёт живёт в task.mailing (там же паузы и круги), у постинга — в
+  // самой карточке рядом с расписанием: так их читает taskMetaLines.
+  const info = task.kind === 'mailing' ? (task.mailing || (task.mailing = {})) : task;
   info.messages_count = items.length;
   // Пустой список ссылок планировщик читает как «вся библиотека», а пропавшие
-  // записи — это «рассылать нечего»: два разных случая, и путать их нельзя.
+  // записи — это «отправлять нечего»: два разных случая, и путать их нельзя.
   info.whole_library = !ids.length;
   info.messages_gone = ids.length - items.length;
   const edit = task.edit || (task.edit = {});
@@ -610,7 +617,7 @@ function demoMailingRefresh(task) {
 
 function demoTasks(path) {
   const status = new URLSearchParams(path.split('?')[1] || '').get('status') || 'active';
-  const pick = (filter) => DEMO_STATE.tasks.filter(filter).map(demoMailingRefresh);
+  const pick = (filter) => DEMO_STATE.tasks.filter(filter).map(demoOwnTextsRefresh);
   if (status === 'active') {
     return { tasks: pick((t) => t.enabled && !t.archived) };
   }
@@ -673,12 +680,12 @@ function demoChatName(ref) {
   return chat ? chat.title : String(ref);
 }
 
-/* Тексты рассылки в демо живут там же, где на сервере: в библиотеке. Набранный
-   текст становится её записями, а задача держит ссылки на них — поэтому правка
-   тем же текстом не плодит копий (на сервере это делает _mailing_texts).
-   Готовые посты (записи без текста) руками не набрать: они приходят списком id и
-   остаются при задаче, даже когда текст поменяли. */
-function demoMailingTexts(body) {
+/* Свои тексты (рассылка, постинг) в демо живут там же, где на сервере: в
+   библиотеке. Набранный текст становится её записями, а задача держит ссылки на
+   них — поэтому правка тем же текстом не плодит копий (на сервере это делает
+   _own_texts). Готовые посты (записи без текста) руками не набрать: они приходят
+   списком id и остаются при задаче, даже когда текст поменяли. */
+function demoOwnTexts(body) {
   const picked = (body.library_ids || []).map(Number).filter(Boolean)
     .filter((id) => DEMO_LIBRARY.items.some((item) => item.id === id));
   const msgs = splitMessages(body.message);
@@ -705,14 +712,39 @@ function demoMailingTexts(body) {
   return texts.concat(posts);
 }
 
+/* Что уйдёт из библиотеки: живые записи, повисшие ссылки, «вся библиотека».
+   Один расчёт на рассылку и постинг — как _own_texts_state на сервере. */
+function demoOwnTextsState(libraryIds) {
+  const alive = libraryIds.filter((id) => DEMO_LIBRARY.items.some((item) => item.id === id));
+  return {
+    messages_count: alive.length,
+    // Пустой список записей планировщик читает как «вся библиотека», и карточка
+    // обязана сказать это словами, а не показывать ноль.
+    whole_library: !libraryIds.length,
+    messages_gone: libraryIds.length - alive.length,
+  };
+}
+
+/* Текст своих сообщений для формы правки: он лежит в библиотеке, но в поле стоит
+   он сам — как _own_texts_edit на сервере. Чипсами рядом остаются только записи
+   без текста, готовые посты: их руками не набрать. */
+function demoOwnTextsEdit(libraryIds) {
+  const items = libraryIds
+    .map((id) => DEMO_LIBRARY.items.find((row) => row.id === id))
+    .filter(Boolean);
+  return {
+    message: items.map(libraryText).filter(Boolean).join('\n\n'),
+    library_ids: items.filter((item) => !libraryText(item)).map((item) => item.id),
+  };
+}
+
 /* Тело запроса → поля задачи. Одна функция и на создание, и на правку: демо
    повторяет здесь _task_view сервера, и второй такой расчёт разошёлся бы с ним
    на первой же новой настройке. */
 function demoTaskFill(task, body, command) {
   const kind = command.kind;
   const chats = demoChatList(body, kind);
-  const msgs = splitMessages(body.message).length;
-  const libraryIds = kind === 'mailing' ? demoMailingTexts(body) : [];
+  const libraryIds = OWN_TEXT_KINDS.includes(kind) ? demoOwnTexts(body) : [];
   const done = task.progress ? task.progress.done || 0 : 0;
   Object.assign(task, {
     kind,
@@ -730,27 +762,21 @@ function demoTaskFill(task, body, command) {
     task.chats = chats.map((ref) => ({ id: ref, title: demoChatName(ref) }));
   }
   if (kind === 'parser') task.progress = { done, total: Number(body.limit) || 200 };
+  // Ссылки на записи библиотеки держит сама задача (на сервере это
+  // filters.library_ids). По ним библиотека и говорит, кто её отправляет.
+  if (OWN_TEXT_KINDS.includes(kind)) task.library_ids = libraryIds.slice();
   if (kind === 'poster') {
     task.interval_min = Number(body.interval) || 2;
     task.window_start = body.start || '00:00';
     task.window_end = body.end || '23:59';
-    task.messages_count = msgs;
+    // Счёт сообщений у постинга стоит в самой карточке, рядом с расписанием.
+    Object.assign(task, demoOwnTextsState(libraryIds));
   }
   if (kind === 'mailing') {
     const repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
-    // Ссылки на записи библиотеки держит сама задача (на сервере это
-    // filters.library_ids). По ним библиотека и говорит, кто её рассылает.
-    task.library_ids = libraryIds.slice();
-    // Живые записи считаем отдельно от ссылок: сообщение могли удалить из
-    // библиотеки, и на карточке нужен честный счёт (на сервере — _task_view).
-    const alive = libraryIds.filter((id) => DEMO_LIBRARY.items.some((item) => item.id === id));
     task.mailing = {
       recipients: chats.length,
-      messages_count: alive.length,
-      // Пустой список записей планировщик читает как «вся библиотека», и
-      // карточка обязана сказать это словами, а не показывать ноль.
-      whole_library: !libraryIds.length,
-      messages_gone: libraryIds.length - alive.length,
+      ...demoOwnTextsState(libraryIds),
       gap_seconds: Number(body.gap) || 5,
       cycle_seconds: Number(body.cycle) || 10,
       repeats,
@@ -795,19 +821,13 @@ function demoTaskEdit(body, command, chats, libraryIds) {
   else if (['checks', 'dialogs', 'mute'].includes(kind)) {
     edit.keywords = (body.keywords || []).join(', ');
   } else if (kind === 'poster') {
-    edit.message = String(body.message || '');
+    // Текст постинга лежит в библиотеке — тем же полем, что у рассылки.
+    Object.assign(edit, demoOwnTextsEdit(libraryIds));
     edit.interval = Number(body.interval) || 2;
     edit.start = body.start || '00:00';
     edit.end = body.end || '23:59';
   } else if (kind === 'mailing') {
-    // Текст рассылки лежит в библиотеке, но в форме стоит он сам: поле
-    // показывает то, что уйдёт, — как у постинга. Чипсами рядом остаются только
-    // записи без текста, готовые посты: их руками не набрать.
-    const items = libraryIds
-      .map((id) => DEMO_LIBRARY.items.find((row) => row.id === id))
-      .filter(Boolean);
-    edit.message = items.map(libraryText).filter(Boolean).join('\n\n');
-    edit.library_ids = items.filter((item) => !libraryText(item)).map((item) => item.id);
+    Object.assign(edit, demoOwnTextsEdit(libraryIds));
     edit.gap = Number(body.gap) || 5;
     edit.cycle = Number(body.cycle) || 10;
     edit.repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
@@ -1646,7 +1666,11 @@ function taskMetaLines(task) {
     if (task.window_start && task.window_end) {
       lines.push(`окно ${task.window_start}–${task.window_end}`);
     }
+    // Что уходит — теми же словами, что у рассылки: тексты обеих задач лежат в
+    // библиотеке, поэтому и «вся библиотека», и повисшие ссылки бывают у обеих.
     if (task.messages_count) lines.push(`${task.messages_count} сообщ.`);
+    else if (task.whole_library) lines.push('вся библиотека');
+    else if (task.messages_gone) lines.push('постить нечего');
   } else if (kind === 'mailing') {
     // Рассылка: её расписание — это паузы и число кругов, а не «задержка».
     const info = task.mailing || {};
@@ -2119,9 +2143,9 @@ function libraryLines(item, max = 90) {
   return sameThing ? { head: preview, sub: '' } : { head: title, sub: preview };
 }
 
-/* Кто рассылает запись — строкой в её карточке. Библиотека одна на все задачи,
-   поэтому правка и удаление здесь меняют то, что уходит из работающей рассылки:
-   без этой строки удаление читалось как безобидная уборка. */
+/* Кто отправляет запись — строкой в её карточке. Библиотека одна на рассылку и
+   постинг, поэтому правка и удаление здесь меняют то, что уходит из работающей
+   задачи: без этой строки удаление читалось как безобидная уборка. */
 function libraryUsers(item) {
   return (item.used_by || []).filter(Boolean);
 }
@@ -2130,7 +2154,7 @@ function libraryUseLine(item) {
   const users = libraryUsers(item);
   if (!users.length) return '';
   const word = users.length === 1 ? 'задача' : 'задачи';
-  return `<div class="lib__use" title="${esc(users.join(', '))}">📨 рассылают: ${users.length} ${word}</div>`;
+  return `<div class="lib__use" title="${esc(users.join(', '))}">📨 отправляют: ${users.length} ${word}</div>`;
 }
 
 function renderLibrary() {
@@ -2303,15 +2327,16 @@ async function saveLibraryEdit(button) {
 async function deleteLibraryItem(id, button) {
   const item = state.library.find((row) => Number(row.id) === Number(id));
   const users = item ? libraryUsers(item) : [];
-  // Называем последствие: если запись держит рассылка, после удаления ей может
-  // стать нечего отправлять. Обещать «задачи не остановятся» в этом случае —
-  // неправда: задача останется в работе, но с пустой очередью.
+  // Называем последствие: если запись держит рассылка или постинг, после
+  // удаления задаче может стать нечего отправлять. Обещать «задачи не
+  // остановятся» в этом случае — неправда: задача останется в работе, но с
+  // пустой очередью.
   const shown = users.slice(0, 2).join(', ');
   const tail = users.length > 2 ? ` и ещё ${users.length - 2}` : '';
   const agreed = await confirmAction(
     users.length
-      ? `Убрать сообщение из библиотеки? Его рассылают: ${shown}${tail}. Останутся без него — если других сообщений в задаче нет, рассылать будет нечего.`
-      : 'Убрать сообщение из библиотеки? Задачи не остановятся — рассылка возьмёт то, что осталось.'
+      ? `Убрать сообщение из библиотеки? Его отправляют: ${shown}${tail}. Останутся без него — если других сообщений в задаче нет, отправлять будет нечего.`
+      : 'Убрать сообщение из библиотеки? Задачи не остановятся — возьмут то, что осталось.'
   );
   if (!agreed) return;
   try {
@@ -2659,12 +2684,13 @@ function fieldHtml(key) {
       </div></div>`;
   }
   if (spec.control === 'textarea') {
-    // Рассылка берёт тексты из библиотеки, поэтому у её поля есть кнопка
-    // выбора: перепечатывать сохранённое не нужно. Другим командам библиотека
-    // не положена — они читают только это поле.
+    // Рассылка и постинг берут тексты из библиотеки, поэтому у их поля есть
+    // кнопка выбора: перепечатывать сохранённое не нужно, а правка записи
+    // доходит до обеих задач сразу. Другим командам библиотека не положена —
+    // они читают только это поле.
     const fromLibrary = key === 'message'
       && state.activeCommand
-      && state.activeCommand.kind === 'mailing';
+      && OWN_TEXT_KINDS.includes(state.activeCommand.kind);
     // Под «Сообщением» — счёт: сколько сообщений уйдёт и с чего начинается
     // каждое. Правило «сообщения делит пустая строка» на глаз не проверить, а
     // ошибка дорогая: набранный прайс уходил десятком отдельных отправок.
@@ -3340,8 +3366,9 @@ function collectTaskPayload() {
   });
 
   const missing = command.needs
-    // Сообщение можно не набирать, если выбрано из библиотеки: рассылка возьмёт
-    // тексты оттуда, и требовать копию того же текста в поле незачем.
+    // Сообщение можно не набирать, если выбрано из библиотеки: рассылка и
+    // постинг возьмут тексты оттуда, и требовать копию того же текста в поле
+    // незачем.
     .filter((key) => !values[key] && !(key === 'message' && state.libraryPick.length))
     .map((key) => (FIELD_SPEC[key] ? FIELD_SPEC[key].label.toLowerCase() : key));
   if (missing.length) return { error: 'Заполните: ' + missing.join(', ') };
@@ -3385,7 +3412,7 @@ function collectTaskPayload() {
   flag('random_pick', values.random_pick);
   // Явный выбор из библиотеки важнее набранного текста — так же считает сервер.
   if (state.libraryPick.length) body.library_ids = state.libraryPick;
-  else if (editing && command.kind === 'mailing') body.library_ids = [];
+  else if (editing && OWN_TEXT_KINDS.includes(command.kind)) body.library_ids = [];
   return { body };
 }
 

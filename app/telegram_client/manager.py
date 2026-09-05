@@ -666,6 +666,10 @@ class ClientManager:
     async def _poster_tick(self) -> None:
         """Один проход: каждому постеру, которому пора, — очередное сообщение.
 
+        Что отправлять, постинг берёт из библиотеки — там же, где рассылка: в
+        задаче лежат только ссылки на записи, а перечитываются они на каждом
+        проходе, поэтому правка текста в библиотеке доходит до чатов сразу.
+
         Чатов у постера может быть сколько угодно, поэтому круг идёт не залпом:
         за проход правило отправляет не больше ``POSTER_BATCH`` сообщений, между
         чатами держит паузу, а весь проход ограничен ``POSTER_TICK_BUDGET`` —
@@ -678,7 +682,12 @@ class ClientManager:
             POSTER_BATCH,
             POSTER_CHAT_GAP,
             POSTER_TICK_BUDGET,
+            MailingMessageGone,
             chat_recipients,
+            load_mailing_library,
+            mailing_pick,
+            mailing_send,
+            own_text_item,
         )
 
         now = time.localtime()
@@ -696,9 +705,6 @@ class ClientManager:
                 continue
 
             f = rule.filters
-            messages = f.messages if hasattr(f, "messages") else (f.get("messages") or [])
-            if not messages:
-                continue
             chats = chat_recipients(rule)
             if not chats:
                 continue
@@ -709,22 +715,49 @@ class ClientManager:
 
             interval = max(30, int(getattr(f, "interval_seconds", 120)))
             st = self._poster_state.setdefault(
-                rule.id, {"last": 0.0, "idx": 0, "runs": 0, "not_before": 0.0, "queue": [], "msg": ""}
+                rule.id,
+                {"last": 0.0, "idx": 0, "step": 0, "runs": 0, "not_before": 0.0, "queue": []},
             )
             # Пауза, которую назначил сам Telegram после FloodWait: раньше этого
             # времени не пробуем, иначе получаем отказ по кругу.
             if time.time() < st.get("not_before", 0.0):
                 continue
-            if not st.get("queue"):
-                if time.time() - st["last"] < interval:
-                    continue
-                # Новый круг: сообщение фиксируем на весь обход, иначе половина
-                # чатов получила бы один текст, половина — следующий.
-                st["queue"] = list(chats)
-                st["msg"] = messages[st["idx"] % len(messages)]
-                st["idx"] = (st["idx"] + 1) % len(messages)
+            # Пора? Начатый круг — всегда, закрытый — когда прошёл интервал.
+            # Спрашиваем до чтения библиотеки: тик идёт раз в 20 секунд, и лишний
+            # запрос на каждую задачу в каждом проходе ничем не оправдан.
+            if not st.get("queue") and time.time() - st["last"] < interval:
+                continue
 
-            msg = st.get("msg") or messages[st["idx"] % len(messages)]
+            # Что постить: записи библиотеки — те же, что у рассылки. Старая
+            # задача держит копии текстов в своих настройках (messages): для неё
+            # библиотеку не читаем, иначе задача, созданная до переезда,
+            # замолчала бы. В библиотеку её текст переедет при первой правке.
+            legacy = list(getattr(f, "messages", None) or [])
+            if legacy and not f.library_ids:
+                items: list[Any] = [own_text_item(text) for text in legacy]
+            else:
+                items = await load_mailing_library(rule.user_id, f.library_ids)
+            if not items:
+                # Записи удалили из библиотеки, а задача на них ссылается —
+                # отправлять нечего. Причину пишем в журнал один раз на простой:
+                # строка на каждом тике утопила бы карточку в одинаковых сбоях, а
+                # без неё задача бодро «работает» и в чаты ничего не уходит.
+                if not st.get("empty"):
+                    st["empty"] = True
+                    await self._poster_nothing_to_send(rule)
+                continue
+            st["empty"] = False
+            if not st.get("queue"):
+                # Новый круг: сообщение фиксируем на весь обход, иначе половина
+                # чатов получила бы один текст, половина — следующий. Держим не
+                # текст, а номер по очереди: сам текст лежит в библиотеке и
+                # перечитывается на каждом тике — значит правка записи доходит и
+                # до тех чатов круга, которые ещё не получили пост.
+                st["queue"] = list(chats)
+                st["step"] = st["idx"]
+                st["idx"] = (st["idx"] + 1) % len(items)
+
+            item = mailing_pick(items, int(st.get("step", 0)))
             sent = 0
             # Чаты, которые круг потерял: о них человек узнаёт из карточки задачи,
             # поэтому итог прохода уходит в журнал (см. jobs.record_batch).
@@ -732,7 +765,9 @@ class ClientManager:
             while st["queue"] and sent < POSTER_BATCH and time.time() < deadline:
                 chat_id = st["queue"][0]
                 try:
-                    await client.send_message(chat_id, msg)
+                    # Отправка общая с рассылкой: свои тексты и сохранённые посты
+                    # уходят одним путём, поэтому пост с медиа постинг тоже умеет.
+                    await mailing_send(client, rule, item, chat_id)
                 except FloodWaitError as exc:
                     # Telegram явно говорит, сколько ждать. Слушаемся: иначе на
                     # следующем тике тот же отказ и поток предупреждений в журнале.
@@ -744,6 +779,15 @@ class ClientManager:
                         rule.id,
                         wait,
                     )
+                    break
+                except MailingMessageGone as exc:
+                    # Запись круга ссылается на пост, которого больше нет: в
+                    # остальные чаты он тоже не уйдёт. Круг закрываем и пишем
+                    # причину один раз — иначе каждый чат отметился бы отдельным
+                    # сбоем, а на карточке стояло бы «не ушло в сто чатов».
+                    logger.warning("Постер #{}: {}", rule.id, exc)
+                    st["queue"].clear()
+                    await self._nothing_to_send(rule, f"постить нечего: {exc}")
                     break
                 except Exception as exc:  # noqa: BLE001 — не спамим при ошибке
                     # Недоступный чат выкидываем из круга: иначе он держал бы
@@ -927,6 +971,18 @@ class ClientManager:
         службы, до которого человеку не добраться: карточка показывала
         «работает», журнал был пуст, и человек ждал сообщений, которых не будет.
         """
+        await self._nothing_to_send(
+            rule, "рассылать нечего: в библиотеке не осталось сообщений"
+        )
+
+    async def _poster_nothing_to_send(self, rule: RuleSnapshot) -> None:
+        """То же для постинга: его тексты лежат в той же библиотеке."""
+        await self._nothing_to_send(
+            rule, "постить нечего: в библиотеке не осталось сообщений"
+        )
+
+    async def _nothing_to_send(self, rule: RuleSnapshot, error: str) -> None:
+        """Запись в журнал задачи о простое: отправлять нечего, и вот почему."""
         async with session_scope() as session:
             await repo.log_forward(
                 session,
@@ -936,7 +992,7 @@ class ClientManager:
                 source_msg_id=0,
                 target_msg_id=None,
                 status="error",
-                error="рассылать нечего: в библиотеке не осталось сообщений",
+                error=error,
             )
 
     async def _finish_mailing(self, rule: RuleSnapshot, cycles: int) -> None:

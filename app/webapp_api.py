@@ -207,6 +207,13 @@ MULTI_CHAT_EMPTY: dict[str, str] = {
 }
 MULTI_CHAT_KINDS: frozenset[str] = frozenset(MULTI_CHAT_EMPTY)
 
+# Задачи, которые шлют СВОИ сообщения, а не чужие посты. Свои тексты у обеих
+# лежат в одном месте — в библиотеке (`/api/library`), а в задаче остаются
+# ссылки на записи. Раньше постинг держал копии текстов в своих настройках:
+# одна и та же опечатка правилась дважды, правка записи в библиотеке до постинга
+# не доходила, а библиотека не могла сказать, что запись кто-то отправляет.
+OWN_TEXT_KINDS: frozenset[str] = frozenset({"poster", "mailing"})
+
 # Как назвать незаполненный список в ответе «Укажите: …». Поле одно (targets), а
 # смысл разный: у пересылки и постинга это чаты, у автоподписки — каналы, у
 # рассылки — получатели. Одно слово «получателей» на всех сбивало с толку, ведь в
@@ -417,9 +424,9 @@ async def list_tasks(request: web.Request) -> web.Response:
         # Журнал по всем задачам сразу: запрос на карточку превратил бы один
         # ответ в двадцать походов в базу.
         health = await repo.task_health(session, [rule.id for rule in rules])
-        # Тексты рассылок — тем же одним запросом: форма правки показывает
-        # текст, а он лежит в библиотеке.
-        texts = await _mailing_library(session, user_id, rules)
+        # Тексты своих сообщений (рассылка, постинг) — тем же одним запросом:
+        # форма правки показывает текст, а он лежит в библиотеке.
+        texts = await _library_texts(session, user_id, rules)
 
     return _json(
         {
@@ -441,7 +448,7 @@ async def _task_json(
     """
     async with SessionLocal() as session:
         health = await repo.task_health(session, [rule.id])
-        texts = await _mailing_library(session, rule.user_id, [rule])
+        texts = await _library_texts(session, rule.user_id, [rule])
     body: dict[str, Any] = {"task": _task_view(rule, collected, health.get(rule.id), texts)}
     if extra:
         body.update(extra)
@@ -496,11 +503,13 @@ def _stored_chats(rule) -> list[tuple[int, str]]:
     return [(chat_id, names.get(str(chat_id)) or str(chat_id)) for chat_id in chat_recipients(rule)]
 
 
-async def _mailing_texts(payload: dict, filters: dict, *, user_id: int, partial: bool) -> None:
-    """Что рассылает задача: текст из поля плюс сохранённые посты из библиотеки.
+async def _own_texts(payload: dict, filters: dict, *, user_id: int, partial: bool) -> None:
+    """Что отправляет задача: текст из поля плюс сохранённые посты из библиотеки.
 
-    Рассылка отправляет записи библиотеки, поэтому набранный текст сначала
-    становится её записями, а в задаче остаются ссылки на них.
+    Общее для рассылки и постинга (``OWN_TEXT_KINDS``): свои сообщения у обеих
+    живут в библиотеке, поэтому набранный текст сначала становится её записями, а
+    в задаче остаются ссылки на них. Один текст — одна запись: правка записи
+    доходит сразу до всех задач, где она выбрана.
 
     Главное здесь — текст в поле. Раньше выбор из библиотеки был важнее, и в
     форме правки поле «Сообщение» стояло пустым: человек вписывал новый текст,
@@ -519,6 +528,16 @@ async def _mailing_texts(payload: dict, filters: dict, *, user_id: int, partial:
     if partial and "message" not in payload and "library_ids" not in payload:
         return  # правка не про сообщения — оставляем как было
 
+    def keep(ids: list[int]) -> None:
+        """Ссылки на записи — в задачу, старые копии текстов — вон.
+
+        ``filters["messages"]`` остался от постинга, который держал тексты у
+        себя: не убрать его — и планировщик с карточкой продолжали бы читать
+        старую копию, а правка библиотеки до чатов не доходила бы.
+        """
+        filters["library_ids"] = ids
+        filters.pop("messages", None)
+
     # Пришедший список важнее прежнего: это и есть новый выбор. Не пришёл —
     # смотрим, что у задачи уже привязано.
     base = (
@@ -533,12 +552,12 @@ async def _mailing_texts(payload: dict, filters: dict, *, user_id: int, partial:
         if not msgs:
             # Текста нет — уйдут выбранные записи. Пустой список означает «вся
             # библиотека»: так его читает планировщик.
-            filters["library_ids"] = [row.id for row in rows]
+            keep([row.id for row in rows])
             return
         posts = [row.id for row in rows if not (row.text or "").strip()]
         texts = [row for row in rows if (row.text or "").strip()]
         if [row.text for row in texts] == msgs:
-            filters["library_ids"] = [row.id for row in rows]  # текст не менялся
+            keep([row.id for row in rows])  # текст не менялся
             return
         fresh: list[int] = []
         for text in msgs:
@@ -549,15 +568,15 @@ async def _mailing_texts(payload: dict, filters: dict, *, user_id: int, partial:
                 )
             fresh.append(item.id)
         await session.commit()
-    filters["library_ids"] = fresh + posts
+    keep(fresh + posts)
 
 
-async def _mailing_library(session, user_id: int, rules) -> dict[int, str]:
-    """Записи библиотеки, на которые ссылаются рассылки: id → текст.
+async def _library_texts(session, user_id: int, rules) -> dict[int, str]:
+    """Записи библиотеки, на которые ссылаются задачи: id → текст.
 
-    Форма правки показывает текст рассылки, а лежит он в библиотеке — значит
-    карточке нужны сами тексты, а не только номера записей. Читаем их одним
-    запросом на все задачи: чтение на карточку превратило бы один ответ со
+    Форма правки показывает текст рассылки и постинга, а лежит он в библиотеке —
+    значит карточке нужны сами тексты, а не только номера записей. Читаем их
+    одним запросом на все задачи: чтение на карточку превратило бы один ответ со
     списком задач в двадцать походов в базу.
 
     Записи без текста (сохранённые посты) остаются в ответе с пустой строкой:
@@ -565,13 +584,70 @@ async def _mailing_library(session, user_id: int, rules) -> dict[int, str]:
     """
     wanted: set[int] = set()
     for rule in rules:
-        if (rule.kind or "forward") != "mailing":
+        if (rule.kind or "forward") not in OWN_TEXT_KINDS:
             continue
         wanted.update(_as_ids((rule.filters or {}).get("library_ids")))
     if not wanted:
         return {}
     rows = await repo.saved_messages_by_ids(session, user_id, sorted(wanted))
     return {row.id: row.text or "" for row in rows}
+
+
+def _own_texts_state(conf, texts: dict[int, str] | None) -> dict:
+    """Что уйдёт из библиотеки: сколько записей живо, что пропало, вся ли она.
+
+    Одинаково для рассылки и постинга. Считаем только живые записи: сообщение
+    могли удалить из библиотеки, а ссылка на него в задаче осталась — раньше
+    карточка показывала прежний счёт, а отправлять было нечего. Когда текстов не
+    передали (``texts=None``), счёт остаётся прежним — гадать не о чём.
+
+    Старые задачи постинга держат тексты в своих настройках (``messages``): в
+    библиотеку они переедут при первой правке, а пока считаем по ним — иначе
+    карточка задачи, созданной до переезда, показывала бы ноль сообщений.
+    """
+    if conf.messages and not conf.library_ids:
+        return {
+            "messages_count": len(conf.messages),
+            "whole_library": False,
+            "messages_gone": 0,
+        }
+    ids = [int(value) for value in (conf.library_ids or [])]
+    alive = ids if texts is None else [item_id for item_id in ids if item_id in texts]
+    return {
+        "messages_count": len(alive),
+        # Пустой список записей означает «вся библиотека» — так его читает
+        # планировщик. Карточка обязана сказать это словами: без пометки она
+        # молчала о том, что уйдёт, а счёт сообщений показывал ноль.
+        "whole_library": not ids,
+        # Сколько ссылок повисло: карточка скажет, что сообщения удалены, —
+        # иначе задача бодро «работает», а в чаты ничего не уходит.
+        "messages_gone": len(ids) - len(alive),
+    }
+
+
+def _own_texts_edit(conf, texts: dict[int, str]) -> dict:
+    """Свои сообщения для формы правки: {"message": текст, "library_ids": посты}.
+
+    Обратная сборка текста: сообщения делит пустая строка — тем же правилом,
+    каким их разбирал ``_split_messages``. Чипсами рядом остаются только записи
+    без текста, сохранённые посты: их руками не набрать, поэтому они идут
+    списком id. Старая задача постинга показывает текст из своих настроек, пока
+    он не переехал в библиотеку, — иначе поле правки было бы пустым и первое же
+    «Сохранить» стёрло бы то, что задача постит.
+    """
+    if conf.messages and not conf.library_ids:
+        return {"message": "\n\n".join(conf.messages), "library_ids": []}
+    ids = [int(value) for value in (conf.library_ids or [])]
+    return {
+        "message": "\n\n".join(
+            texts[item_id] for item_id in ids if (texts.get(item_id) or "").strip()
+        ),
+        "library_ids": [
+            item_id
+            for item_id in ids
+            if item_id in texts and not (texts[item_id] or "").strip()
+        ],
+    }
 
 
 async def _apply_task_settings(
@@ -610,10 +686,11 @@ async def _apply_task_settings(
         if given("keywords"):
             filters["keywords"] = _as_list(payload.get("keywords"))
     elif kind == "poster":
-        if given("message"):
-            filters["messages"] = _split_messages(payload.get("message")) or [
-                str(payload.get("message") or "").strip()
-            ]
+        # Свои тексты постинга живут там же, где у рассылки, — в библиотеке
+        # (см. _own_texts и OWN_TEXT_KINDS). Раньше постинг держал копии текстов
+        # в своих настройках: та же опечатка правилась дважды, а правка записи в
+        # библиотеке до чатов постинга не доходила вообще.
+        await _own_texts(payload, filters, user_id=user_id, partial=partial)
         if given("interval"):
             filters["interval_seconds"] = max(1, _as_int(payload.get("interval"), 2)) * 60
         if given("start"):
@@ -633,7 +710,7 @@ async def _apply_task_settings(
         for field in ("typing", "random_pick", "link_preview"):
             if given(field):
                 filters[field] = _as_bool(payload.get(field))
-        await _mailing_texts(payload, filters, user_id=user_id, partial=partial)
+        await _own_texts(payload, filters, user_id=user_id, partial=partial)
 
 
 @routes.post("/api/tasks")
@@ -688,10 +765,10 @@ async def create_task(request: web.Request) -> web.Response:
     if "targets" in needs and not targets:
         missing.append(TARGETS_LABEL.get(kind, "чаты"))
     if "message" in needs and not str(payload.get("message") or "").strip():
-        # Рассылке текст в форме не нужен, если сообщения выбраны из библиотеки:
-        # оттуда их и берёт планировщик, а копия того же текста в поле только
-        # плодила бы дубли записей.
-        if not (kind == "mailing" and _as_ids(payload.get("library_ids"))):
+        # Рассылке и постингу текст в форме не нужен, если сообщения выбраны из
+        # библиотеки: оттуда их и берёт планировщик, а копия того же текста в
+        # поле только плодила бы дубли записей.
+        if not (kind in OWN_TEXT_KINDS and _as_ids(payload.get("library_ids"))):
             missing.append("сообщение")
     if missing:
         return _json({"error": "Укажите: " + ", ".join(missing)}, status=400)
@@ -913,8 +990,9 @@ async def update_task(request: web.Request) -> web.Response:
     if targets is not None and "targets" in needs and not targets:
         missing.append(TARGETS_LABEL.get(kind, "чаты"))
     if "message" in payload and "message" in needs and not _split_messages(payload.get("message")):
-        # У рассылки текст в поле не нужен, если сообщения взяты из библиотеки.
-        if not (kind == "mailing" and _as_ids(payload.get("library_ids"))):
+        # Текст в поле не нужен, если сообщения взяты из библиотеки (рассылка,
+        # постинг): пустое поле при выбранных записях — это «шлём выбранное».
+        if not (kind in OWN_TEXT_KINDS and _as_ids(payload.get("library_ids"))):
             missing.append("сообщение")
     if missing:
         return _json({"error": "Укажите: " + ", ".join(missing)}, status=400)
@@ -1207,22 +1285,31 @@ def _library_view(item, used_by: Sequence[str] = ()) -> dict:
 
 
 async def _library_usage(session, user_id: int) -> tuple[dict[int, list[str]], list[str]]:
-    """Кто рассылает записи библиотеки: (id записи → названия задач, «вся библиотека»).
+    """Кто отправляет записи библиотеки: (id записи → названия задач, «вся библиотека»).
+
+    Считаем рассылку и постинг (``OWN_TEXT_KINDS``): свои сообщения у обеих лежат
+    здесь, значит и предупредить при удалении надо про обе.
 
     Архивные задачи не считаем: они не работают, и пугать ими при удалении
-    незачем. Рассылка без выбранных записей берёт всю библиотеку — такие задачи
-    идут вторым списком: они держат каждую запись, в том числе ту, которую
-    добавят завтра.
+    незачем. Задача без выбранных записей берёт всю библиотеку — такие идут
+    вторым списком: они держат каждую запись, в том числе ту, которую добавят
+    завтра.
     """
     from app.telegram_client.jobs import task_title
 
     used: dict[int, list[str]] = {}
     whole: list[str] = []
     for rule in await repo.list_rules(session, user_id, include_archived=False):
-        if (rule.kind or "forward") != "mailing":
+        if (rule.kind or "forward") not in OWN_TEXT_KINDS:
             continue
-        ids = _as_ids((rule.filters or {}).get("library_ids"))
+        filters = rule.filters or {}
+        ids = _as_ids(filters.get("library_ids"))
         if not ids:
+            # Старый постинг с текстами в своих настройках библиотеку не читает:
+            # записать его во «всю библиотеку» значило бы пугать удалением
+            # записи, которую он не отправляет.
+            if filters.get("messages"):
+                continue
             whole.append(task_title(rule))
             continue
         for item_id in ids:
@@ -1948,7 +2035,7 @@ def _task_view(
     ``health`` — чем закончились последние срабатывания (``repo.task_health``):
     без него карточка бодро показывала «работает» задаче, которая последние
     сутки только падает, а причину было видно лишь в логе службы на сервере.
-    ``texts`` — тексты записей библиотеки (``_mailing_library``): из них форма
+    ``texts`` — тексты записей библиотеки (``_library_texts``): из них форма
     правки собирает поле «Сообщение» рассылки.
     """
     from app.telegram_client.filters import FilterConfig
@@ -1990,7 +2077,8 @@ def _task_view(
         view["interval_min"] = max(1, conf.interval_seconds // 60)
         view["window_start"] = conf.window_start
         view["window_end"] = conf.window_end
-        view["messages_count"] = len(conf.messages)
+        # Тексты постинга лежат в библиотеке — как у рассылки, тем же счётом.
+        view.update(_own_texts_state(conf, texts))
 
     # Полоса выполнения. total заполняем ТОЛЬКО там, где «всего» существует в
     # настройках задачи: у парсера это лимит участников, у автоподписки —
@@ -2012,22 +2100,11 @@ def _task_view(
         # кругов (repeats=0) конца нет — тогда и total остаётся null, как у
         # остальных бесконечных задач.
         recipients = len(chats)
-        # Считаем только те записи, что ещё живы: сообщение могли удалить из
-        # библиотеки, и ссылка на него осталась в задаче. Раньше карточка
-        # показывала прежний счёт, а рассылать было нечего. Когда текстов не
-        # передали (texts=None), счёт остаётся прежним — гадать не о чём.
-        ids = [int(value) for value in (conf.library_ids or [])]
-        alive = ids if texts is None else [item for item in ids if item in texts]
         view["mailing"] = {
             "recipients": recipients,
-            "messages_count": len(alive),
-            # Пустой список записей означает «вся библиотека» — так его читает
-            # планировщик. Карточка обязана сказать это словами: без пометки она
-            # молчала о том, что уйдёт, а счёт сообщений показывал ноль.
-            "whole_library": not ids,
-            # Сколько ссылок повисло: карточка скажет, что сообщения удалены, —
-            # иначе задача бодро «работает», а в чаты ничего не уходит.
-            "messages_gone": len(ids) - len(alive),
+            # Что уйдёт (счёт живых записей, повисшие ссылки, «вся библиотека») —
+            # общим счётом с постингом: свои сообщения обеих задач в библиотеке.
+            **_own_texts_state(conf, texts),
             "gap_seconds": conf.gap_seconds,
             "cycle_seconds": conf.cycle_seconds,
             "repeats": conf.repeats,
@@ -2109,7 +2186,8 @@ def _edit_view(
     поэтому и поля здесь называются так же, как в теле запроса: второй набор
     имён означал бы второй разбор на сервере и вечные расхождения между ними.
 
-    ``texts`` — тексты записей библиотеки (``_mailing_library``), нужны рассылке.
+    ``texts`` — тексты записей библиотеки (``_library_texts``): их показывают в
+    форме правки рассылка и постинг — свои сообщения обеих лежат в библиотеке.
     """
     edit: dict[str, Any] = {"account_id": rule.account_id, "names": names}
     if kind in MULTI_CHAT_KINDS:
@@ -2133,27 +2211,17 @@ def _edit_view(
     elif kind in ("checks", "dialogs", "mute"):
         edit["keywords"] = ", ".join(conf.keywords or [])
     elif kind == "poster":
-        # Обратная сборка текста: сообщения делит пустая строка — тем же
-        # правилом, каким их разбирал _split_messages.
-        edit["message"] = "\n\n".join(conf.messages or [])
+        # Текст постинга лежит в библиотеке — тем же полем и тем же правилом
+        # «пустая строка делит сообщения», что у рассылки.
+        edit.update(_own_texts_edit(conf, texts))
         edit["interval"] = max(1, conf.interval_seconds // 60)
         edit["start"] = conf.window_start
         edit["end"] = conf.window_end
     elif kind == "mailing":
         # Текст рассылки лежит в библиотеке, но правят его здесь: поле показывает
-        # то, что уйдёт, — как у постинга, и сообщения так же делит пустая
-        # строка. Раньше поле стояло пустым, а набранный в нём текст пропадал.
-        # Чипсами рядом остаются только записи без текста — сохранённые посты:
-        # их руками не набрать, поэтому они идут списком id.
-        ids = [int(value) for value in (conf.library_ids or [])]
-        edit["message"] = "\n\n".join(
-            texts[item_id] for item_id in ids if (texts.get(item_id) or "").strip()
-        )
-        edit["library_ids"] = [
-            item_id
-            for item_id in ids
-            if item_id in texts and not (texts[item_id] or "").strip()
-        ]
+        # то, что уйдёт, — как у постинга. Раньше поле стояло пустым, а набранный
+        # в нём текст пропадал.
+        edit.update(_own_texts_edit(conf, texts))
         edit["gap"] = conf.gap_seconds
         edit["cycle"] = conf.cycle_seconds
         edit["repeats"] = conf.repeats
@@ -2287,11 +2355,11 @@ COMMANDS: list[dict] = [
         # и оба названия читались как «шлёт мои сообщения». Отличие вынесено в
         # само название — здесь главное расписание, у рассылки очередь.
         "title": "Постинг по расписанию",
-        "description": "Ваше объявление висит в чатах постоянно: сам шлёт его во все выбранные каждые N минут, пока открыто окно времени.",
+        "description": "Ваше объявление висит в чатах постоянно: сам шлёт его во все выбранные каждые N минут, пока открыто окно времени. Текст берётся здесь или из библиотеки.",
         "status": "ready",
         "needs": ["account", "targets", "message"],
         "optional": ["interval", "start", "end"],
-        "hint": "Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Переносы строк внутри сообщения сохраняются как есть — прайс уйдёт целиком. Нужно второе сообщение — отделите его пустой строкой: за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ.",
+        "hint": "Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Текст наберите здесь либо возьмите из библиотеки — она общая с рассылкой, и правка записи меняет обе задачи. Переносы строк внутри сообщения сохраняются как есть — прайс уйдёт целиком. Нужно второе сообщение — отделите его пустой строкой: за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ.",
         "tags": ["ваш текст", "каждые N минут", "окно времени"],
     },
     {
@@ -2306,7 +2374,7 @@ COMMANDS: list[dict] = [
         "status": "ready",
         "needs": ["account", "targets", "message"],
         "optional": ["gap", "cycle", "repeats", "typing", "random_pick"],
-        "hint": "Получателей отмечайте кнопкой «выбрать» — или заранее во вкладке «Чаты». Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, а пустая строка делит текст на два сообщения — уходят по очереди, первое всем, затем второе. Пауза между чатами в секундах, «кругов 0» — крутить без конца.",
+        "hint": "Получателей отмечайте кнопкой «выбрать» — или заранее во вкладке «Чаты». Текст наберите здесь либо возьмите из библиотеки — она общая с постингом: переносы строк сохраняются, а пустая строка делит текст на два сообщения — уходят по очереди, первое всем, затем второе. Пауза между чатами в секундах, «кругов 0» — крутить без конца.",
         "tags": ["ваш текст", "по одному чату", "пауза и круги"],
     },
 ]
