@@ -40,6 +40,11 @@ const state = {
   // предлагала бы выбирать «-1001234567890».
   chatNames: {},
   lastResultsId: null, // для кнопки «Повторить» в шторке результатов
+  // Сколько записей собранного уже на экране и сколько их всего: по этой паре
+  // работает «Показать ещё» — она просит следующую страницу со сдвигом, а не
+  // ту же самую первую.
+  resultsShown: 0,
+  resultsTotal: 0,
   bankedDays: 0,
   chats: [],                // последний список чатов с бэка
   selectedChats: [],       // объекты выбранных чатов (полные, не только id) —
@@ -113,8 +118,11 @@ const FIELD_SPEC = {
 const RESULTS_TITLES = {
   parser: 'Собранная аудитория',
   checks: 'Пойманные чеки',
-  dialogs: 'Входящие сообщения',
 };
+
+// Сколько записей собранного просим за раз. Столько же влезает в шторку без
+// заметной паузы на отрисовку, остальное догружает «Показать ещё».
+const RESULTS_PAGE = 100;
 
 const CHAT_TAGS = ['реклама', 'вопросы', 'продажа', 'работа', 'объявления'];
 
@@ -713,15 +721,27 @@ function demoTasks(path) {
 }
 
 
+/* Собранная аудитория в демо. Записей заведомо больше одной страницы: сотня
+   уходит в первый запрос, остальное достаётся кнопкой «Показать ещё» — иначе
+   ни листание, ни выгрузку в демо было бы не показать. */
+function demoCollected(total) {
+  const items = [
+    { id: 1, payload: { user_id: 501, username: 'art_deco_fan', name: 'Аня К.' }, created_at: '2026-08-25T11:02:00' },
+    { id: 2, payload: { user_id: 502, username: 'night_owl', name: 'Марк' }, created_at: '2026-08-25T11:02:00' },
+    { id: 3, payload: { user_id: 503, username: null, name: 'Ольга' }, created_at: '2026-08-25T11:02:00' },
+  ];
+  for (let n = items.length + 1; n <= total; n += 1) {
+    items.push({
+      id: n,
+      payload: { user_id: 500 + n, username: `guest_${n}`, name: `Гость ${n}` },
+      created_at: '2026-08-25T11:02:00',
+    });
+  }
+  return items;
+}
+
 const DEMO_RESULTS = {
-  4: {
-    total: 3,
-    items: [
-      { id: 1, payload: { user_id: 501, username: 'art_deco_fan', name: 'Аня К.' }, created_at: '2026-08-25T11:02:00' },
-      { id: 2, payload: { user_id: 502, username: 'night_owl', name: 'Марк' }, created_at: '2026-08-25T11:02:00' },
-      { id: 3, payload: { user_id: 503, username: null, name: 'Ольга' }, created_at: '2026-08-25T11:02:00' },
-    ],
-  },
+  4: { items: demoCollected(137) },
 };
 
 /* Список чатов задачи — так же, как его собирает сервер (_split_chats): без
@@ -1082,7 +1102,28 @@ function demoApi(path, options = {}) {
       return { ok: true, run };
     }
     if (tail === 'results') {
-      return Object.assign({ kind: task ? task.kind : 'parser', total: 0, items: [] }, DEMO_RESULTS[id] || {});
+      // Страницами, как на сервере: кабинет просит сотню и сдвиг, а не «всё».
+      const all = (DEMO_RESULTS[id] || {}).items || [];
+      const limit = Math.max(1, Math.min(Number(query.get('limit')) || 100, 1000));
+      const offset = Math.max(0, Number(query.get('offset')) || 0);
+      const page = all.slice(offset, offset + limit);
+      return {
+        kind: task ? task.kind : 'parser',
+        total: all.length,
+        offset,
+        has_more: offset + page.length < all.length,
+        items: page,
+      };
+    }
+    if (tail === 'export') {
+      const all = (DEMO_RESULTS[id] || {}).items || [];
+      if (!all.length) demoFail(409, 'Выгружать пока нечего — задача ничего не собрала');
+      return {
+        ok: true,
+        sent: all.length,
+        total: all.length,
+        filename: `audience-${id}-demo.csv`,
+      };
     }
     if (method === 'DELETE' && !tail) {
       DEMO_STATE.tasks = DEMO_STATE.tasks.filter((t) => t.id !== id);
@@ -1957,7 +1998,11 @@ function taskActionsHtml(task) {
     if (kind === 'forward') {
       acts.push(`<button class="btn" data-action="mode" data-id="${task.id}">🔁 Режим</button>`);
     }
-    if (RESULTS_TITLES[kind] || task.oneshot) {
+    // Кнопка результатов — только у тех, кто действительно складывает находки
+    // (парсер и ловец чеков). У автоподписки она тоже была, потому что задача
+    // разовая, и всегда отвечала «Пока пусто»: вступление в чаты видно в
+    // журнале карточки, а собранного у неё нет.
+    if (RESULTS_TITLES[kind]) {
       acts.push(`<button class="btn" data-action="results" data-id="${task.id}">📄 Результаты</button>`);
     }
     acts.push(`<button class="btn" data-action="archive" data-id="${task.id}">📦 Архив</button>`);
@@ -2111,17 +2156,52 @@ function runMessage(run) {
   return 'Готово';
 }
 
+/* Одна запись собранного: участник парсера или пойманный чек. */
+function resultRowHtml(item) {
+  const payload = item.payload || {};
+  if (payload.username || payload.user_id != null) {
+    const name = payload.name || payload.username || `ID ${payload.user_id}`;
+    const handle = payload.username ? `@${payload.username}` : (payload.phone || '');
+    return `<div class="result">
+      <div class="result__title">${esc(name)}</div>
+      <div class="result__sub">${esc(handle || 'без ника')} · ID ${esc(payload.user_id)}</div>
+    </div>`;
+  }
+  const text = payload.text || payload.link || payload.preview || JSON.stringify(payload);
+  return `<div class="result">
+    <div class="result__title">${esc(String(text).slice(0, 140))}</div>
+    <div class="result__sub">${esc((item.created_at || '').replace('T', ' ').slice(0, 16))}</div>
+  </div>`;
+}
+
+/* Строка над списком: сколько собрано всего и сколько уже видно. Без второго
+   числа «Всего: 4000» на сотне строк читалось как обрезанный список. */
+function resultsMetaHtml(total, shown) {
+  const tail = total > shown ? ` · показано ${shown}` : '';
+  return `<div class="results__meta">Всего: ${total}${tail}</div>`;
+}
+
 async function openResults(id) {
   const task = (state.tasks || []).find((item) => item.id === Number(id));
+  // Пока ждём ответ, заголовок берём из карточки — чтобы шапка не была пустой.
   $('resultsTitle').textContent = RESULTS_TITLES[task ? task.kind : ''] || 'Результаты';
   const body = $('resultsBody');
   state.lastResultsId = id;
+  // Открываем всегда с первой страницы: шторка могла остаться от другой задачи.
+  state.resultsShown = 0;
+  state.resultsTotal = 0;
+  $('resultsMore').hidden = true;
+  $('resultsExport').hidden = true;
   beginLoad(body, 'plain', 4);
   $('resultsSheet').classList.add('is-open');
 
   try {
-    const data = await api(`/api/tasks/${id}/results?limit=100`);
+    const data = await api(`/api/tasks/${id}/results?limit=${RESULTS_PAGE}`);
     endLoad(body);
+    // Вид задачи берём из ответа: state.tasks — это только текущая вкладка
+    // (активные / на паузе / архив), и по кнопке «Повторить» задачи там могло
+    // уже не быть — шапка становилась безымянными «Результатами».
+    $('resultsTitle').textContent = RESULTS_TITLES[data.kind] || 'Результаты';
     if (!data.items.length) {
       body.innerHTML = emptyHtml(
         '📭',
@@ -2130,28 +2210,55 @@ async function openResults(id) {
       );
       return;
     }
-    const rows = data.items.map((item) => {
-      const payload = item.payload || {};
-      if (payload.username || payload.user_id != null) {
-        const name = payload.name || payload.username || `ID ${payload.user_id}`;
-        const handle = payload.username ? `@${payload.username}` : (payload.phone || '');
-        return `<div class="result">
-          <div class="result__title">${esc(name)}</div>
-          <div class="result__sub">${esc(handle || 'без ника')} · ID ${esc(payload.user_id)}</div>
-        </div>`;
-      }
-      const text = payload.text || payload.link || payload.preview || JSON.stringify(payload);
-      return `<div class="result">
-        <div class="result__title">${esc(String(text).slice(0, 140))}</div>
-        <div class="result__sub">${esc((item.created_at || '').replace('T', ' ').slice(0, 16))}</div>
-      </div>`;
-    });
+    state.resultsShown = data.items.length;
+    state.resultsTotal = data.total;
     body.innerHTML =
-      `<div class="results__meta">Всего: ${data.total}${data.total > data.items.length ? ` · показаны последние ${data.items.length}` : ''}</div>` +
-      rows.join('');
+      resultsMetaHtml(data.total, data.items.length) + data.items.map(resultRowHtml).join('');
+    $('resultsMore').hidden = !data.has_more;
+    $('resultsExport').hidden = false;
   } catch (error) {
     failLoad(body, error, 'openResults');
   }
+}
+
+/* Следующая страница собранного. Дописываем к тому, что уже на экране: человек
+   листает список сверху вниз, и перерисовка с начала теряла бы место чтения. */
+async function loadMoreResults(button) {
+  const id = state.lastResultsId;
+  if (id == null) return;
+  await withLoading(button, async () => {
+    try {
+      const data = await api(
+        `/api/tasks/${id}/results?limit=${RESULTS_PAGE}&offset=${state.resultsShown}`
+      );
+      const body = $('resultsBody');
+      const meta = body.querySelector('.results__meta');
+      state.resultsShown += data.items.length;
+      state.resultsTotal = data.total;
+      if (meta) meta.outerHTML = resultsMetaHtml(data.total, state.resultsShown);
+      body.insertAdjacentHTML('beforeend', data.items.map(resultRowHtml).join(''));
+      $('resultsMore').hidden = !data.has_more;
+    } catch (error) {
+      toast(error.message || 'Не удалось показать ещё');
+    }
+  });
+}
+
+/* Выгрузка файлом: файл присылает бот в чат — внутри Telegram кабинет живёт в
+   WebView, а он скачанное не сохраняет, поэтому «скачать» здесь невозможно. */
+async function exportResults(button) {
+  const id = state.lastResultsId;
+  if (id == null) return;
+  await withLoading(button, async () => {
+    try {
+      const data = await api(`/api/tasks/${id}/export?tz=${browserTz()}`, { method: 'POST' });
+      const sent = data.sent || 0;
+      const partial = data.total > sent ? ` из ${data.total}` : '';
+      toast(`Файл отправлен в чат с ботом: ${sent}${partial} стр.`);
+    } catch (error) {
+      toast(error.message || 'Не удалось выгрузить');
+    }
+  });
 }
 
 /* ───────────────────────────────── Чаты ──────────────────────────────── */
@@ -4292,6 +4399,12 @@ function bindEvents() {
   });
 
   // шторки
+  $('resultsMore').addEventListener('click', (event) => {
+    loadMoreResults(event.currentTarget);
+  });
+  $('resultsExport').addEventListener('click', (event) => {
+    exportResults(event.currentTarget);
+  });
   $('settingsBtn').addEventListener('click', () => $('settingsSheet').classList.add('is-open'));
   $('settingsList').addEventListener('click', (event) => {
     const item = event.target.closest('[data-start]');

@@ -49,7 +49,7 @@ os.environ["LOG_LEVEL"] = "WARNING"
 import aiohttp  # noqa: E402
 from aiohttp import web  # noqa: E402
 from loguru import logger  # noqa: E402
-from sqlalchemy import func, select  # noqa: E402
+from sqlalchemy import delete, func, select  # noqa: E402
 from telethon.errors import PhoneCodeInvalidError, SessionPasswordNeededError  # noqa: E402
 
 from app import accounts_login, paylink  # noqa: E402
@@ -2020,6 +2020,166 @@ async def check_task_cleanup(cab: Cabinet, rep: Report, account_id: int) -> None
         )
 
 
+class DocumentBot:
+    """Бот в объёме выгрузки: один ``sendDocument``.
+
+    Файл собирается на нашей стороне, а уходит через Bot API — без заглушки
+    осталась бы непроверенной вся половина пути: и содержимое CSV, и подпись, и
+    отказ, когда Telegram файл не принял.
+    """
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.documents: list[tuple[int, str, bytes, str]] = []
+
+    async def send_document(self, chat_id: int, document: Any, **kwargs: Any) -> None:
+        if self.fail:
+            raise RuntimeError("bot was blocked by the user")
+        self.documents.append(
+            (
+                chat_id,
+                getattr(document, "filename", ""),
+                getattr(document, "data", b""),
+                kwargs.get("caption") or "",
+            )
+        )
+
+
+async def check_collected_results(cab: Cabinet, rep: Report, account_id: int) -> None:
+    """Собранное листается страницами и забирается файлом.
+
+    Парсер кладёт до 10 000 участников, а в шторку влезает сотня: раньше кабинет
+    просил всегда одну и ту же первую страницу, и остальное нельзя было даже
+    досмотреть — не говоря о том, чтобы вынести список из приложения.
+    """
+    rep.section("Собранное: страницы и файл")
+
+    async def resolve_many(_account_id: int, queries) -> dict[str, tuple[int, str]]:
+        asked = [str(raw or "").strip() for raw in queries]
+        return {ref: (-1005550077, "Театр у моря") for ref in asked if ref == "@theatre"}
+
+    with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
+        resolve_many=resolve_many
+    ):
+        status, body = await cab.post(
+            "/api/tasks",
+            json={"command": "parser", "account_id": account_id, "source": "@theatre", "limit": 100},
+        )
+    rule_id = ((body or {}).get("task") or {}).get("id")
+    if status != 201 or not rule_id:
+        rep.check("парсер для проверки выгрузки создан", False, f"статус {status}")
+        return
+
+    total = 137
+    async with session_scope() as session:
+        for number in range(1, total + 1):
+            session.add(
+                CollectedItem(
+                    rule_id=rule_id,
+                    user_id=SMOKE_USER_ID,
+                    kind="parser",
+                    payload={
+                        "user_id": 500 + number,
+                        "username": f"guest_{number}",
+                        "name": f"Гость {number}",
+                        "phone": "+7 999 123-45-67",
+                    },
+                )
+            )
+
+    status, first = await cab.get(f"/api/tasks/{rule_id}/results?limit=100")
+    rep.check(
+        "первая страница — сотня, и сервер признаёт, что есть ещё",
+        status == 200
+        and len((first or {}).get("items") or []) == 100
+        and (first or {}).get("total") == total
+        and (first or {}).get("has_more") is True,
+        f"статус {status}, записей {len((first or {}).get('items') or [])}",
+    )
+    status, second = await cab.get(f"/api/tasks/{rule_id}/results?limit=100&offset=100")
+    seen = {item["id"] for item in (first or {}).get("items") or []}
+    rest = [item["id"] for item in (second or {}).get("items") or []]
+    rep.check(
+        "вторая страница продолжает список, а не повторяет его",
+        status == 200 and len(rest) == total - 100 and not (seen & set(rest)),
+        f"статус {status}, записей {len(rest)}, повторов {len(seen & set(rest))}",
+    )
+    rep.check(
+        "на последней странице кнопки «ещё» больше нет",
+        (second or {}).get("has_more") is False,
+        f"has_more={(second or {}).get('has_more')}",
+    )
+    status, over = await cab.get(f"/api/tasks/{rule_id}/results?limit=100&offset=999")
+    rep.check(
+        "сдвиг за конец списка — пустая страница, а не ошибка",
+        status == 200 and (over or {}).get("items") == [] and (over or {}).get("total") == total,
+        f"статус {status}",
+    )
+
+    status, body = await cab.post(f"/api/tasks/{rule_id}/export")
+    rep.check(
+        "без бота выгрузка отказывает понятно (503, feature=export)",
+        status == 503 and (body or {}).get("feature") == "export",
+        f"статус {status}, feature={(body or {}).get('feature')}",
+    )
+
+    with stubbed_bot(DocumentBot()) as bot:
+        status, body = await cab.post(f"/api/tasks/{rule_id}/export?tz=180")
+        rep.check(
+            "выгрузка отвечает «отправлено» и называет число строк",
+            status == 200 and (body or {}).get("sent") == total,
+            f"статус {status}, sent={(body or {}).get('sent')}",
+        )
+        chat_id, filename, raw, caption = bot.documents[0] if bot.documents else (0, "", b"", "")
+        rep.check(
+            "файл ушёл документом в чат с ботом",
+            chat_id == SMOKE_USER_ID and filename.startswith("audience-") and filename.endswith(".csv"),
+            f"кому {chat_id}, файл {filename!r}",
+        )
+        text = raw.decode("utf-8-sig") if raw else ""
+        lines = [line for line in text.splitlines() if line]
+        rep.check(
+            "в файле весь список, а не одна страница",
+            raw.startswith(b"\xef\xbb\xbf") and len(lines) == total + 1,
+            f"строк {len(lines)}, ожидалось {total + 1}",
+        )
+        rep.check(
+            "часовой пояс кабинета попал в заголовок колонки",
+            lines[0].endswith("когда (UTC+3)") if lines else False,
+            f"заголовок {lines[0] if lines else ''!r}",
+        )
+        rep.check(
+            "телефон в файле — цифрами, имя не станет формулой",
+            "79991234567" in text and ";=" not in text,
+            f"цифры на месте: {'79991234567' in text}, формул нет: {';=' not in text}",
+        )
+        rep.check(
+            "подпись называет задачу словами карточки",
+            "Собранная аудитория" in caption and "Театр у моря" in caption,
+            f"подпись {caption!r}",
+        )
+
+    with stubbed_bot(DocumentBot(fail=True)):
+        status, body = await cab.post(f"/api/tasks/{rule_id}/export")
+        rep.check(
+            "Telegram файл не принял — кабинету отказ, а не «отправлено»",
+            status == 502 and "чат с ботом" in ((body or {}).get("error") or ""),
+            f"статус {status}, {body}",
+        )
+
+    async with session_scope() as session:
+        await session.execute(delete(CollectedItem).where(CollectedItem.rule_id == rule_id))
+    with stubbed_bot(DocumentBot()) as bot:
+        status, body = await cab.post(f"/api/tasks/{rule_id}/export")
+        rep.check(
+            "пустую задачу не выгружаем — 409 и ни одного файла в переписке",
+            status == 409 and not bot.documents,
+            f"статус {status}, файлов {len(bot.documents)}",
+        )
+
+    await cab.delete(f"/api/tasks/{rule_id}")
+
+
 async def check_chats_and_accounts(cab: Cabinet, rep: Report, account_id: int) -> None:
     """Чаты и аккаунты: пустой список тут — честный ответ, а не поломка."""
     rep.section("Чаты и аккаунты")
@@ -3065,6 +3225,7 @@ async def run_all(rep: Report) -> None:
             await check_poster_window(cab, rep, account_id)
             await check_task_health(cab, rep, account_id)
             await check_task_cleanup(cab, rep, account_id)
+            await check_collected_results(cab, rep, account_id)
             await check_chats_and_accounts(cab, rep, account_id)
             await check_account_login(cab, rep)
             await check_subscription(cab, rep, me)

@@ -16,11 +16,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import parse_qsl
 
-from aiogram.types import LabeledPrice
+from aiogram.types import BufferedInputFile, LabeledPrice
 from aiohttp import web
 from loguru import logger
 
-from app import accounts_login, bonus, paylink, webapp_build
+from app import accounts_login, bonus, exports, paylink, webapp_build
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
@@ -36,7 +36,12 @@ from app.plans import (
     stars_amount,
     usdt_amount,
 )
-from app.telegram_client.jobs import MAX_PARSER_LIMIT, ONE_SHOT_KINDS, window_tz_minutes
+from app.telegram_client.jobs import (
+    MAX_PARSER_LIMIT,
+    ONE_SHOT_KINDS,
+    task_title,
+    window_tz_minutes,
+)
 from app.telegram_client.manager import HOPELESS_ERRORS, manager
 
 # initData считаем свежим в течение суток
@@ -1227,22 +1232,32 @@ async def run_task(request: web.Request) -> web.Response:
 @routes.get("/api/tasks/{task_id}/results")
 @require_auth
 async def task_results(request: web.Request) -> web.Response:
-    """Что насобирала задача: участники парсера или пойманные чеки."""
+    """Что насобирала задача: участники парсера или пойманные чеки.
+
+    Отдаём страницами: ``offset`` — сколько уже показано. Парсер собирает до
+    10 000 участников, а в шторку влезает сотня, и без сдвига остальное нельзя
+    было даже досмотреть — кабинет всегда просил одну и ту же первую страницу.
+    """
     user_id = request[USER_ID_KEY]
     task_id = int(request.match_info["task_id"])
-    limit = _as_int(request.query.get("limit"), 100)
+    limit = max(1, min(_as_int(request.query.get("limit"), 100), 1000))
+    offset = max(0, _as_int(request.query.get("offset"), 0))
 
     async with SessionLocal() as session:
         rule = await repo.get_rule(session, task_id, user_id)
         if rule is None:
             return _json({"error": "Задача не найдена"}, status=404)
-        items = list(await repo.list_collected_items(session, task_id, limit=limit))
+        items = list(
+            await repo.list_collected_items(session, task_id, limit=limit, offset=offset)
+        )
         total = await repo.count_collected_items(session, task_id)
 
     return _json(
         {
             "kind": rule.kind,
             "total": total,
+            "offset": offset,
+            "has_more": offset + len(items) < total,
             "items": [
                 {
                     "id": item.id,
@@ -1253,6 +1268,64 @@ async def task_results(request: web.Request) -> web.Response:
             ],
         }
     )
+
+
+@routes.post("/api/tasks/{task_id}/export")
+@require_auth
+async def export_task_results(request: web.Request) -> web.Response:
+    """Присылает собранное файлом в чат с ботом.
+
+    Не отдаём файл ответом на запрос: внутри Telegram кабинет живёт в WebView, а
+    он скачанное не сохраняет — «Выгрузить» молча ничего не делало бы. Документ
+    от бота попадает в переписку, откуда его достаёт любой клиент.
+
+    Берём всё сразу, до потолка одного прогона парсера: смысл выгрузки как раз в
+    том, чего не видно в шторке. Упёрлись в потолок — говорим об этом в подписи.
+    """
+    user_id = request[USER_ID_KEY]
+    task_id = int(request.match_info["task_id"])
+    tz = window_tz_minutes(request.query.get("tz"))
+
+    async with SessionLocal() as session:
+        rule = await repo.get_rule(session, task_id, user_id)
+        if rule is None:
+            return _json({"error": "Задача не найдена"}, status=404)
+        kind = rule.kind or "forward"
+        title = task_title(rule)
+        items = list(
+            await repo.list_collected_items(session, task_id, limit=MAX_PARSER_LIMIT)
+        )
+        total = await repo.count_collected_items(session, task_id)
+
+    if not items:
+        return _json({"error": "Выгружать пока нечего — задача ничего не собрала"}, status=409)
+    if _bot is None:
+        raise FeatureUnavailable(
+            "Файл присылает бот, а он сейчас недоступен. Попробуйте позже.",
+            feature="export",
+            status="bot_unavailable",
+        )
+
+    filename = exports.export_filename(kind, task_id)
+    document = BufferedInputFile(
+        exports.collected_csv(kind, items, tz_minutes=tz), filename=filename
+    )
+    try:
+        await _bot.send_document(
+            user_id,
+            document,
+            caption=exports.export_caption(kind, rule_title=title, sent=len(items), total=total),
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Подробности Bot API — в лог, человеку — куда смотреть: чаще всего файл
+        # не уходит потому, что бота заблокировали или чат с ним удалили.
+        logger.warning("Не удалось отправить выгрузку задачи {} для {}: {}", task_id, user_id, exc)
+        return _json(
+            {"error": "Телеграм не принял файл. Откройте чат с ботом и попробуйте снова."},
+            status=502,
+        )
+
+    return _json({"ok": True, "sent": len(items), "total": total, "filename": filename})
 
 
 # ─────────────────────── Библиотека сообщений (что рассылать) ─────────────────

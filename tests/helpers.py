@@ -69,6 +69,10 @@ class RecordingBot:
         # проверять её приходится (письмо про выпавший аккаунт без кнопки
         # «Подключить заново» заставляет искать вход по меню).
         self.markups: list[object] = []
+        # Отправленные файлы: (кому, имя файла, байты, подпись). Выгрузка
+        # собранного уходит документом, и проверять надо именно содержимое —
+        # «письмо ушло» о правильности CSV ничего не говорит.
+        self.documents: list[tuple[int, str, bytes, str]] = []
 
     async def get_me(self) -> SimpleNamespace:
         return SimpleNamespace(username=self.username)
@@ -78,6 +82,18 @@ class RecordingBot:
             raise RuntimeError("bot was blocked by the user")
         self.messages.append((chat_id, text))
         self.markups.append(kwargs.get("reply_markup"))
+
+    async def send_document(self, chat_id: int, document, **kwargs) -> None:
+        if chat_id in self.fail_for:
+            raise RuntimeError("bot was blocked by the user")
+        self.documents.append(
+            (
+                chat_id,
+                getattr(document, "filename", ""),
+                getattr(document, "data", b""),
+                kwargs.get("caption") or "",
+            )
+        )
 
     @property
     def recipients(self) -> list[int]:

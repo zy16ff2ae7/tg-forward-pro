@@ -46,8 +46,10 @@ MANUAL_ONLY_KINDS: tuple[str, ...] = ("parser",)
 # Живут по расписанию планировщика, а не по входящим сообщениям
 SCHEDULED_KINDS: tuple[str, ...] = ("poster", "mailing")
 
-# Складывают находки в collected_items — у них есть кнопка «Результаты»
-COLLECTING_KINDS: tuple[str, ...] = ONE_SHOT_KINDS + ("checks",)
+# Складывают находки в collected_items — у них есть кнопка «Результаты».
+# Ровно те типы, которые зовут _store: автоподписка тоже разовая, но она
+# вступает в чаты и ничего не собирает — её кнопка всегда отвечала «Пока пусто».
+COLLECTING_KINDS: tuple[str, ...] = ("parser", "checks")
 
 KIND_LABELS: dict[str, str] = {
     "forward": "пересылка",

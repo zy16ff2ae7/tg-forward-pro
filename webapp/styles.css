@@ -1517,6 +1517,31 @@ button { border: none; background: none; cursor: pointer; }
 
 .results { display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; }
 .results__meta { font-size: 12px; color: var(--muted); }
+.results__more { margin-top: 12px; }
+
+/* В шапке результатов рядом с названием стоит кнопка выгрузки, и на узком
+   экране длинный заголовок («Собранная аудитория») отжимал её за край.
+   Заголовку разрешено сжиматься с многоточием, кнопке — нет. */
+#resultsSheet .sheet__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#resultsExport { flex: none; }
+
+/* Собранного бывают сотни строк, и шапка уезжала вверх вместе со списком: после
+   «Показать ещё» до кнопки «⬇️ Файлом» и до крестика приходилось листать назад.
+   Держим шапку сверху — отступы шторки повторяем сами, чтобы фон закрывал
+   строки на всю её ширину. */
+#resultsSheet .sheet__head {
+  position: sticky;
+  top: -16px;
+  z-index: 2;
+  margin: -16px -14px 14px;
+  padding: 16px 14px 10px;
+  background: #1E0F2A;
+}
 
 .result {
   padding: 10px 12px;

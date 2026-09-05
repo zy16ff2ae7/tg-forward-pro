@@ -307,15 +307,20 @@
     </div>
   </div>
 
-  <!-- Модалка результатов задачи -->
+  <!-- Модалка результатов задачи. Кнопка выгрузки стоит в шапке, а не под
+       списком: список бывает на сотню строк, и внизу её пришлось бы искать
+       прокруткой. «Показать ещё» наоборот живёт под списком — там, где
+       кончилась страница. -->
   <div class="sheet" id="resultsSheet" role="dialog" aria-modal="true" aria-label="Результаты задачи">
     <div class="sheet__backdrop" data-close></div>
     <div class="sheet__panel">
       <div class="sheet__head">
         <div class="sheet__title" id="resultsTitle">Результаты</div>
+        <button type="button" class="btn btn--ghost btn--sm" id="resultsExport" hidden>⬇️ Файлом</button>
         <button class="icon-btn" data-close aria-label="Закрыть">✕</button>
       </div>
       <div class="results" id="resultsBody"></div>
+      <button type="button" class="btn btn--block results__more" id="resultsMore" hidden>Показать ещё</button>
     </div>
   </div>
   <!-- Выбор чата мышкой для любого поля задачи: печатать @username или id

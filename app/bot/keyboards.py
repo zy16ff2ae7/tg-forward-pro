@@ -94,7 +94,13 @@ def rules_menu(rules: Sequence[Rule]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def rule_menu(rule: Rule) -> InlineKeyboardMarkup:
+def rule_menu(rule: Rule, *, collected: int = 0) -> InlineKeyboardMarkup:
+    """Меню задачи. ``collected`` — сколько она уже насобирала.
+
+    Число нужно ровно для одной кнопки: «⬇️ Файлом» показываем только когда файл
+    получится непустым. Кнопка, которая честно отвечает «выгружать нечего», в
+    меню не нужна — её место занимает сам список.
+    """
     from app.telegram_client.jobs import COLLECTING_KINDS, KIND_LABELS, ONE_SHOT_KINDS
 
     kind = rule.kind or "forward"
@@ -127,9 +133,16 @@ def rule_menu(rule: Rule) -> InlineKeyboardMarkup:
         )
     # Ловец чеков собирает находки сам, по сообщениям — кнопка запуска ему не нужна
     if kind in COLLECTING_KINDS:
-        builder.row(
+        results = [
             InlineKeyboardButton(text="📄 Результаты", callback_data=f"rule:results:{rule.id}")
-        )
+        ]
+        if collected > 0:
+            results.append(
+                InlineKeyboardButton(
+                    text="⬇️ Файлом", callback_data=f"rule:export:{rule.id}"
+                )
+            )
+        builder.row(*results)
     builder.row(
         InlineKeyboardButton(
             text=f"📦 В архив ({KIND_LABELS.get(kind, kind)})",

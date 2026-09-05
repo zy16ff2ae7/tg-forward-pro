@@ -4,8 +4,10 @@ from __future__ import annotations
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from loguru import logger
 
+from app import exports
 from app.bot import keyboards as kb
 from app.bot import texts
 from app.bot.states import EditStates, RuleStates
@@ -14,9 +16,14 @@ from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
 from app.telegram_client.filters import default_filters, parse_words
+from app.telegram_client.jobs import MAX_PARSER_LIMIT, task_title
 from app.telegram_client.manager import manager
 
 router = Router(name="rules")
+
+# Сколько строк собранного помещается в одно сообщение бота. Больше не влезает
+# по лимиту в 4096 знаков, поэтому весь список отдаётся файлом.
+RESULTS_PREVIEW = 20
 
 
 @router.message(Command("rules"))
@@ -644,7 +651,7 @@ async def show_rule_results(callback: CallbackQuery) -> None:
         if rule is None:
             await callback.answer("Задача не найдена", show_alert=True)
             return
-        items = list(await repo.list_collected_items(session, rule_id, limit=20))
+        items = list(await repo.list_collected_items(session, rule_id, limit=RESULTS_PREVIEW))
         total = await repo.count_collected_items(session, rule_id)
 
     if not items:
@@ -668,8 +675,59 @@ async def show_rule_results(callback: CallbackQuery) -> None:
             else:
                 link = payload.get("link")
                 lines.append(f"• {link or str(payload.get('text') or '')[:80]}")
-        more = f"\n\nПоказаны последние {len(items)} из {total}." if total > len(items) else ""
+        # Сообщение бота вмещает десятки строк, а не тысячи, поэтому остальное
+        # достаётся кнопкой «⬇️ Файлом» — и об этом надо сказать прямо, иначе
+        # «показаны последние 20 из 4000» выглядит как потерянная работа.
+        more = (
+            f"\n\nПоказаны последние {len(items)} из {total}."
+            "\nВесь список — кнопкой «⬇️ Файлом»."
+            if total > len(items)
+            else ""
+        )
         text = f"📄 <b>Результаты: {total}</b>\n\n" + "\n".join(lines) + more
 
     if callback.message is not None:
-        await smart_edit(callback.message, text, reply_markup=kb.rule_menu(rule))
+        await smart_edit(callback.message, text, reply_markup=kb.rule_menu(rule, collected=total))
+
+
+@router.callback_query(F.data.startswith("rule:export:"))
+async def export_rule_results(callback: CallbackQuery) -> None:
+    """Присылает собранное файлом — тем же CSV, что и кабинет.
+
+    Отвечаем на нажатие ровно один раз и в самом конце: у нажатия один ответ, и
+    если истратить его на «готовлю файл», то отказ («бота заблокировали»)
+    показать уже нечем — человек нажмёт и не узнает, почему файла нет. Пока
+    файл собирается, кнопка и так подсвечена ожиданием.
+    """
+    rule_id = int(callback.data.split(":")[2])
+    assert callback.from_user is not None
+
+    async with SessionLocal() as session:
+        rule = await repo.get_rule(session, rule_id, callback.from_user.id)
+        if rule is None:
+            await callback.answer("Задача не найдена", show_alert=True)
+            return
+        kind = rule.kind or "forward"
+        title = task_title(rule)
+        items = list(await repo.list_collected_items(session, rule_id, limit=MAX_PARSER_LIMIT))
+        total = await repo.count_collected_items(session, rule_id)
+
+    if not items:
+        await callback.answer("Выгружать пока нечего", show_alert=True)
+        return
+
+    document = BufferedInputFile(
+        exports.collected_csv(kind, items), filename=exports.export_filename(kind, rule_id)
+    )
+    try:
+        await callback.bot.send_document(
+            callback.from_user.id,
+            document,
+            caption=exports.export_caption(kind, rule_title=title, sent=len(items), total=total),
+        )
+    except Exception as exc:  # noqa: BLE001 — причина в лог, человеку внятный отказ
+        logger.warning("Не удалось отправить выгрузку задачи {}: {}", rule_id, exc)
+        await callback.answer("Телеграм не принял файл. Попробуйте ещё раз.", show_alert=True)
+        return
+
+    await callback.answer(f"Файл отправлен: {len(items)} стр.")

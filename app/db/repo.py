@@ -23,6 +23,11 @@ from app.db.models import (
 )
 from app.timeutil import utcnow  # реэкспорт: repo.utcnow() остаётся рабочим
 
+# Потолок одной выборки собранного. Парсер за раз кладёт до 10 000 участников —
+# столько же можно и прочитать (выгрузка файлом берёт всё сразу), а вот
+# «дай миллион» из запроса кабинета до базы доходить не должно.
+MAX_COLLECTED_ROWS = 10_000
+
 
 # ──────────────────────────────── Пользователи ────────────────────────────────
 
@@ -602,13 +607,19 @@ async def add_collected_items(
 
 
 async def list_collected_items(
-    session: AsyncSession, rule_id: int, limit: int = 100
+    session: AsyncSession, rule_id: int, limit: int = 100, offset: int = 0
 ) -> Sequence[CollectedItem]:
+    """Страница собранного, от свежего к старому.
+
+    ``offset`` нужен кабинету: парсер собирает до 10 000 участников, а в шторку
+    влезает сотня — без сдвига остальное нельзя было даже досмотреть.
+    """
     result = await session.execute(
         select(CollectedItem)
         .where(CollectedItem.rule_id == rule_id)
         .order_by(CollectedItem.id.desc())
-        .limit(max(1, min(limit, 1000)))
+        .limit(max(1, min(limit, MAX_COLLECTED_ROWS)))
+        .offset(max(0, offset))
     )
     return result.scalars().all()
 
