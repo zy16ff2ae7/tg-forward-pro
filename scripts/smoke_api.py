@@ -215,6 +215,9 @@ class Cabinet:
     async def post(self, path: str, **kwargs: Any) -> tuple[int, Any]:
         return await self.request("POST", path, **kwargs)
 
+    async def patch(self, path: str, **kwargs: Any) -> tuple[int, Any]:
+        return await self.request("PATCH", path, **kwargs)
+
     async def delete(self, path: str, **kwargs: Any) -> tuple[int, Any]:
         return await self.request("DELETE", path, **kwargs)
 
@@ -1016,6 +1019,191 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
     rep.note("поиск чатов подменён заглушкой: Telegram в разделе не участвует")
 
 
+async def check_task_edit(cab: Cabinet, rep: Report, account_id: int) -> None:
+    """Правка готовой задачи: PATCH /api/tasks/{id}.
+
+    Раньше поменять интервал, текст или список чатов можно было только
+    пересозданием задачи — вместе с ней терялись счётчики, номер и место в круге
+    рассылки. Проверяем на живом сокете то же, что тесты: меняется только
+    присланное, прежние чаты второй раз не ищутся, а форма правки возвращается
+    серверу без изменений.
+    """
+    rep.section("Правка задачи")
+
+    chats = {"@edit-one": -3001, "@edit-two": -3002, "@edit-three": -3003}
+    sweeps = 0
+
+    async def resolve_many(_account_id: int, queries) -> dict[str, tuple[int, str]]:
+        nonlocal sweeps
+        sweeps += 1
+        found: dict[str, tuple[int, str]] = {}
+        for raw in queries:
+            key = str(raw or "").strip()
+            if key in chats:
+                found[key] = (chats[key], key)
+        return found
+
+    task: dict = {}
+    with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
+        resolve_many=resolve_many
+    ):
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "poster",
+                "account_id": account_id,
+                "targets": ["@edit-one", "@edit-two"],
+                "message": "объявление",
+                "interval": 5,
+                "start": "09:00",
+                "end": "21:00",
+            },
+        )
+        task = (body or {}).get("task") or {}
+        task_id = int(task.get("id") or 0)
+        rep.check(
+            "постинг для правки создан — 201",
+            status == 201 and bool(task_id),
+            f"статус {status}, {(body or {}).get('error') or ''}",
+        )
+        if not task_id:
+            return
+
+        rep.check(
+            "у задачи есть форма правки и имена всех чатов",
+            [chat.get("title") for chat in task.get("chats") or []] == ["@edit-one", "@edit-two"]
+            and (task.get("edit") or {}).get("targets") == ["-3001", "-3002"]
+            and ((task.get("edit") or {}).get("names") or {}).get("-3002") == "@edit-two",
+            f"{task.get('chats')} / {(task.get('edit') or {}).get('targets')}",
+        )
+
+        status, body = await cab.patch(f"/api/tasks/{task_id}", json={"interval": 15})
+        saved = (body or {}).get("task") or {}
+        rep.check(
+            "интервал поменялся, задача осталась той же",
+            status == 200 and saved.get("id") == task_id and saved.get("interval_min") == 15,
+            f"статус {status}, {(body or {}).get('error') or saved.get('interval_min')}",
+        )
+        rep.check(
+            "остальные настройки правка не тронула",
+            (saved.get("window_start"), saved.get("window_end")) == ("09:00", "21:00")
+            and saved.get("messages_count") == 1
+            and saved.get("targets_count") == 2,
+            f"{saved.get('window_start')}–{saved.get('window_end')}, "
+            f"{saved.get('messages_count')} сообщ., {saved.get('targets_count')} чат.",
+        )
+
+        # Счётчик отправок — не настройка: пересоздание задачи его обнуляло.
+        async with session_scope() as session:
+            rule = await repo.get_rule(session, task_id, SMOKE_USER_ID)
+            rule.forwarded_count = 17
+        status, body = await cab.patch(f"/api/tasks/{task_id}", json={"message": "другое"})
+        saved = (body or {}).get("task") or {}
+        rep.check(
+            "счётчик отправок правку переживает",
+            status == 200 and saved.get("forwarded") == 17,
+            f"статус {status}, отправлено {saved.get('forwarded')}",
+        )
+
+        before = sweeps
+        status, body = await cab.patch(
+            f"/api/tasks/{task_id}",
+            json={"targets": (task.get("edit") or {}).get("targets"), "interval": 7},
+        )
+        rep.check(
+            "прежние чаты второй раз не ищутся",
+            status == 200 and sweeps == before,
+            f"статус {status}, обходов: {sweeps - before}",
+        )
+
+        before = sweeps
+        status, body = await cab.patch(
+            f"/api/tasks/{task_id}",
+            json={"targets": [*((task.get("edit") or {}).get("targets") or []), "@edit-three"]},
+        )
+        saved = (body or {}).get("task") or {}
+        rep.check(
+            "новый чат добавляется одним обходом",
+            status == 200 and saved.get("targets_count") == 3 and sweeps - before == 1,
+            f"статус {status}, {saved.get('targets_count')} чат., обходов: {sweeps - before}",
+        )
+
+        status, body = await cab.patch(
+            f"/api/tasks/{task_id}", json={"targets": ["-3001", "@нет-такого"]}
+        )
+        rep.check(
+            "опечатка в ссылке — 404, список чатов остаётся прежним",
+            status == 404 and "Не нашёл" in str((body or {}).get("error")),
+            f"статус {status}, {(body or {}).get('error')}",
+        )
+        status, body = await cab.get("/api/tasks")
+        alive = [t for t in (body or {}).get("tasks") or [] if t.get("id") == task_id]
+        rep.check(
+            "и задача работает на трёх чатах",
+            bool(alive) and alive[0].get("targets_count") == 3,
+            f"{alive[0].get('targets_count') if alive else 'задачи нет'}",
+        )
+
+        status, body = await cab.patch(f"/api/tasks/{task_id}", json={"message": ""})
+        rep.check(
+            "пустое обязательное поле — 400, а не «оставить как было»",
+            status == 400 and "сообщение" in str((body or {}).get("error")),
+            f"статус {status}, {(body or {}).get('error')}",
+        )
+
+        # Что кабинет подставил в форму, то сервер принимает обратно без правок.
+        status, body = await cab.get("/api/tasks")
+        current = next(
+            (t for t in (body or {}).get("tasks") or [] if t.get("id") == task_id), {}
+        )
+        status, body = await cab.patch(f"/api/tasks/{task_id}", json=current.get("edit") or {})
+        saved = (body or {}).get("task") or {}
+        rep.check(
+            "форма правки возвращается серверу без изменений",
+            status == 200
+            and saved.get("edit") == current.get("edit")
+            and saved.get("title") == current.get("title"),
+            f"статус {status}, {(body or {}).get('error') or ''}",
+        )
+
+    # Текст и интервал правятся даже при закрытом входе в аккаунт: прежние чаты
+    # у задачи уже есть вместе с именами, обход диалогов нужен только новым.
+    # Раньше «переделать задачу» означало создать её заново — а создание без
+    # входа невозможно, и поправить свой же текст было нельзя вообще никак.
+    with configured(api_id=0, api_hash=""):
+        status, body = await cab.patch(f"/api/tasks/{task_id}", json={"message": "новый текст"})
+        rep.check(
+            "текст правится при закрытом входе в аккаунт",
+            status == 200,
+            f"статус {status}, {(body or {}).get('error') or ''}",
+        )
+        status, body = await cab.patch(f"/api/tasks/{task_id}", json={"targets": ["@edit-new"]})
+        rep.check(
+            "а новый чат без входа — 503 с причиной, а не пятисотка",
+            status == 503 and (body or {}).get("feature") == "account_login",
+            f"статус {status}, feature={(body or {}).get('feature')}",
+        )
+
+    await cab.post(f"/api/tasks/{task_id}/archive")
+    status, body = await cab.patch(f"/api/tasks/{task_id}", json={"interval": 3})
+    rep.check(
+        "архивную задачу не правим — 409",
+        status == 409 and "архив" in str((body or {}).get("error")),
+        f"статус {status}, {(body or {}).get('error')}",
+    )
+
+    status, _ = await cab.patch("/api/tasks/10000000", json={"interval": 3})
+    rep.check("чужая или удалённая задача — 404", status == 404, f"статус {status}")
+    status, _ = await cab.patch(f"/api/tasks/{task_id}", data="не json")
+    rep.check("тело правки не JSON — 400", status == 400, f"статус {status}")
+
+    # Прибираем за собой: следующие разделы видят кабинет таким, каким его
+    # оставил seed().
+    status, _ = await cab.delete(f"/api/tasks/{task_id}")
+    rep.check("задача прогона удалена", status == 200, f"статус {status}")
+    rep.note("поиск чатов подменён заглушкой: Telegram в разделе не участвует")
+
+
 async def check_chats_and_accounts(cab: Cabinet, rep: Report, account_id: int) -> None:
     """Чаты и аккаунты: пустой список тут — честный ответ, а не поломка."""
     rep.section("Чаты и аккаунты")
@@ -1679,6 +1867,7 @@ async def run_all(rep: Report) -> None:
             await check_tasks(cab, rep, account_id, rule_id)
             await check_task_actions(cab, rep, rule_id)
             await check_mailing_and_library(cab, rep, account_id)
+            await check_task_edit(cab, rep, account_id)
             await check_chats_and_accounts(cab, rep, account_id)
             await check_account_login(cab, rep)
             await check_subscription(cab, rep, me)

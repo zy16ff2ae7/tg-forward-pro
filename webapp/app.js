@@ -34,6 +34,11 @@ const state = {
   mode: 'copy',
   botUrl: '',
   activeCommand: null, // команда, под которую сейчас собрана шторка
+  editTask: null,      // задача, которую правит открытая шторка (null — создаём новую)
+  // Ссылка на чат → его название. Форма и её итоги показывают имена, а в поле
+  // лежат ссылки: у готовой задачи это числовые id, и без этой карты правка
+  // предлагала бы выбирать «-1001234567890».
+  chatNames: {},
   lastResultsId: null, // для кнопки «Повторить» в шторке результатов
   bankedDays: 0,
   chats: [],                // последний список чатов с бэка
@@ -223,25 +228,32 @@ function toast(text) {
 
 const DEMO_STATE = {
   tasks: [
+    // edit — значения для формы «⚙️ Настроить»: те же поля, что принимает
+    // /api/tasks (на сервере их отдаёт _edit_view). Без них у карточки не было
+    // бы кнопки настройки, и в демо правку задачи посмотреть было бы нельзя.
     { id: 1, title: 'Новости театра → Мой канал', kind: 'forward', kind_label: 'пересылка',
       source: 'Новости театра', target: 'Мой канал', archived: false, oneshot: false,
       enabled: true, mode: 'copy', delay: 60, forwarded: 842, account_id: 1,
       progress: { done: 842, total: null },
+      edit: { account_id: 1, names: {}, source: 'Новости театра', target: 'Мой канал', mode: 'copy' },
       created_at: '2026-08-12T10:20:00' },
     { id: 2, title: 'Афиша → Зеркало афиши', kind: 'forward', kind_label: 'пересылка',
       source: 'Афиша', target: 'Зеркало афиши', archived: false, oneshot: false,
       enabled: true, mode: 'forward', delay: 0, forwarded: 317, account_id: 1,
       progress: { done: 317, total: null },
+      edit: { account_id: 1, names: {}, source: 'Афиша', target: 'Зеркало афиши', mode: 'forward' },
       created_at: '2026-08-18T09:05:00' },
     { id: 3, title: 'Подборки → Черновики', kind: 'forward', kind_label: 'пересылка',
       source: 'Подборки', target: 'Черновики', archived: false, oneshot: false,
       enabled: false, mode: 'copy', delay: 300, forwarded: 125, account_id: 1,
       progress: { done: 125, total: null },
+      edit: { account_id: 1, names: {}, source: 'Подборки', target: 'Черновики', mode: 'copy' },
       created_at: '2026-08-21T18:40:00' },
     { id: 4, title: 'Парсер аудитории: Конкуренты', kind: 'parser', kind_label: 'парсер аудитории',
       source: 'Конкуренты', target: 'Конкуренты', archived: true, oneshot: true,
       enabled: false, mode: 'copy', delay: 0, forwarded: 640, account_id: 1,
       progress: { done: 640, total: 1000 },
+      edit: { account_id: 1, names: {}, source: 'Конкуренты', limit: 1000 },
       created_at: '2026-08-25T11:00:00' },
   ],
   nextId: 5,
@@ -505,6 +517,149 @@ function demoChatList(body, kind) {
   return chats;
 }
 
+/* Задачи «в любое число чатов»: у них список получателей, счёт чатов в карточке
+   и один и тот же расчёт заголовка. Тот же набор, что MULTI_CHAT_KINDS на сервере. */
+const DEMO_MULTI_CHAT = ['broadcast', 'poster', 'mailing'];
+
+/* Команда каталога по id из тела запроса (или по типу задачи — так приходит
+   правка готовой задачи и старые формы без command). */
+function demoCommand(id, kind) {
+  return DEMO_COMMANDS.find((item) => item.id === id)
+    || DEMO_COMMANDS.find((item) => item.kind === kind)
+    || DEMO_COMMANDS[0];
+}
+
+/* Название чата по ссылке. Сервер помнит имена чатов в самой задаче
+   (filters.chat_titles), демо ищет их в своём списке чатов — важно, чтобы форма
+   правки показывала имена, а не «2001». */
+function demoChatName(ref) {
+  const key = String(ref || '').trim().replace(/^@/, '').toLowerCase();
+  if (!key) return '';
+  const chat = DEMO_CHATS.find((item) => String(item.username || '').toLowerCase() === key
+    || String(item.id) === key
+    || String(item.title).toLowerCase() === key);
+  return chat ? chat.title : String(ref);
+}
+
+/* Тексты рассылки в демо живут там же, где на сервере: в библиотеке. Набранный
+   текст становится её записями, а задача держит ссылки на них — поэтому правка
+   тем же текстом не плодит копий (на сервере это делает _mailing_texts). */
+function demoMailingTexts(body) {
+  const picked = (body.library_ids || []).map(Number).filter(Boolean);
+  if (picked.length) return picked;
+  return splitMessages(body.message).map((text) => {
+    const found = DEMO_LIBRARY.items.find((item) => item.text === text);
+    if (found) return found.id;
+    const item = {
+      id: DEMO_LIBRARY.nextId++,
+      title: messageTitle(text),
+      text,
+      chat_id: 0,
+      message_id: 0,
+      created_at: new Date().toISOString(),
+    };
+    DEMO_LIBRARY.items.unshift(item);
+    return item.id;
+  });
+}
+
+/* Тело запроса → поля задачи. Одна функция и на создание, и на правку: демо
+   повторяет здесь _task_view сервера, и второй такой расчёт разошёлся бы с ним
+   на первой же новой настройке. */
+function demoTaskFill(task, body, command) {
+  const kind = command.kind;
+  const chats = demoChatList(body, kind);
+  const msgs = splitMessages(body.message).length;
+  const libraryIds = kind === 'mailing' ? demoMailingTexts(body) : [];
+  const done = task.progress ? task.progress.done || 0 : 0;
+  Object.assign(task, {
+    kind,
+    kind_label: command.title.toLowerCase(),
+    title: demoTaskTitle(body, command),
+    source: String(body.source || ''),
+    target: String(chats[0] || body.target || body.source || ''),
+    mode: kind === 'forward' ? (body.mode || 'copy') : 'copy',
+    account_id: Number(body.account_id) || task.account_id || 1,
+  });
+  // Дальше — то же, что показывает сервер: счёт чатов у задач «в несколько
+  // чатов», расписание у постинга, паузы и круги у рассылки.
+  if (DEMO_MULTI_CHAT.includes(kind)) {
+    task.targets_count = chats.length;
+    task.chats = chats.map((ref) => ({ id: ref, title: demoChatName(ref) }));
+  }
+  if (kind === 'parser') task.progress = { done, total: Number(body.limit) || 200 };
+  if (kind === 'poster') {
+    task.interval_min = Number(body.interval) || 2;
+    task.window_start = body.start || '00:00';
+    task.window_end = body.end || '23:59';
+    task.messages_count = msgs;
+  }
+  if (kind === 'mailing') {
+    const repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
+    task.mailing = {
+      recipients: chats.length,
+      messages_count: libraryIds.length || msgs,
+      gap_seconds: Number(body.gap) || 5,
+      cycle_seconds: Number(body.cycle) || 10,
+      repeats,
+      typing: Boolean(body.typing),
+      random_pick: Boolean(body.random_pick),
+    };
+    if (repeats > 0 && chats.length) task.progress = { done, total: chats.length * repeats };
+  }
+  task.edit = demoTaskEdit(body, command, chats, libraryIds);
+  return task;
+}
+
+/* Значения задачи для формы правки — ровно те поля, что принимает /api/tasks
+   (на сервере их собирает _edit_view). Форма правки в кабинете одна на демо и на
+   сервер, поэтому и набор полей обязан быть один. */
+function demoTaskEdit(body, command, chats, libraryIds) {
+  const kind = command.kind;
+  const fields = [...(command.needs || []), ...(command.optional || [])];
+  const names = {};
+  [...chats, body.source, body.target, body.target_user].forEach((raw) => {
+    const ref = String(raw || '').trim();
+    if (!ref || names[ref]) return;
+    const name = demoChatName(ref);
+    if (name && name !== ref) names[ref] = name;
+  });
+  const edit = { account_id: Number(body.account_id) || 1, names };
+  if (fields.includes('targets')) {
+    // У автоподписки в списке стоят ссылки, по которым она вступает: id у
+    // ненайденного канала ещё нет, и подставлять в форму нечего кроме них.
+    edit.targets = kind === 'autosubscribe'
+      ? (body.targets || []).map(String)
+      : chats.slice();
+  }
+  if (body.source) edit.source = String(body.source);
+  if (fields.includes('target') && (body.target || chats[0])) {
+    edit.target = String(body.target || chats[0]);
+  }
+  if (body.target_user) edit.target_user = String(body.target_user);
+  if (kind === 'forward') edit.mode = body.mode || 'copy';
+  else if (kind === 'parser') edit.limit = Number(body.limit) || 200;
+  else if (kind === 'baiting') edit.reaction = body.reaction || '👍';
+  else if (['checks', 'dialogs', 'mute'].includes(kind)) {
+    edit.keywords = (body.keywords || []).join(', ');
+  } else if (kind === 'poster') {
+    edit.message = String(body.message || '');
+    edit.interval = Number(body.interval) || 2;
+    edit.start = body.start || '00:00';
+    edit.end = body.end || '23:59';
+  } else if (kind === 'mailing') {
+    // Текст рассылки живёт в библиотеке, поэтому в форму идут ссылки на записи,
+    // а не сам текст: иначе «Сохранить» плодило бы их копии.
+    edit.library_ids = libraryIds.slice();
+    edit.gap = Number(body.gap) || 5;
+    edit.cycle = Number(body.cycle) || 10;
+    edit.repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
+    edit.typing = Boolean(body.typing);
+    edit.random_pick = Boolean(body.random_pick);
+  }
+  return edit;
+}
+
 function demoTaskTitle(body, command) {
   if (command) {
     if (command.kind === 'parser') return `Парсер аудитории: ${body.source}`;
@@ -520,7 +675,7 @@ function demoTaskTitle(body, command) {
     // Постинг, рассылка и пересылка в чаты ходят в любое число чатов: в
     // заголовке счёт, а имя чата — только когда он один. Тот же расчёт, что
     // task_title на сервере.
-    if (['broadcast', 'poster', 'mailing'].includes(command.kind)) {
+    if (DEMO_MULTI_CHAT.includes(command.kind)) {
       const chats = demoChatList(body, command.kind);
       const many = chats.length > 1 ? `${chats.length} чат.` : (chats[0] || '');
       if (command.kind === 'broadcast') return `Пересылка: ${body.source} → ${many}`;
@@ -633,60 +788,39 @@ function demoApi(path, options = {}) {
       DEMO_STATE.tasks = DEMO_STATE.tasks.filter((t) => t.id !== id);
       return { ok: true };
     }
+    // Правка задачи: меняется только присланное, остальное берём из её же формы —
+    // ровно так же считает сервер (partial=True в _apply_task_settings).
+    if (method === 'PATCH' && !tail) {
+      if (!task) demoFail(404, 'Задача не найдена');
+      if (task.archived) {
+        demoFail(409, 'Задача в архиве: верните её из архива, чтобы менять настройки');
+      }
+      const patch = JSON.parse(options.body || '{}');
+      const body = Object.assign({}, task.edit, patch);
+      demoTaskFill(task, body, demoCommand(patch.command, task.kind));
+      return { ok: true, task };
+    }
     return { ok: true };
   }
 
   if (clean === '/api/tasks' && method === 'POST') {
     const body = JSON.parse(options.body || '{}');
-    const command = DEMO_COMMANDS.find((item) => item.id === body.command)
-      || DEMO_COMMANDS.find((item) => item.kind === body.kind)
-      || DEMO_COMMANDS[0];
+    const command = demoCommand(body.command, body.kind);
     const kind = command.kind;
-    // Первый чат задачи: у постинга и рассылки поля «приёмник» нет вовсе, и без
-    // этого карточка в демо оставалась безымянной. Список — тот же, что у
-    // заголовка, и без источника внутри: его сервер из получателей выкидывает.
-    const chats = demoChatList(body, kind);
+    const oneshot = kind === 'parser' || kind === 'autosubscribe';
     const task = {
       id: DEMO_STATE.nextId++,
-      kind,
-      kind_label: command.title.toLowerCase(),
-      title: demoTaskTitle(body, command),
-      source: String(body.source || ''),
-      target: String(chats[0] || body.source || ''),
       archived: false,
-      oneshot: kind === 'parser' || kind === 'autosubscribe',
-      enabled: kind !== 'parser' && kind !== 'autosubscribe',
-      mode: kind === 'forward' ? (body.mode || 'copy') : 'copy',
+      oneshot,
+      enabled: !oneshot,
       delay: 0,
       forwarded: 0,
-      progress: { done: 0, total: kind === 'parser' ? (Number(body.limit) || 200) : null },
+      progress: { done: 0, total: null },
       account_id: Number(body.account_id) || 1,
       created_at: new Date().toISOString(),
     };
-    // Дальше демо повторяет _task_view: счёт чатов у всех задач «в несколько
-    // чатов», расписание у постинга, паузы и круги у рассылки. Иначе в демо на
-    // карточке не видно того, что показывает сервер.
-    const msgs = splitMessages(body.message).length;
-    if (['broadcast', 'poster', 'mailing'].includes(kind)) task.targets_count = chats.length;
-    if (kind === 'poster') {
-      task.interval_min = Number(body.interval) || 2;
-      task.window_start = body.start || '00:00';
-      task.window_end = body.end || '23:59';
-      task.messages_count = msgs;
-    }
-    if (kind === 'mailing') {
-      const repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
-      task.mailing = {
-        recipients: chats.length,
-        messages_count: (body.library_ids || []).length || msgs,
-        gap_seconds: Number(body.gap) || 5,
-        cycle_seconds: Number(body.cycle) || 10,
-        repeats,
-        typing: Boolean(body.typing),
-        random_pick: Boolean(body.random_pick),
-      };
-      if (repeats > 0 && chats.length) task.progress = { done: 0, total: chats.length * repeats };
-    }
+    // Название, чаты, расписание и форма правки — там же, где у правки задачи.
+    demoTaskFill(task, body, command);
     DEMO_STATE.tasks.push(task);
     const run = kind === 'parser'
       ? { ok: true, collected: 128, limit: Number(body.limit) || 200 }
@@ -1368,6 +1502,11 @@ function taskActionsHtml(task) {
     acts.push(`<button class="btn" data-action="unarchive" data-id="${task.id}">↩︎ Из архива</button>`);
   } else {
     acts.push(taskPauseButton(task));
+    // «Настроить» — вместо «удалить и создать заново»: у пересозданной задачи
+    // обнулялись счётчики, а у рассылки терялось место в круге.
+    if (task.edit) {
+      acts.push(`<button class="btn" data-action="edit" data-id="${task.id}">⚙️ Настроить</button>`);
+    }
     if (kind === 'forward') {
       acts.push(`<button class="btn" data-action="mode" data-id="${task.id}">🔁 Режим</button>`);
     }
@@ -1470,6 +1609,10 @@ async function refreshAllTaskLists() {
 
 async function taskAction(action, id, button) {
   try {
+    if (action === 'edit') {
+      openTaskEdit(id);
+      return;
+    }
     if (action === 'toggle') await withLoading(button, () => api(`/api/tasks/${id}/toggle`, { method: 'POST' }));
     if (action === 'mode') await withLoading(button, () => api(`/api/tasks/${id}/mode`, { method: 'POST' }));
     if (action === 'archive') await withLoading(button, () => api(`/api/tasks/${id}/archive`, { method: 'POST' }));
@@ -1647,6 +1790,7 @@ async function loadChats() {
     const data = await api(`/api/chats?account_id=${account.id}&q=${query}`);
     endLoad(holder);
     state.chats = data.chats || [];
+    rememberChatNames(state.chats);
     if (!data.online) {
       holder.innerHTML = emptyHtml('📴', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте.');
       updateChatBar();
@@ -2313,10 +2457,31 @@ function renderFieldCount(key) {
     holder.innerHTML = '';
     return;
   }
-  const head = refs.slice(0, 2).join(', ');
+  // Имя вместо ссылки, если оно известно: у готовой задачи в поле стоят числовые
+  // id, и строка «-1001234567890, -1009876543210» человеку ничего не говорит.
+  const head = refs.slice(0, 2).map(chatRefName).join(', ');
   holder.innerHTML = `<b>${refs.length} ${chatWord(refs.length)}</b>
     <span>${esc(refs.length > 2 ? `${head} и ещё ${refs.length - 2}` : head)}</span>
     <button type="button" data-count-clear="${key}">очистить</button>`;
+}
+
+/* Ссылка на чат → как её назвать человеку. Названия кабинет запоминает там, где
+   уже видел их с именами: в списке чатов аккаунта и в самой задаче (edit.names).
+   Неизвестную ссылку показываем как есть — это то, что человек вписал сам. */
+function chatRefName(ref) {
+  return state.chatNames[ref] || ref;
+}
+
+/* Названия чатов из списка — в память кабинета. Список приходит с именами, и
+   второй раз спрашивать сервер ради подписи под полем незачем. */
+function rememberChatNames(chats) {
+  (chats || []).forEach((chat) => {
+    const title = chatTitle(chat);
+    if (!title) return;
+    const ref = chatToRef(chat);
+    if (ref) state.chatNames[ref] = title;
+    if (chat.id) state.chatNames[String(chat.id)] = title;
+  });
 }
 
 /* Итог под «Сообщением»: сколько сообщений уйдёт и с чего начинается каждое.
@@ -2345,7 +2510,7 @@ function renderFieldCounts() {
   });
 }
 
-function openTaskSheet(command, prefill) {
+function openTaskSheet(command, prefill, task) {
   if (!state.features.account_login_enabled) {
     toast('Вход аккаунтов пока на настройке');
     switchTab('accounts');
@@ -2361,19 +2526,33 @@ function openTaskSheet(command, prefill) {
   state.activeCommand = command
     || state.commands.find((item) => item.id === 'copy_channel')
     || { id: 'copy_channel', kind: 'forward', title: 'Копирование канала', emoji: '🔁', needs: ['account', 'source', 'target'], optional: ['mode'] };
+  // Правка идёт той же шторкой: у формы создания и формы настройки один набор
+  // полей, и второй такой набор разошёлся бы с первым на первой же настройке.
+  state.editTask = task && task.edit ? task : null;
   state.mode = 'copy';
   // Выбор из библиотеки живёт ровно одну форму: чужой выбор в новой задаче
   // молча отправил бы не те сообщения.
   state.libraryPick = [];
 
-  $('taskSheetTitle').textContent = `${state.activeCommand.emoji || ''} ${state.activeCommand.title}`.trim();
-  $('taskSheetLead').textContent = state.activeCommand.description || '';
+  const editing = Boolean(state.editTask);
+  $('taskSheetTitle').textContent = editing
+    ? '⚙️ Настройка задачи'
+    : `${state.activeCommand.emoji || ''} ${state.activeCommand.title}`.trim();
+  $('taskSheet').setAttribute('aria-label', editing ? 'Настройка задачи' : 'Новая задача');
+  $('taskSheetLead').textContent = editing
+    ? `«${task.title}» · ${state.activeCommand.title}. Меняется только то, что поправите: ` +
+      'счётчики, номер задачи и место в круге рассылки останутся на месте.'
+    : state.activeCommand.description || '';
   $('taskFields').innerHTML = [
     ...state.activeCommand.needs,
     ...(state.activeCommand.optional || []),
   ].map(fieldHtml).join('');
-  $('taskHint').textContent = state.activeCommand.hint
-    || 'Аккаунт должен быть подписан на источник и иметь право писать в приёмник.';
+  $('taskHint').textContent = editing
+    ? 'Тип задачи и аккаунт не меняются — это была бы уже другая задача. Новый чат в ' +
+      'списке кабинет найдёт через аккаунт, для прежних чатов связь не нужна.'
+    : state.activeCommand.hint
+      || 'Аккаунт должен быть подписан на источник и иметь право писать в приёмник.';
+  $('taskSubmit').textContent = editing ? '💾 Сохранить' : 'Запустить задачу';
   $('taskError').textContent = '';
 
   fillTaskAccounts();
@@ -2382,15 +2561,49 @@ function openTaskSheet(command, prefill) {
   $('taskSheet').classList.add('is-open');
 }
 
-/* Заполняем поля формы значениями из выбранных чатов. Применяется после
-   построения разметки полей (DOM уже существует). Источник оставляем пустым —
-   иначе легко отправить парсер на свой собственный канал по ошибке. */
+/* Задача, по которой нажали кнопку. Ищем во всех трёх списках: карточка одна и
+   та же на «Главной», в активных и на паузе, а лежат они по разным спискам. */
+function findTask(id) {
+  const lists = state.tasksByStatus;
+  return [...(lists.active || []), ...(lists.paused || []), ...(lists.done || [])]
+    .find((task) => task.id === Number(id)) || null;
+}
+
+/* «⚙️ Настроить» — открыть задачу в форме с её же значениями.
+   Раньше поменять интервал или текст можно было только пересозданием задачи:
+   вместе с ней терялись счётчики, номер и место в круге рассылки. */
+function openTaskEdit(id) {
+  const task = findTask(id);
+  if (!task || !task.edit) {
+    toast('Задача не найдена');
+    return;
+  }
+  if (task.archived) {
+    toast('Сначала верните задачу из архива');
+    return;
+  }
+  const command = state.commands.find((item) => item.kind === task.kind)
+    || state.commands.find((item) => item.id === 'copy_channel');
+  if (!command) {
+    toast('Каталог команд ещё не загружен');
+    return;
+  }
+  openTaskSheet(command, task.edit, task);
+}
+
+/* Заполняем поля формы значениями задачи или выбранных чатов. Применяется после
+   построения разметки полей (DOM уже существует). Имена полей здесь те же, что
+   в теле запроса: форма правки получает от сервера ровно то, что отправит
+   обратно, — поэтому и разбор один. */
 function applyTaskPrefill(prefill) {
   const setValue = (key, value) => {
     if (value == null || value === '') return;
     const node = $(`task_${key}`);
     if (node && node.value !== undefined) node.value = value;
   };
+  // Названия чатов задачи приходят вместе с ней: в поле лежат ссылки (у готовой
+  // задачи — числовые id), а под полем человек должен видеть имена.
+  if (prefill.names) Object.assign(state.chatNames, prefill.names);
   setValue('target', prefill.target);
   if (Array.isArray(prefill.targets)) {
     setValue('targets', prefill.targets.join(', '));
@@ -2399,6 +2612,36 @@ function applyTaskPrefill(prefill) {
   }
   setValue('source', prefill.source);
   setValue('target_user', prefill.target_user);
+  // Настройки задачи — одним проходом: ключ формы и ключ задачи совпадают, а
+  // лишние для этой команды поля просто не находятся в разметке.
+  ['keywords', 'reaction', 'limit', 'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats']
+    .forEach((key) => setValue(key, prefill[key]));
+  ['typing', 'random_pick'].forEach((key) => {
+    const node = $(`task_${key}`);
+    if (node) node.checked = Boolean(prefill[key]);
+  });
+  if (prefill.mode === 'copy' || prefill.mode === 'forward') {
+    state.mode = prefill.mode;
+    document.querySelectorAll('#taskMode .seg').forEach((seg) => {
+      seg.classList.toggle('is-active', seg.dataset.mode === prefill.mode);
+    });
+  }
+  // Аккаунт задачи не меняется: другой аккаунт — это другие чаты и другая
+  // задача. Показываем его и запираем, чтобы это было видно, а не угадывалось.
+  const account = $('taskAccount');
+  if (account && state.editTask) {
+    if (prefill.account_id) account.value = String(prefill.account_id);
+    account.disabled = true;
+  } else if (account) {
+    account.disabled = false;
+  }
+  if (Array.isArray(prefill.library_ids) && prefill.library_ids.length) {
+    state.libraryPick = prefill.library_ids.map(Number).filter(Boolean);
+    renderLibraryPicks();
+    // Имена сохранённых сообщений лежат в библиотеке: без неё чипсы показывали
+    // бы «сообщение #7» — по номеру человек свой текст не узнаёт.
+    if (!state.library.length) loadLibrary().then(renderLibraryPicks).catch(() => {});
+  }
   renderFieldCounts();
 }
 
@@ -2542,6 +2785,7 @@ async function loadPickerChats() {
     const data = await api(`/api/chats?account_id=${account.id}&q=${query}`);
     endLoad(holder);
     state.picker.chats = data.chats || [];
+    rememberChatNames(state.picker.chats);
     if (!data.online) {
       holder.innerHTML = emptyHtml('📴', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте — список чатов читает он.');
       return;
@@ -2701,15 +2945,24 @@ function closeSheets() {
   const loginWasOpen = $('loginSheet').classList.contains('is-open');
   document.querySelectorAll('.sheet').forEach((sheet) => sheet.classList.remove('is-open'));
   state.activeCommand = null;
+  state.editTask = null;
   state.picker = { mode: 'chats', key: null, multi: false, chosen: [], chats: [] };
   // Закрыли шторку на середине входа — в списке должна появиться карточка
   // «Продолжить вход»: шаг никуда не делся, он лежит в БД на сервере.
   if (loginWasOpen && state.login.stage !== 'phone') loadAccounts();
 }
 
-/* Значения полей → тело запроса POST /api/tasks. */
+/* Значения полей → тело запроса. Одно и то же тело идёт и в POST /api/tasks, и в
+   PATCH /api/tasks/{id}: на сервере правку разбирают те же правила, что и
+   создание, поэтому второй сборки полей здесь быть не должно.
+
+   Разница одна. Форма правки — это полный снимок задачи, поэтому пустое
+   необязательное поле уходит как есть: человек стёр слова-ловушки, значит их
+   надо убрать. У новой задачи пустое поле в тело не попадает — там за него
+   отвечают умолчания сервера. */
 function collectTaskPayload() {
   const command = state.activeCommand;
+  const editing = Boolean(state.editTask);
   const values = {};
   [...command.needs, ...(command.optional || [])].forEach((key) => {
     values[key] = fieldValue(key);
@@ -2723,25 +2976,45 @@ function collectTaskPayload() {
   if (missing.length) return { error: 'Заполните: ' + missing.join(', ') };
 
   const body = { command: command.id, account_id: Number(values.account) || 0 };
-  if (values.source) body.source = values.source;
-  if (values.target) body.target = values.target;
-  if (values.target_user) body.target_user = values.target_user;
-  if (values.reaction) body.reaction = values.reaction;
-  if (values.keywords) body.keywords = splitList(values.keywords);
-  if (values.targets) body.targets = splitList(values.targets);
-  if (values.limit) body.limit = Number(values.limit) || 0;
-  if (values.mode) body.mode = values.mode;
-  if (values.message) body.message = values.message;
-  if (values.interval) body.interval = Number(values.interval) || 0;
-  if (values.start) body.start = values.start;
-  if (values.end) body.end = values.end;
-  if (values.gap) body.gap = Number(values.gap) || 0;
-  if (values.cycle) body.cycle = Number(values.cycle) || 0;
-  if (values.repeats) body.repeats = Number(values.repeats) || 0;
-  if (values.typing) body.typing = true;
-  if (values.random_pick) body.random_pick = true;
+  const text = (key, value) => {
+    if (value === undefined) return;          // поля нет у этой команды
+    if (value || editing) body[key] = value;
+  };
+  const number = (key, value) => {
+    // Пустое число — «оставь как было», а не ноль: ноль минут и ноль участников
+    // означали бы совсем другую задачу, чем та, которую не стали править.
+    if (value === undefined || value === '') return;
+    body[key] = Number(value) || 0;
+  };
+  const flag = (key, value) => {
+    if (value === undefined) return;
+    if (value || editing) body[key] = Boolean(value);
+  };
+
+  text('source', values.source);
+  text('target', values.target);
+  text('target_user', values.target_user);
+  text('reaction', values.reaction);
+  text('mode', values.mode);
+  text('message', values.message);
+  text('start', values.start);
+  text('end', values.end);
+  if (values.keywords !== undefined && (values.keywords || editing)) {
+    body.keywords = splitList(values.keywords);
+  }
+  if (values.targets !== undefined && (values.targets || editing)) {
+    body.targets = splitList(values.targets);
+  }
+  number('limit', values.limit);
+  number('interval', values.interval);
+  number('gap', values.gap);
+  number('cycle', values.cycle);
+  number('repeats', values.repeats);
+  flag('typing', values.typing);
+  flag('random_pick', values.random_pick);
   // Явный выбор из библиотеки важнее набранного текста — так же считает сервер.
   if (state.libraryPick.length) body.library_ids = state.libraryPick;
+  else if (editing && command.kind === 'mailing') body.library_ids = [];
   return { body };
 }
 
@@ -2754,12 +3027,21 @@ async function submitTask() {
     return;
   }
 
+  const editing = state.editTask;
   const button = $('taskSubmit');
   try {
-    const data = await withLoading(button, () =>
-      api('/api/tasks', { method: 'POST', body: JSON.stringify(body) })
-    );
+    const data = await withLoading(button, () => (editing
+      ? api(`/api/tasks/${editing.id}`, { method: 'PATCH', body: JSON.stringify(body) })
+      : api('/api/tasks', { method: 'POST', body: JSON.stringify(body) })));
     closeSheets();
+
+    // Правка ничего не запускает и не переносит задачу между списками: она
+    // остаётся там же, где была, — обновляем списки и остаёмся на месте.
+    if (editing) {
+      toast('Настройки сохранены');
+      await refreshAllTaskLists();
+      return;
+    }
 
     const run = data.run;
     if (run) toast(runMessage(run));

@@ -416,6 +416,149 @@ async def list_tasks(request: web.Request) -> web.Response:
     return _json({"tasks": [_task_view(rule, collected.get(rule.id)) for rule in rules]})
 
 
+# Задачи, у которых источника нет по устройству: 0 в source_id тут по делу —
+# иначе входящее сообщение в чате-получателе подхватило бы рассылку как обычную
+# пересылку. Название рядом видит человек в карточке, поэтому оно осмысленное.
+NO_SOURCE_TITLE: dict[str, str] = {
+    "poster": "постинг по расписанию",
+    "mailing": "рассылка по очереди",
+}
+# Задачи, которые работают и без источника: подпись вместо пустого места.
+EMPTY_SOURCE_TITLE: dict[str, str] = {
+    "autosubscribe": "все чаты аккаунта",
+    "dialogs": "личные диалоги",
+}
+
+
+def _remember_names(filters: dict, pairs: list[tuple[int, str] | None]) -> None:
+    """Запоминает названия чатов задачи рядом с их id.
+
+    В колонках правила есть названия только источника и первого чата, а
+    остальные чаты — просто числа. Из-за этого задача на двадцать чатов не могла
+    показать ни одного имени, а правка списка предлагала выбирать
+    «-1001234567890». Названия уже получены обходом диалогов — второй раз
+    спрашивать Telegram незачем, храним их в настройках задачи.
+    """
+    names = dict(filters.get("chat_titles") or {})
+    for pair in pairs:
+        if not pair:
+            continue
+        chat_id, title = pair
+        if chat_id and title and title != str(chat_id):
+            names[str(chat_id)] = title
+    filters["chat_titles"] = names
+
+
+def _stored_chats(rule) -> list[tuple[int, str]]:
+    """Чаты задачи парами (id, название) — так, как их знает сама задача.
+
+    Счёт чатов берём у планировщика (``chat_recipients``), названия — из
+    запомненных: тогда правка списка не теряет первый чат из ``target_id`` и не
+    требует нового обхода диалогов.
+    """
+    from app.telegram_client.jobs import chat_recipients
+
+    names = dict((rule.filters or {}).get("chat_titles") or {})
+    if rule.target_id and rule.target_title:
+        names.setdefault(str(rule.target_id), rule.target_title)
+    return [(chat_id, names.get(str(chat_id)) or str(chat_id)) for chat_id in chat_recipients(rule)]
+
+
+async def _mailing_texts(payload: dict, filters: dict, *, user_id: int, partial: bool) -> None:
+    """Тексты рассылки: набранное в форме — в библиотеку, ссылки на записи — в задачу.
+
+    Рассылка берёт сообщения только из библиотеки, поэтому текст из поля сначала
+    становится её записями. При правке тот же самый текст не должен плодить
+    копии: если он совпадает с уже привязанными записями, остаются прежние
+    ссылки — иначе каждое «Сохранить» добавляло бы в библиотеку ещё один
+    комплект тех же сообщений.
+    """
+    picked = _as_ids(payload.get("library_ids"))
+    if partial and not picked and "message" not in payload:
+        return  # правка не про тексты — оставляем как было
+
+    msgs = _split_messages(payload.get("message"))
+    saved_ids: list[int] = []
+    if msgs:
+        current = _as_ids(filters.get("library_ids"))
+        async with SessionLocal() as session:
+            if current:
+                rows = await repo.saved_messages_by_ids(session, user_id, current)
+                if [row.text for row in rows] == msgs:
+                    saved_ids = [row.id for row in rows]
+            if not saved_ids:
+                for text in msgs:
+                    item = await repo.add_saved_message(
+                        session, user_id=user_id, title=_message_title(text), text=text
+                    )
+                    saved_ids.append(item.id)
+                await session.commit()
+    # Явный выбор из библиотеки важнее только что набранного текста.
+    filters["library_ids"] = picked or saved_ids
+
+
+async def _apply_task_settings(
+    kind: str,
+    payload: dict,
+    filters: dict,
+    *,
+    user_id: int,
+    targets: list[str] | None = None,
+    partial: bool = False,
+) -> None:
+    """Настройки задачи из тела запроса — в filters правила.
+
+    Одна функция и на создание, и на правку. При создании отсутствующее поле
+    получает значение по умолчанию, при правке (``partial=True``) остаётся
+    прежним: человек, который поменял интервал, не должен потерять окно времени.
+    Вторая копия этих же правил в обработчике правки разошлась бы с первой на
+    первой же новой настройке — а настроек тут на десять типов задач.
+    """
+
+    def given(key: str) -> bool:
+        """Поле пришло — или это создание, где у каждой настройки есть умолчание."""
+        return key in payload or not partial
+
+    if kind == "parser":
+        if given("limit"):
+            filters["limit"] = max(1, min(_as_int(payload.get("limit"), 200), MAX_PARSER_LIMIT))
+    elif kind == "autosubscribe":
+        # Ссылки-приглашения храним как есть: вступать по ним будет сама задача.
+        if targets is not None:
+            filters["subscribe_to"] = targets
+    elif kind == "baiting":
+        if given("reaction"):
+            filters["reaction"] = str(payload.get("reaction") or "").strip() or "👍"
+    elif kind in ("checks", "dialogs", "mute"):
+        if given("keywords"):
+            filters["keywords"] = _as_list(payload.get("keywords"))
+    elif kind == "poster":
+        if given("message"):
+            filters["messages"] = _split_messages(payload.get("message")) or [
+                str(payload.get("message") or "").strip()
+            ]
+        if given("interval"):
+            filters["interval_seconds"] = max(1, _as_int(payload.get("interval"), 2)) * 60
+        if given("start"):
+            filters["window_start"] = str(payload.get("start") or "00:00")[:5]
+        if given("end"):
+            filters["window_end"] = str(payload.get("end") or "23:59")[:5]
+    elif kind == "mailing":
+        for field, name, default in (
+            ("gap", "gap_seconds", 5),
+            ("gap_jitter", "gap_jitter", 0),
+            ("cycle", "cycle_seconds", 10),
+            ("cycle_jitter", "cycle_jitter", 0),
+            ("repeats", "repeats", 1),
+        ):
+            if given(field):
+                filters[name] = max(0, _as_int(payload.get(field), default))
+        for field in ("typing", "random_pick", "link_preview"):
+            if given(field):
+                filters[field] = _as_bool(payload.get(field))
+        await _mailing_texts(payload, filters, user_id=user_id, partial=partial)
+
+
 @routes.post("/api/tasks")
 @require_auth
 async def create_task(request: web.Request) -> web.Response:
@@ -437,7 +580,7 @@ async def create_task(request: web.Request) -> web.Response:
     if command is not None:
         kind = command["kind"]
     elif kind in VALID_KINDS:
-        command = next((item for item in COMMANDS if item["kind"] == kind), None)
+        command = COMMANDS_BY_KIND.get(kind)
     else:
         # старый клиент прислал только аккаунт/источник/приёмник — это пересылка
         command, kind = COMMANDS_BY_ID["copy_channel"], "forward"
@@ -582,62 +725,18 @@ async def create_task(request: web.Request) -> web.Response:
         target_id, target_title = chats[0]
         filters["targets"] = [pair[0] for pair in chats[1:]]
 
+    if kind in NO_SOURCE_TITLE:
+        source_id, source_title = 0, NO_SOURCE_TITLE[kind]
+    elif not source_id and kind in EMPTY_SOURCE_TITLE:
+        source_title = EMPTY_SOURCE_TITLE[kind]
     if kind == "parser":
-        filters["limit"] = max(1, min(_as_int(payload.get("limit"), 200), MAX_PARSER_LIMIT))
         # приёмник парсеру не нужен, но колонка обязательна — пишем туда источник
         target_id, target_title = source_id, source_title
-    elif kind == "autosubscribe":
-        filters["subscribe_to"] = targets
-        if not source_id:
-            source_title = "все чаты аккаунта"
-    elif kind == "baiting":
-        filters["reaction"] = str(payload.get("reaction") or "").strip() or "👍"
-    elif kind in ("checks", "dialogs", "mute"):
-        filters["keywords"] = _as_list(payload.get("keywords"))
-        if kind == "dialogs" and not source_id:
-            source_title = "личные диалоги"
-    elif kind == "poster":
-        # Авто-постер: шлёт собственные сообщения в выбранные чаты по расписанию.
-        # Источник не нужен — ставим 0, чтобы не создавать ложного совпадения
-        # с входящими сообщениями приёмника.
-        source_id, source_title = 0, "постинг по расписанию"
-        msgs = _split_messages(payload.get("message")) or [
-            str(payload.get("message") or "").strip()
-        ]
-        filters["messages"] = msgs
-        interval_min = max(1, _as_int(payload.get("interval"), 2))
-        filters["interval_seconds"] = interval_min * 60
-        filters["window_start"] = str(payload.get("start") or "00:00")[:5]
-        filters["window_end"] = str(payload.get("end") or "23:59")[:5]
-    elif kind == "mailing":
-        # Рассылка по очереди: свои сообщения по списку получателей, по кругу.
-        # Источник не нужен — ставим 0, иначе входящее сообщение в первом же
-        # чате-получателе «подхватило» бы рассылку как обычную пересылку.
-        source_id, source_title = 0, "рассылка по очереди"
-        filters["gap_seconds"] = max(0, _as_int(payload.get("gap"), 5))
-        filters["gap_jitter"] = max(0, _as_int(payload.get("gap_jitter"), 0))
-        filters["cycle_seconds"] = max(0, _as_int(payload.get("cycle"), 10))
-        filters["cycle_jitter"] = max(0, _as_int(payload.get("cycle_jitter"), 0))
-        filters["repeats"] = max(0, _as_int(payload.get("repeats"), 1))
-        filters["typing"] = _as_bool(payload.get("typing"))
-        filters["random_pick"] = _as_bool(payload.get("random_pick"))
-        filters["link_preview"] = _as_bool(payload.get("link_preview"))
 
-        # Текст из формы кладём в библиотеку: рассылка берёт сообщения оттуда,
-        # и потом их можно пополнять, не пересоздавая задачу. Сообщения делит
-        # пустая строка, поэтому многострочный текст остаётся одной записью.
-        msgs = _split_messages(payload.get("message"))
-        saved_ids: list[int] = []
-        if msgs:
-            async with SessionLocal() as session:
-                for text in msgs:
-                    item = await repo.add_saved_message(
-                        session, user_id=user_id, title=_message_title(text), text=text
-                    )
-                    saved_ids.append(item.id)
-                await session.commit()
-        # Явный выбор из библиотеки важнее только что набранного текста.
-        filters["library_ids"] = _as_ids(payload.get("library_ids")) or saved_ids
+    # Названия всех чатов задачи — рядом с их id: карточка покажет имена, а
+    # правка задачи не будет заново обходить диалоги ради того же списка.
+    _remember_names(filters, [found_source, found_target, found_user, *chat_pairs])
+    await _apply_task_settings(kind, payload, filters, user_id=user_id, targets=targets)
 
     async with SessionLocal() as session:
         rule = await repo.add_rule(
@@ -669,6 +768,188 @@ async def create_task(request: web.Request) -> web.Response:
         saved = await repo.get_rule(session, rule_id, user_id)
 
     return _json({"task": _task_view(saved), "run": run_result}, status=201)
+
+
+@routes.patch("/api/tasks/{task_id}")
+@require_auth
+async def update_task(request: web.Request) -> web.Response:
+    """Меняет настройки готовой задачи.
+
+    Тело — те же поля, что и при создании (их список приходит в /api/commands:
+    needs/optional), но применяются только пришедшие: остальные настройки,
+    счётчики и место в круге рассылки остаются как были. Тип задачи и аккаунт не
+    меняются — это была бы уже другая задача.
+
+    Раньше правки не было вовсе: чтобы поменять интервал, текст или список
+    чатов, задачу приходилось удалять и создавать заново — вместе с ней
+    терялась вся статистика, а у рассылки ещё и место в круге.
+    """
+    user_id = request[USER_ID_KEY]
+    task_id = _as_int(request.match_info.get("task_id"), 0)
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return _json({"error": "Нужен JSON"}, status=400)
+
+    async with SessionLocal() as session:
+        rule = await repo.get_rule(session, task_id, user_id)
+        if rule is None:
+            return _json({"error": "Задача не найдена"}, status=404)
+        kind = rule.kind or "forward"
+        account_id = rule.account_id
+        filters = dict(rule.filters or {})
+        source_id, source_title = int(rule.source_id or 0), rule.source_title or ""
+        target_id, target_title = int(rule.target_id or 0), rule.target_title or ""
+        mode = rule.mode or "copy"
+        archived = bool(rule.archived)
+        stored_chats = _stored_chats(rule)
+
+    if archived:
+        # Архивная задача не работает, и менять её настройки — обещать человеку
+        # то, чего не произойдёт. Сначала из архива, потом настройки.
+        return _json(
+            {"error": "Задача в архиве: верните её из архива, чтобы менять настройки"},
+            status=409,
+        )
+
+    command = COMMANDS_BY_KIND.get(kind) or COMMANDS_BY_ID["copy_channel"]
+    needs = set(command["needs"])
+
+    source = str(payload.get("source") or "").strip()
+    target = str(payload.get("target") or "").strip()
+    target_user = str(payload.get("target_user") or "").strip()
+    targets = _as_list(payload.get("targets")) if "targets" in payload else None
+    # Одиночный «приёмник» у задач со списком чатов означает список из одного:
+    # так присылают бот и формы, сделанные до списка чатов.
+    if "targets" in needs and "target" not in needs and target and targets is None:
+        targets, target = [target], ""
+
+    # Пустое обязательное поле — это не «оставить как было», а попытка стереть
+    # то, без чего задача не работает: отвечаем той же ошибкой, что при создании.
+    missing: list[str] = []
+    if "source" in payload and "source" in needs and not source:
+        missing.append("источник")
+    if "target" in payload and "target" in needs and not target:
+        missing.append("приёмник")
+    if "target_user" in payload and "target_user" in needs and not target_user:
+        missing.append("человека, за которым следим")
+    if targets is not None and "targets" in needs and not targets:
+        missing.append(TARGETS_LABEL.get(kind, "чаты"))
+    if "message" in payload and "message" in needs and not _split_messages(payload.get("message")):
+        # У рассылки текст в поле не нужен, если сообщения взяты из библиотеки.
+        if not (kind == "mailing" and _as_ids(payload.get("library_ids"))):
+            missing.append("сообщение")
+    if missing:
+        return _json({"error": "Укажите: " + ", ".join(missing)}, status=400)
+
+    # Ссылки, которые в задаче уже стоят, второй раз не ищем: у неё есть и id, и
+    # название. Поэтому текст, интервал и порядок чатов правятся даже при
+    # отключённом аккаунте — обход диалогов нужен только для НОВЫХ чатов.
+    known: dict[str, tuple[int, str]] = {
+        str(chat_id): (chat_id, title) for chat_id, title in stored_chats
+    }
+    names = dict(filters.get("chat_titles") or {})
+    if source_id:
+        known[str(source_id)] = (source_id, source_title or str(source_id))
+    watched = int(filters.get("target_user_id") or 0)
+    if watched:
+        known[str(watched)] = (watched, names.get(str(watched)) or str(watched))
+
+    wanted = [ref for ref in [source, target, target_user, *(targets or [])] if ref]
+    unknown = [ref for ref in wanted if ref not in known]
+    resolved: dict[str, tuple[int, str]] = {}
+    if unknown:
+        _require_account_login()
+        resolved = await manager.resolve_many(account_id, unknown)
+
+    errors: list[str] = []
+
+    def _pick(ref: str, label: str) -> tuple[int, str] | None:
+        if not ref:
+            return None
+        found = known.get(ref) or resolved.get(ref)
+        if found is None:
+            errors.append(f"Не нашёл {label}: {ref}")
+        return found
+
+    found_source = _pick(source, "источник")
+    found_target = _pick(target, "приёмник")
+    found_user = _pick(target_user, "пользователя")
+
+    missed: list[str] = []
+    chat_pairs: list[tuple[int, str]] = []
+    if targets is None:
+        chat_pairs = list(stored_chats)  # список чатов не правили — берём прежний
+    else:
+        for raw in targets:
+            ref = str(raw).strip()
+            found = known.get(ref) or resolved.get(ref)
+            if found is None:
+                missed.append(ref)
+            else:
+                chat_pairs.append(found)
+
+    if errors or missed:
+        nowhere_to_send = kind in ("mailing", "poster") and not chat_pairs
+        if kind == "autosubscribe" and not errors:
+            missed = []  # в эти каналы задача ещё только вступит — это норма
+        elif not nowhere_to_send:
+            return _json({"error": "; ".join([*errors, *_missed_text(missed)])}, status=404)
+
+    if "source" in payload:
+        source_id, source_title = found_source or (0, "")
+    if "target" in payload and "target" in needs:
+        target_id, target_title = found_target or (0, "")
+    if found_user is not None:
+        filters["target_user_id"] = found_user[0]
+    if kind == "forward" and payload.get("mode") in ("copy", "forward"):
+        mode = payload["mode"]
+
+    # Дальше — та же геометрия чатов и те же колонки, что и при создании задачи.
+    if kind in MULTI_CHAT_KINDS:
+        chats = _split_chats(chat_pairs, source_id if kind == "broadcast" else 0)
+        if not chats:
+            return _json({"error": MULTI_CHAT_EMPTY[kind]}, status=400)
+        target_id, target_title = chats[0]
+        filters["targets"] = [pair[0] for pair in chats[1:]]
+    elif kind == "autosubscribe" and targets is not None:
+        filters["targets"] = [pair[0] for pair in chat_pairs]
+
+    if kind in NO_SOURCE_TITLE:
+        source_id, source_title = 0, NO_SOURCE_TITLE[kind]
+    elif not source_id and kind in EMPTY_SOURCE_TITLE:
+        source_title = EMPTY_SOURCE_TITLE[kind]
+    if kind == "parser":
+        target_id, target_title = source_id, source_title
+
+    _remember_names(filters, [found_source, found_target, found_user, *chat_pairs])
+    await _apply_task_settings(
+        kind, payload, filters, user_id=user_id, targets=targets, partial=True
+    )
+
+    async with SessionLocal() as session:
+        rule = await repo.get_rule(session, task_id, user_id)
+        if rule is None:
+            return _json({"error": "Задача не найдена"}, status=404)
+        rule.source_id, rule.source_title = source_id, source_title
+        rule.target_id, rule.target_title = target_id, target_title
+        rule.mode = mode
+        rule.filters = filters
+        if kind == "poster":
+            # интервал постинга планировщик читает из delay_seconds
+            rule.delay_seconds = int(filters.get("interval_seconds", 120))
+        await session.commit()
+
+    # Обработчики и планировщик держат снимок правил в памяти: без обновления
+    # задача работала бы по старым настройкам до перезапуска службы.
+    await manager.refresh_rules()
+
+    async with SessionLocal() as session:
+        saved = await repo.get_rule(session, task_id, user_id)
+        collected = (
+            await repo.count_collected_items(session, task_id) if kind == "parser" else None
+        )
+    return _json({"task": _task_view(saved, collected)})
 
 
 @routes.post("/api/tasks/{task_id}/toggle")
@@ -1556,11 +1837,71 @@ def _task_view(rule, collected: int | None = None) -> dict:
         if conf.repeats > 0 and recipients:
             total = recipients * int(conf.repeats)
     view["progress"] = {"done": done, "total": total}
+    # Названия чатов задачи: в колонках правила есть имя только первого чата,
+    # остальные — числа, поэтому имена запоминаются в настройках при создании и
+    # правке. Старые задачи их не знают — там честно останется id.
+    names = dict((rule.filters or {}).get("chat_titles") or {})
+    if rule.source_id and rule.source_title:
+        names.setdefault(str(rule.source_id), rule.source_title)
+    if rule.target_id and rule.target_title:
+        names.setdefault(str(rule.target_id), rule.target_title)
     # Сколько чатов у задачи — одним полем на все задачи «в несколько чатов»:
     # у пересылки счёт раньше шёл по filters и терял первый чат из target_id.
     if kind in MULTI_CHAT_KINDS:
         view["targets_count"] = len(chats)
+        view["chats"] = [
+            {"id": chat_id, "title": names.get(str(chat_id)) or str(chat_id)}
+            for chat_id in chats
+        ]
+    view["edit"] = _edit_view(rule, kind, conf, chats, names)
     return view
+
+
+def _edit_view(rule, kind: str, conf, chats: list[int], names: dict[str, str]) -> dict:
+    """Значения задачи для формы правки — ровно те, что принимает /api/tasks.
+
+    Форма правки в кабинете — это форма создания с подставленными значениями,
+    поэтому и поля здесь называются так же, как в теле запроса: второй набор
+    имён означал бы второй разбор на сервере и вечные расхождения между ними.
+    """
+    edit: dict[str, Any] = {"account_id": rule.account_id, "names": names}
+    if kind in MULTI_CHAT_KINDS:
+        edit["targets"] = [str(chat_id) for chat_id in chats]
+    elif kind == "autosubscribe":
+        # У автоподписки список — это ссылки, по которым она вступает: id у
+        # ненайденного канала ещё нет, и подставлять в форму нечего кроме них.
+        edit["targets"] = [str(ref) for ref in (conf.subscribe_to or [])]
+    if rule.source_id:
+        edit["source"] = str(rule.source_id)
+    if rule.target_id and kind not in MULTI_CHAT_KINDS and kind != "parser":
+        edit["target"] = str(rule.target_id)
+    if conf.target_user_id:
+        edit["target_user"] = str(conf.target_user_id)
+    if kind == "forward":
+        edit["mode"] = rule.mode
+    elif kind == "parser":
+        edit["limit"] = int(conf.limit or 200)
+    elif kind == "baiting":
+        edit["reaction"] = conf.reaction
+    elif kind in ("checks", "dialogs", "mute"):
+        edit["keywords"] = ", ".join(conf.keywords or [])
+    elif kind == "poster":
+        # Обратная сборка текста: сообщения делит пустая строка — тем же
+        # правилом, каким их разбирал _split_messages.
+        edit["message"] = "\n\n".join(conf.messages or [])
+        edit["interval"] = max(1, conf.interval_seconds // 60)
+        edit["start"] = conf.window_start
+        edit["end"] = conf.window_end
+    elif kind == "mailing":
+        # Текст рассылки живёт в библиотеке, поэтому в форму идут ссылки на
+        # записи, а не сам текст: иначе «Сохранить» плодило бы их копии.
+        edit["library_ids"] = [int(value) for value in (conf.library_ids or [])]
+        edit["gap"] = conf.gap_seconds
+        edit["cycle"] = conf.cycle_seconds
+        edit["repeats"] = conf.repeats
+        edit["typing"] = bool(conf.typing)
+        edit["random_pick"] = bool(conf.random_pick)
+    return edit
 
 
 # Каталог команд мини-аппа.
@@ -1728,6 +2069,9 @@ COMMAND_GROUPS: list[dict] = [
 ]
 
 COMMANDS_BY_ID: dict[str, dict] = {item["id"]: item for item in COMMANDS}
+# Команда по типу задачи: у сохранённого правила есть kind, а форму правки надо
+# собрать по той же команде, из которой задачу создали.
+COMMANDS_BY_KIND: dict[str, dict] = {item["kind"]: item for item in COMMANDS}
 VALID_KINDS: set[str] = {item["kind"] for item in COMMANDS}
 
 
