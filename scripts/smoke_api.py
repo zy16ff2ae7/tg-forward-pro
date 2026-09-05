@@ -90,6 +90,8 @@ USDT_WALLET = "TQn9Y2khDD95J42FQtQTdwVVR93o1n1gLz"
 LOGIN_PHONE = "+79001234567"
 # Номер для мёртвой сессии — отдельный, чтобы не трогать засеянный аккаунт.
 DEAD_PHONE = "+79005550011"
+# Номер для аккаунта, который сорвался на подключении и потом вернулся в работу.
+REVIVE_PHONE = "+79005550022"
 # Ключи MTProto для раздела входа: сама готовность шлюза считается по ним, а в
 # .env разработчика их может не быть. Плейсхолдеры из .env.example не подходят —
 # settings.mtproto_ready считает их ненастроенными.
@@ -2791,9 +2793,150 @@ async def check_dead_session(cab: Cabinet, rep: Report) -> None:
         bool(shown) and shown[0].get("is_active") is False and shown[0].get("online") is False,
         f"{shown[0] if shown else 'аккаунта нет в списке'}",
     )
+    rep.check(
+        "кабинету сказано предлагать вход заново, а не повтор",
+        bool(shown) and shown[0].get("needs_login") is True,
+        f"needs_login: {shown[0].get('needs_login') if shown else '—'}",
+    )
 
     async with session_scope() as session:
         row = await session.get(TelegramAccount, dead_id)
+        if row is not None:
+            await session.delete(row)
+    rep.note("аккаунт прогона убран — остальные разделы видят прежний список")
+
+
+async def check_account_revive(cab: Cabinet, rep: Report) -> None:
+    """Аккаунт не бросают после одной осечки: повтор по кнопке и сам собой.
+
+    В боевой БД нашёлся аккаунт ``is_active=0, last_error='Не удалось запустить
+    сессию'``: он лежал так с утра, пересылка на нём стояла. Любая беда — сеть,
+    таймаут, сервис поднялся раньше сети — выключала аккаунт насовсем, потому
+    что список на подъём брали по ``is_active``. Теперь такие аккаунты сервис
+    поднимает снова, а человек может попросить попытку сразу. Telegram здесь не
+    участвует: клиент подменён.
+    """
+    rep.section("Аккаунт не бросают после одной осечки")
+
+    from app.security import encrypt_session
+    from app.telegram_client.manager import HOPELESS_ERRORS, SESSION_REVOKED
+
+    class FlakyClient:
+        """Сессия живая, но первое подключение обрывается — как при обрыве сети."""
+
+        def __init__(self, fail_first: bool = True) -> None:
+            self.fail_first = fail_first
+            self.connects = 0
+
+        def add_event_handler(self, callback, event=None) -> None:
+            return None
+
+        async def connect(self) -> None:
+            self.connects += 1
+            if self.fail_first and self.connects == 1:
+                raise OSError("network is unreachable")
+
+        async def is_user_authorized(self) -> bool:
+            return True
+
+        async def start(self, *args, **kwargs):
+            raise EOFError("EOF when reading a line")
+
+        async def get_me(self):
+            return SimpleNamespace(id=777, username="revive")
+
+        async def disconnect(self) -> None:
+            return None
+
+        def is_connected(self) -> bool:
+            return True
+
+    async with session_scope() as session:
+        account = await repo.add_account(
+            session,
+            user_id=SMOKE_USER_ID,
+            phone=REVIVE_PHONE,
+            session_encrypted=encrypt_session("1AaBb-revive-session"),
+        )
+        await session.flush()
+        revive_id = account.id
+
+    client = FlakyClient()
+    with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
+        _new_client=lambda session_string="": client
+    ):
+        # Первый заход обрывается — так аккаунт и оказывался вне работы.
+        status, body = await cab.post(f"/api/accounts/{revive_id}/retry")
+        rep.check("отказ повтора — это 200 с причиной", status == 200, f"статус {status}")
+        rep.check(
+            "причина названа, а не «попробуйте позже»",
+            (body or {}).get("online") is False and "unreachable" in str((body or {}).get("error")),
+            f"ответ: {body}",
+        )
+
+        status, listing = await cab.get("/api/accounts")
+        shown = [
+            item for item in ((listing or {}).get("accounts") or []) if item.get("id") == revive_id
+        ]
+        rep.check(
+            "после осечки аккаунт остаётся в работе",
+            bool(shown) and shown[0].get("is_active") is True,
+            f"is_active: {shown[0].get('is_active') if shown else '—'}",
+        )
+        rep.check(
+            "кабинету предложено пробовать снова, а не входить заново",
+            bool(shown) and shown[0].get("needs_login") is False,
+            f"needs_login: {shown[0].get('needs_login') if shown else '—'}",
+        )
+
+        # Так делает и сервис сам каждые несколько минут — см. _revive_loop.
+        async with SessionLocal() as session:
+            waiting = [
+                row.id for row in await repo.accounts_to_start(session, HOPELESS_ERRORS)
+            ]
+        rep.check(
+            "сервис вернётся к нему сам",
+            revive_id in waiting,
+            f"на подъём ждут: {waiting}",
+        )
+
+        status, body = await cab.post(f"/api/accounts/{revive_id}/retry")
+        rep.check(
+            "второй повтор поднимает аккаунт",
+            status == 200 and (body or {}).get("online") is True,
+            f"статус {status}, ответ {body}",
+        )
+
+        status, listing = await cab.get("/api/accounts")
+        shown = [
+            item for item in ((listing or {}).get("accounts") or []) if item.get("id") == revive_id
+        ]
+        rep.check(
+            "жалоба из кабинета ушла, аккаунт на связи",
+            bool(shown) and shown[0].get("last_error") is None and shown[0].get("online") is True,
+            f"{shown[0] if shown else 'аккаунта нет в списке'}",
+        )
+
+        status, _ = await cab.post("/api/accounts/424242/retry")
+        rep.check("повтор чужого аккаунта — 404", status == 404, f"статус {status}")
+        status, _ = await cab.post("/api/accounts/мусор/retry")
+        rep.check("мусор в пути — 404, а не 500", status == 404, f"статус {status}")
+
+    # Мёртвую сессию повтором не мучаем: там единственный путь — вход по номеру.
+    async with session_scope() as session:
+        row = await session.get(TelegramAccount, revive_id)
+        await repo.set_account_error(session, row, SESSION_REVOKED)
+    async with SessionLocal() as session:
+        waiting = [row.id for row in await repo.accounts_to_start(session, HOPELESS_ERRORS)]
+    rep.check(
+        "к мёртвой сессии сервис сам не возвращается",
+        revive_id not in waiting,
+        f"на подъём ждут: {waiting}",
+    )
+
+    await manager.stop_account(revive_id)
+    async with session_scope() as session:
+        row = await session.get(TelegramAccount, revive_id)
         if row is not None:
             await session.delete(row)
     rep.note("аккаунт прогона убран — остальные разделы видят прежний список")
@@ -2840,6 +2983,7 @@ async def run_all(rep: Report) -> None:
             await check_pay_card(cab, rep)
             await check_bot_entry(rep)
             await check_dead_session(cab, rep)
+            await check_account_revive(cab, rep)
             await check_misc(cab, rep)
     finally:
         await runner.cleanup()

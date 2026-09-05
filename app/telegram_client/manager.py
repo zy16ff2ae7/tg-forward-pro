@@ -52,6 +52,18 @@ PUBLIC_LOGIN_UNAVAILABLE = (
 # делать, а не что за исключение поймал Telethon.
 SESSION_REVOKED = "Аккаунт вышел из Telegram — подключите номер заново"
 
+# Причина, после которой пробовать снова бессмысленно: сессии больше нет, и
+# оживить её нечем — нужен вход по номеру. Всё остальное (сеть, таймаут, Telegram
+# не ответил) проходит само, поэтому такие аккаунты сервис поднимает снова.
+SESSION_UNREADABLE = "Сохранённая сессия не читается — подключите номер заново"
+HOPELESS_ERRORS = (SESSION_REVOKED, SESSION_UNREADABLE)
+# Что написать, когда Telegram соединение принял, но себя не назвал. Бывает при
+# обрыве на полуслове; проходит само, поэтому аккаунт остаётся в работе.
+ACCOUNT_SILENT = "Telegram не отдал данные аккаунта — пробуем снова"
+# Как часто поднимать аккаунты, которые сейчас не на связи. Три минуты — чтобы
+# короткий обрыв сети чинился сам и незаметно, но и не стучать в Telegram зря.
+REVIVE_INTERVAL = 180.0
+
 # Рассылка по чатам: шаг у неё в секундах (пауза между получателями), поэтому
 # тик планировщика — секунда, а не 20 секунд, как у авто-постера.
 MAILING_TICK_SECONDS = 1.0
@@ -170,6 +182,8 @@ class ClientManager:
         # rule_id -> {"pos", "cycle", "due", "not_before", "typed"}
         self._mailing_state: dict[int, dict] = {}
         self._mailing_task: asyncio.Task | None = None
+        # Кто сейчас не на связи, того поднимают снова — см. _revive_loop.
+        self._revive_task: asyncio.Task | None = None
         # account_id -> (когда собрали, все диалоги аккаунта). Кэш на минуту:
         # см. DIALOGS_CACHE_TTL — без него выбор чатов пачкой означал бы обход
         # диалогов на каждый отмеченный чат.
@@ -311,7 +325,11 @@ class ClientManager:
             async with session_scope() as session:
                 db_account = await session.get(TelegramAccount, account.id)
                 if db_account is not None:
-                    await repo.set_account_error(session, db_account, f"{type(exc).__name__}: {exc}")
+                    # Сеть, таймаут, Telegram не в духе — это пройдёт, и аккаунт
+                    # остаётся в работе: поднимем его следующим заходом сами.
+                    await repo.note_account_trouble(
+                        session, db_account, f"{type(exc).__name__}: {exc}"
+                    )
             return False
 
         if not authorized:
@@ -332,7 +350,16 @@ class ClientManager:
 
         me = await client.get_me()
         if me is None:
+            # Соединение есть, а данных нет: обрыв на полуслове. Причину пишем —
+            # иначе в кабинете «офлайн» без объяснения, — но аккаунт не гасим.
+            logger.warning(
+                "Аккаунт #{} ({}) подключился, но не назвал себя", account.id, account.phone
+            )
             await client.disconnect()
+            async with session_scope() as session:
+                db_account = await session.get(TelegramAccount, account.id)
+                if db_account is not None:
+                    await repo.note_account_trouble(session, db_account, ACCOUNT_SILENT)
             return False
 
         async with self._lock:
@@ -366,8 +393,6 @@ class ClientManager:
 
     async def start_all(self) -> None:
         """Поднимает все активные аккаунты из БД."""
-        from app.security import decrypt_session
-
         await delivery_queue.start()
 
         if not settings.mtproto_ready:
@@ -377,34 +402,8 @@ class ClientManager:
             await self.refresh_rules()
             return
 
-        async with SessionLocal() as session:
-            accounts = list(await repo.all_active_accounts(session))
-
         await self.refresh_rules()
-
-        for account in accounts:
-            try:
-                session_string = decrypt_session(account.session_encrypted)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Сессия аккаунта #{} не читается: {}", account.id, exc)
-                async with session_scope() as db:
-                    db_account = await db.get(TelegramAccount, account.id)
-                    if db_account is not None:
-                        await repo.set_account_error(db, db_account, str(exc))
-                continue
-            ok = await self.start_account(account, session_string)
-            async with session_scope() as db:
-                db_account = await db.get(TelegramAccount, account.id)
-                if db_account is not None:
-                    if ok:
-                        db_account.last_seen_at = repo.utcnow()
-                        await repo.set_account_error(db, db_account, None)
-                    elif not db_account.last_error:
-                        # Причину, если она известна, записал start_account.
-                        # Общая подпись затирала её — и в кабинете вместо
-                        # «сессия больше не действует» оставалось безадресное
-                        # «не удалось запустить сессию».
-                        await repo.set_account_error(db, db_account, "Не удалось запустить сессию")
+        await self._start_pending_accounts()
 
         # Планировщик авто-постера поднимаем, только когда аккаунты реально
         # могут постить (MTProto готов и хотя бы один поднялся).
@@ -412,8 +411,108 @@ class ClientManager:
             self._poster_task = asyncio.create_task(self._poster_loop())
         if self._mailing_task is None or self._mailing_task.done():
             self._mailing_task = asyncio.create_task(self._mailing_loop())
+        # Аккаунт, у которого не задалось соединение, раньше оставался
+        # выключенным до вмешательства человека. Теперь его поднимают снова сами.
+        if self._revive_task is None or self._revive_task.done():
+            self._revive_task = asyncio.create_task(self._revive_loop())
 
         await self._restore_deliveries()
+
+    async def _start_pending_accounts(self) -> list[int]:
+        """Поднимает тех, кто должен работать, но сейчас не на связи.
+
+        Зовётся и на старте сервиса, и потом по кругу — см. ``_revive_loop``.
+        Уже подключённых пропускаем: второй клиент на ту же сессию Telegram не
+        нужен никому.
+        """
+        async with SessionLocal() as session:
+            accounts = list(await repo.accounts_to_start(session, HOPELESS_ERRORS))
+
+        started: list[int] = []
+        for account in accounts:
+            if self.is_online(account.id):
+                continue
+            if await self._start_and_record(account):
+                started.append(account.id)
+        return started
+
+    async def retry_account(self, account_id: int) -> tuple[bool, str | None]:
+        """Ещё одна попытка по просьбе человека: кнопка «Попробовать снова».
+
+        Просьбу выполняем, даже если аккаунт числится выключенным: человек видит
+        причину в кабинете и сам решает, стоит ли пробовать. Возвращаем, вышел
+        ли аккаунт на связь, и причину, если нет.
+        """
+        async with SessionLocal() as session:
+            account = await session.get(TelegramAccount, account_id)
+            if account is None:
+                return False, "Аккаунт не найден"
+            session.expunge(account)
+
+        if self.is_online(account_id):
+            return True, None
+
+        ok = await self._start_and_record(account)
+        if ok:
+            return True, None
+        async with SessionLocal() as session:
+            fresh = await session.get(TelegramAccount, account_id)
+            return False, (fresh.last_error if fresh is not None else None)
+
+    async def _start_and_record(self, account: TelegramAccount) -> bool:
+        """Поднимает аккаунт и записывает итог: время связи или причину отказа."""
+        from app.security import decrypt_session
+
+        try:
+            session_string = decrypt_session(account.session_encrypted)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Сессия аккаунта #{} не читается: {}", account.id, exc)
+            async with session_scope() as db:
+                db_account = await db.get(TelegramAccount, account.id)
+                if db_account is not None:
+                    # Здесь повтор не поможет: сменился ключ шифрования или
+                    # строка испорчена — сама она не выправится. Человеку важно
+                    # не имя исключения, а что делать, поэтому причина общая.
+                    await repo.set_account_error(db, db_account, SESSION_UNREADABLE)
+            return False
+
+        ok = await self.start_account(account, session_string)
+        async with session_scope() as db:
+            db_account = await db.get(TelegramAccount, account.id)
+            if db_account is not None:
+                if ok:
+                    db_account.last_seen_at = repo.utcnow()
+                    await repo.set_account_error(db, db_account, None)
+                elif not db_account.last_error:
+                    # Причину, если она известна, записал start_account. Общая
+                    # подпись затирала её — и в кабинете вместо «сессия больше
+                    # не действует» оставалось безадресное «не удалось
+                    # запустить сессию».
+                    await repo.note_account_trouble(
+                        db, db_account, "Не удалось запустить сессию"
+                    )
+        return ok
+
+    async def _revive_loop(self) -> None:
+        """Возвращает в работу аккаунты, которые сейчас не на связи.
+
+        Обрыв сети, перезапуск сервиса раньше, чем поднялась сеть, Telegram не
+        ответил — всё это проходит само. Но раньше сервис к аккаунту больше не
+        возвращался: одна осечка на старте, и пересылка стояла молча, а вернуть
+        её мог только полный вход по номеру заново.
+        """
+        while True:
+            try:
+                await asyncio.sleep(REVIVE_INTERVAL)
+                if not settings.mtproto_ready:
+                    continue
+                revived = await self._start_pending_accounts()
+                if revived:
+                    logger.info("Аккаунты вернулись в работу: {}", revived)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Не получилось поднять аккаунты заново: {}", exc)
 
     async def _restore_deliveries(self) -> None:
         """Досылает то, что не успел прошлый запуск.
@@ -447,6 +546,9 @@ class ClientManager:
         if self._mailing_task is not None:
             self._mailing_task.cancel()
             self._mailing_task = None
+        if self._revive_task is not None:
+            self._revive_task.cancel()
+            self._revive_task = None
         await delivery_queue.stop()
         for account_id in list(self._clients):
             await self.stop_account(account_id)

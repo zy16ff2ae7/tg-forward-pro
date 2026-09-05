@@ -37,7 +37,7 @@ from app.plans import (
     usdt_amount,
 )
 from app.telegram_client.jobs import MAX_PARSER_LIMIT, ONE_SHOT_KINDS, window_tz_minutes
-from app.telegram_client.manager import manager
+from app.telegram_client.manager import HOPELESS_ERRORS, manager
 
 # initData считаем свежим в течение суток
 INIT_DATA_TTL = 24 * 60 * 60
@@ -1538,6 +1538,9 @@ async def list_accounts(request: web.Request) -> web.Response:
                 "is_active": account.is_active,
                 "online": manager.is_online(account.id),
                 "last_error": account.last_error,
+                # Мёртвую сессию повтором не оживить — кабинету надо предлагать
+                # не «попробовать снова», а вход по номеру заново.
+                "needs_login": account.last_error in HOPELESS_ERRORS,
                 "created_at": account.created_at.isoformat() if account.created_at else None,
             }
         )
@@ -1624,6 +1627,15 @@ async def login_cancel(request: web.Request) -> web.Response:
     """Забыть незавершённый вход (кнопка «Отмена» на любом шаге)."""
     dropped = await accounts_login.cancel(request[USER_ID_KEY])
     return _json({"ok": True, "dropped": dropped})
+
+
+@routes.post("/api/accounts/{account_id}/retry")
+@require_auth
+async def retry_account(request: web.Request) -> web.Response:
+    """Ещё одна попытка поднять аккаунт: кнопка «Попробовать снова» в кабинете."""
+    account_id = _as_int(request.match_info.get("account_id"), 0)
+    result = await accounts_login.retry(request[USER_ID_KEY], account_id)
+    return _json({"ok": True, **result})
 
 
 @routes.delete("/api/accounts/{account_id}")

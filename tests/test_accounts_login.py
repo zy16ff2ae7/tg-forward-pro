@@ -29,7 +29,7 @@ from app.db import repo
 from app.db.database import SessionLocal, session_scope
 from app.errors import ConflictError, FeatureUnavailable, NotFoundError, ValidationError
 from app.security import decrypt_session
-from app.telegram_client.manager import manager
+from app.telegram_client.manager import SESSION_REVOKED, manager
 from app.timeutil import utcnow
 from tests.helpers import TEST_USER_ID
 
@@ -59,6 +59,9 @@ class FakeGateway:
         self.password_error: Exception | None = None
         self.check_result: tuple[bool, str | None, str | None] = (True, "Тест Тестов", None)
         self.start_ok = True
+        self.retried: list[int] = []
+        # Что ответит повтор по кнопке «Попробовать снова»: вышел на связь или нет.
+        self.retry_result: tuple[bool, str | None] = (True, None)
 
     async def send_code(self, phone: str) -> tuple[str, str]:
         if self.send_error is not None:
@@ -88,6 +91,12 @@ class FakeGateway:
         self.started.append(int(account.id))
         return self.start_ok
 
+    async def retry_account(self, account_id: int) -> tuple[bool, str | None]:
+        self.retried.append(int(account_id))
+        if self.retry_result[0]:
+            self.started.append(int(account_id))
+        return self.retry_result
+
     async def stop_account(self, account_id: int) -> None:
         self.stopped.append(int(account_id))
 
@@ -115,6 +124,7 @@ def gateway(monkeypatch) -> FakeGateway:
         "sign_in_password",
         "check_session",
         "start_account",
+        "retry_account",
         "stop_account",
         "refresh_rules",
         "is_online",
@@ -538,6 +548,46 @@ async def test_disconnect_of_foreign_account_is_not_found(gateway, user, create_
 
     assert len(await _accounts(stranger)) == 1  # чужой аккаунт на месте
 
+
+# ───────────────────── «Попробовать снова» для аккаунта ───────────────────────
+#
+# Аккаунт мог не выйти на связь из-за сети или молчания Telegram. Сервис
+# вернётся к нему сам, но человеку, который смотрит на «офлайн», ждать незачем.
+
+
+async def test_retry_reports_that_the_account_is_back(gateway, user, create_account):
+    account_id = await create_account(user, phone=PHONE)
+
+    result = await accounts_login.retry(user, account_id)
+
+    assert result == {"phone": PHONE, "online": True, "error": None}
+    assert gateway.retried == [account_id]
+    # Правила перечитываем: пока аккаунт лежал, его задачи никто не обслуживал.
+    assert gateway.refreshed == 1
+
+
+async def test_retry_passes_on_the_reason(gateway, user, create_account):
+    """Не вышло — причина уходит в кабинет как есть, без «попробуйте позже»."""
+    account_id = await create_account(user, phone=PHONE)
+    gateway.retry_result = (False, "Аккаунт вышел из Telegram — подключите номер заново")
+
+    result = await accounts_login.retry(user, account_id)
+
+    assert result["online"] is False
+    assert result["error"] == "Аккаунт вышел из Telegram — подключите номер заново"
+    assert gateway.refreshed == 0, "поднимать нечего — правила перечитывать незачем"
+
+
+async def test_retry_of_a_foreign_account_is_not_found(gateway, user, create_user, create_account):
+    """Чужой аккаунт нельзя даже подёргать: id в пути ничего не доказывает."""
+    stranger = await create_user()
+    foreign_id = await create_account(stranger, phone="+79990001122")
+
+    with pytest.raises(NotFoundError):
+        await accounts_login.retry(user, foreign_id)
+
+    assert gateway.retried == []
+
 # ─────────────────────────── ручки кабинета (HTTP) ────────────────────────────
 #
 # Кабинет проходит вход целиком сам: раньше кнопка «Подключить аккаунт» умела
@@ -688,6 +738,73 @@ async def test_delete_account_endpoint_removes_session(client, auth_headers, gat
     # Повторное удаление и мусор в пути — 404, а не 500.
     assert (await client.delete(f"/api/accounts/{account_id}", headers=auth_headers)).status == 404
     assert (await client.delete("/api/accounts/мусор", headers=auth_headers)).status == 404
+
+
+async def test_retry_endpoint_brings_the_account_back(
+    client, auth_headers, gateway, user, create_account
+):
+    """Кнопка кабинета: одна ручка, ответ — вышел ли аккаунт на связь."""
+    account_id = await create_account(user, phone=PHONE)
+
+    response = await client.post(f"/api/accounts/{account_id}/retry", headers=auth_headers)
+
+    assert response.status == 200
+    assert await response.json() == {
+        "ok": True,
+        "phone": PHONE,
+        "online": True,
+        "error": None,
+    }
+    assert gateway.retried == [account_id]
+
+
+async def test_retry_endpoint_says_why_it_failed(
+    client, auth_headers, gateway, user, create_account
+):
+    """Отказ — это 200 с причиной: беда не в запросе, и кабинету есть что сказать."""
+    account_id = await create_account(user, phone=PHONE)
+    gateway.retry_result = (False, "OSError: network is unreachable")
+
+    response = await client.post(f"/api/accounts/{account_id}/retry", headers=auth_headers)
+
+    assert response.status == 200
+    body = await response.json()
+    assert (body["online"], body["error"]) == (False, "OSError: network is unreachable")
+
+
+async def test_retry_endpoint_guards_the_account(client, auth_headers, gateway, user):
+    """Без подписи — 401, чужой или выдуманный id — 404."""
+    assert (await client.post("/api/accounts/1/retry")).status == 401
+    assert (await client.post("/api/accounts/424242/retry", headers=auth_headers)).status == 404
+    assert (await client.post("/api/accounts/мусор/retry", headers=auth_headers)).status == 404
+
+
+async def test_accounts_payload_tells_when_a_new_login_is_needed(
+    client, auth_headers, gateway, user, create_account
+):
+    """Кабинету нужно знать, что предлагать: повтор или вход по номеру заново.
+
+    Разбирать текст ошибки на стороне кабинета нельзя — от правки формулировки
+    кнопка молча стала бы неправильной.
+    """
+    account_id = await create_account(user, phone=PHONE)
+    async with session_scope() as session:
+        row = await repo.get_account(session, account_id, user)
+        await repo.set_account_error(session, row, SESSION_REVOKED)
+
+    item = (await _accounts_payload(client, auth_headers))["accounts"][0]
+
+    assert item["needs_login"] is True
+    assert item["last_error"] == SESSION_REVOKED
+    assert item["online"] is False
+
+    async with session_scope() as session:
+        row = await repo.get_account(session, account_id, user)
+        await repo.note_account_trouble(session, row, "TimeoutError: Telegram молчит")
+
+    item = (await _accounts_payload(client, auth_headers))["accounts"][0]
+    assert item["needs_login"] is False, "сеть чинится повтором, вход тут не нужен"
+    assert item["is_active"] is True
 
 
 # ── Контракт настоящего шлюза ────────────────────────────────────────────────

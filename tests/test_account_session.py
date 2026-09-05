@@ -216,7 +216,12 @@ async def test_start_all_keeps_the_named_reason(account_id, dead, mtproto_on):
 
 
 async def test_start_all_still_names_a_silent_failure(account_id, mtproto_on, monkeypatch):
-    """Отказ без объяснения по-прежнему получает общую подпись, а не пустоту."""
+    """Отказ без объяснения по-прежнему получает общую подпись, а не пустоту.
+
+    Аккаунт при этом остаётся в работе: подпись общая как раз потому, что
+    причина неизвестна, а неизвестная беда чаще проходит сама
+    (см. ``tests/test_account_revive.py``).
+    """
 
     async def start_account(account, session_string: str) -> bool:
         return False
@@ -227,7 +232,7 @@ async def test_start_all_still_names_a_silent_failure(account_id, mtproto_on, mo
 
     error, active = await account_state(account_id)
     assert error == "Не удалось запустить сессию"
-    assert active is False
+    assert active is True
 
 
 async def test_start_all_clears_an_old_reason_on_success(account_id, mtproto_on, monkeypatch):

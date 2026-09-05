@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Sequence
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -289,8 +289,30 @@ async def add_account(
 async def set_account_error(
     session: AsyncSession, account: TelegramAccount, error: str | None
 ) -> None:
+    """Ставит крест на аккаунте: причина в кабинет, сам аккаунт — из работы.
+
+    Для беды, которая пройдёт сама (сеть, таймаут Telegram), это слишком:
+    ``all_active_accounts`` выключенный аккаунт больше не отдаёт, и повторных
+    попыток не будет ни одной. Такие случаи — ``note_account_trouble``.
+    """
     account.last_error = error
     account.is_active = error is None
+    await session.flush()
+
+
+async def note_account_trouble(
+    session: AsyncSession, account: TelegramAccount, error: str
+) -> None:
+    """Записывает беду, но аккаунт из работы не убирает — попробуем ещё.
+
+    Сеть отвалилась, Telegram не ответил, сервис перезапустился раньше, чем
+    поднялась сеть, — всё это проходит само. Раньше любая осечка выключала
+    аккаунт насовсем: пересылка молча останавливалась, и вернуть её мог только
+    полный вход по номеру заново. Теперь причина видна в кабинете, а аккаунт
+    остаётся в списке тех, кого сервис поднимает снова.
+    """
+    account.last_error = error
+    account.is_active = True
     await session.flush()
 
 
@@ -298,6 +320,29 @@ async def all_active_accounts(session: AsyncSession) -> Sequence[TelegramAccount
     result = await session.execute(
         select(TelegramAccount).where(TelegramAccount.is_active.is_(True))
     )
+    return result.scalars().all()
+
+
+async def accounts_to_start(
+    session: AsyncSession, hopeless: Sequence[str] = ()
+) -> Sequence[TelegramAccount]:
+    """Кого сервис поднимает: включённые и те, чья беда ещё не приговор.
+
+    Выключенный аккаунт — это либо мёртвая сессия (её и правда не оживить), либо
+    наследство прежних времён, когда аккаунт выключала любая осечка: сеть,
+    таймаут, «Не удалось запустить сессию». Вторых надо пробовать снова, иначе
+    надпись в кабинете так и останется единственным следом пересылки.
+    """
+    condition = TelegramAccount.is_active.is_(True)
+    if hopeless:
+        condition = or_(
+            condition,
+            and_(
+                TelegramAccount.last_error.is_not(None),
+                TelegramAccount.last_error.not_in(list(hopeless)),
+            ),
+        )
+    result = await session.execute(select(TelegramAccount).where(condition))
     return result.scalars().all()
 
 

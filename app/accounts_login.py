@@ -386,9 +386,16 @@ async def _finish(user_id: int, phone: str, session_string: str) -> LoginStep:
         started = False
         if db_account is not None:
             started = await manager.start_account(db_account, session_string)
-            await repo.set_account_error(
-                session, db_account, None if started else "Не запустился"
-            )
+            if started:
+                await repo.set_account_error(session, db_account, None)
+            elif not db_account.last_error:
+                # Вход прошёл, а клиент не поднялся — обычно это сеть. Раньше
+                # такой аккаунт тут же выключался с подписью «Не запустился»:
+                # человек только что прошёл три шага входа и сразу видел
+                # нерабочий аккаунт, который сервис больше не пробовал поднять.
+                await repo.note_account_trouble(
+                    session, db_account, "Пока не вышел на связь — пробуем снова"
+                )
             await session.commit()
 
     await manager.refresh_rules()
@@ -401,6 +408,34 @@ async def _finish(user_id: int, phone: str, session_string: str) -> LoginStep:
         "поднят" if started else "не поднялся",
     )
     return LoginStep(stage="done", phone=phone, account_id=account_id, name=name)
+
+
+async def retry(user_id: int, account_id: int) -> dict:
+    """Ещё одна попытка поднять аккаунт — по кнопке «Попробовать снова».
+
+    Кнопка нужна для беды, которая проходит сама: сеть отвалилась, Telegram не
+    ответил, сервис поднялся раньше сети. Сервис и сам вернётся к такому
+    аккаунту (см. ``_revive_loop``), но ждать до трёх минут, глядя на «офлайн»,
+    незачем — человек вправе попросить сразу.
+    """
+    require_enabled()
+    async with SessionLocal() as session:
+        account = await repo.get_account(session, account_id, user_id)
+        if account is None:
+            raise NotFoundError("Аккаунт не найден")
+        phone = account.phone
+
+    online, error = await manager.retry_account(account_id)
+    if online:
+        await manager.refresh_rules()
+    logger.info(
+        "Повтор #{}: аккаунт {} (id {}) — {}",
+        user_id,
+        phone,
+        account_id,
+        "на связи" if online else f"не поднялся ({error})",
+    )
+    return {"phone": phone, "online": online, "error": None if online else error}
 
 
 async def disconnect(user_id: int, account_id: int) -> str:

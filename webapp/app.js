@@ -454,9 +454,20 @@ const DEMO_ACCOUNTS = [{
   is_active: true,
   online: true,
   last_error: null,
+  needs_login: false,
   created_at: '2026-08-12T10:00:00',
+}, {
+  // Второй аккаунт нарочно офлайн: иначе не видно ни причины, ни кнопки
+  // повтора, а это самое частое состояние, из-за которого стоят задачи.
+  id: 2,
+  phone: '+7 903 •••• 55 01',
+  is_active: true,
+  online: false,
+  last_error: 'Telegram не отдал данные аккаунта — пробуем снова',
+  needs_login: false,
+  created_at: '2026-09-01T09:20:00',
 }];
-const DEMO_LOGIN = { pending: null, nextId: 2 };
+const DEMO_LOGIN = { pending: null, nextId: 3 };
 const DEMO_MAX_ATTEMPTS = 5;
 const DEMO_CODE = '11111';
 const DEMO_PASSWORD = 'doca';
@@ -951,6 +962,7 @@ function demoLogin(clean, options) {
     is_active: true,
     online: true,
     last_error: null,
+    needs_login: false,
     created_at: new Date().toISOString(),
   };
   DEMO_ACCOUNTS.push(account);
@@ -1049,6 +1061,18 @@ function demoApi(path, options = {}) {
   if (clean === '/api/commands') return { commands: DEMO_COMMANDS, groups: DEMO_COMMAND_GROUPS };
   if (clean === '/api/accounts') return demoAccounts();
   if (clean.startsWith('/api/accounts/login/')) return demoLogin(clean, options);
+  const retryMatch = clean.match(/^\/api\/accounts\/(\d+)\/retry$/);
+  if (retryMatch) {
+    // В демо повтор всегда удаётся: показать надо не отказ, а что кнопка
+    // возвращает аккаунт в работу и метка сразу меняется на «на связи».
+    const account = DEMO_ACCOUNTS.find((item) => item.id === Number(retryMatch[1]));
+    if (!account) demoFail(404, 'Аккаунт не найден');
+    account.online = true;
+    account.is_active = true;
+    account.last_error = null;
+    account.needs_login = false;
+    return { ok: true, phone: account.phone, online: true, error: null };
+  }
   if (clean.startsWith('/api/accounts/') && method === 'DELETE') {
     const id = Number(clean.split('/')[3]);
     const idx = DEMO_ACCOUNTS.findIndex((item) => item.id === id);
@@ -2507,23 +2531,43 @@ function renderAccountList() {
     return;
   }
 
-  holder.innerHTML = pendingHtml + state.accounts
-    .map(
-      (account) => `
+  holder.innerHTML = pendingHtml + state.accounts.map(accountHtml).join('');
+}
+
+/* Карточка аккаунта. Причина, по которой он офлайн, стоит отдельной строкой и с
+   кнопкой: раньше её дописывали к «ID 2» мелким серым текстом — она обрезалась
+   на 390 px и ничего не предлагала сделать, хотя пересылка в это время стояла.
+
+   Сервис и сам возвращается к упавшему аккаунту каждые несколько минут, но
+   ждать, глядя на «офлайн», незачем — «Попробовать снова» просит сразу. А
+   мёртвую сессию повтор не оживит: если Telegram выкинул аккаунт, единственный
+   путь — вход по номеру заново, поэтому там и кнопка другая. */
+function accountHtml(account) {
+  const trouble = account.online
+    ? ''
+    : `<div class="account__trouble">
+         ${account.last_error ? `<div class="account__reason">⚠️ ${esc(account.last_error)}</div>` : ''}
+         <button class="btn btn--sm" data-id="${account.id}"
+                 data-action="${account.needs_login ? 'relogin-account' : 'retry-account'}">
+           ${account.needs_login ? 'Подключить заново' : 'Попробовать снова'}
+         </button>
+       </div>`;
+  return `
       <div class="account">
-        <div class="account__avatar">${esc((account.phone || '?').replace('+', '').slice(0, 1))}</div>
-        <div class="account__body">
-          <div class="account__phone">${esc(account.phone)}</div>
-          <div class="account__id">ID ${account.id}${account.last_error ? ' · ' + esc(account.last_error) : ''}</div>
+        <div class="account__row">
+          <div class="account__avatar">${esc((account.phone || '?').replace('+', '').slice(0, 1))}</div>
+          <div class="account__body">
+            <div class="account__phone">${esc(account.phone)}</div>
+            <div class="account__id">ID ${account.id}</div>
+          </div>
+          <div class="account__state ${account.online ? 'account__state--on' : 'account__state--off'}">
+            ${account.online ? '🟢 на связи' : '🔴 офлайн'}
+          </div>
+          <button class="account__del" data-action="delete-account" data-id="${account.id}"
+                  aria-label="Отключить аккаунт ${esc(account.phone)}" title="Отключить аккаунт">🗑</button>
         </div>
-        <div class="account__state ${account.online ? 'account__state--on' : 'account__state--off'}">
-          ${account.online ? '🟢 на связи' : '🔴 офлайн'}
-        </div>
-        <button class="account__del" data-action="delete-account" data-id="${account.id}"
-                aria-label="Отключить аккаунт ${esc(account.phone)}" title="Отключить аккаунт">🗑</button>
-      </div>`
-    )
-    .join('');
+        ${trouble}
+      </div>`;
 }
 
 /* ────────────────── Шторка подключения аккаунта ──────────────────────── */
@@ -2572,7 +2616,7 @@ function loginReset() {
   state.login = { stage: 'phone', phone: '', attemptsLeft: null };
 }
 
-function openLoginSheet() {
+function openLoginSheet(phone) {
   if (!state.features.account_login_enabled) {
     toast('Вход аккаунтов пока на настройке');
     return;
@@ -2586,6 +2630,9 @@ function openLoginSheet() {
     };
   } else {
     loginReset();
+    // Повторный вход тем же номером: подставляем его, чтобы не набирать заново.
+    // Скрытый номер (в демо он под точками) не подставляем — его не отправить.
+    if (phone && /^\+?[\d\s()-]{10,}$/.test(phone)) state.login.phone = phone;
   }
   renderLoginStage();
   $('loginSheet').classList.add('is-open');
@@ -2710,6 +2757,26 @@ async function restartLogin() {
 
 /* Отключение аккаунта необратимо: сессия стирается, задачи на нём встают.
    Поэтому спрашиваем подтверждение — нативным окном Telegram, если оно есть. */
+async function retryAccount(id, button) {
+  const account = state.accounts.find((item) => item.id === Number(id));
+  const phone = account ? account.phone : `ID ${id}`;
+  try {
+    const data = await withLoading(button, () =>
+      api(`/api/accounts/${id}/retry`, { method: 'POST' })
+    );
+    toast(
+      data.online
+        ? `Аккаунт ${data.phone || phone} на связи`
+        : `Пока не выходит на связь: ${data.error || 'причина неизвестна'}`
+    );
+    await loadAccounts();
+    // Задачи на этом аккаунте показывали «нет связи» — теперь метка другая.
+    if (data.online) await refreshAllTaskLists();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 async function deleteAccount(id, button) {
   const account = state.accounts.find((item) => item.id === Number(id));
   const phone = account ? account.phone : `ID ${id}`;
@@ -4045,8 +4112,14 @@ function bindEvents() {
   $('accountList').addEventListener('click', (event) => {
     const button = event.target.closest('[data-action]');
     if (!button) return;
+    const account = state.accounts.find((item) => item.id === Number(button.dataset.id));
     if (button.dataset.action === 'resume-login') openLoginSheet();
-    else if (button.dataset.action === 'delete-account') deleteAccount(button.dataset.id, button);
+    else if (button.dataset.action === 'retry-account') retryAccount(button.dataset.id, button);
+    else if (button.dataset.action === 'relogin-account') {
+      openLoginSheet(account ? account.phone : '');
+    } else if (button.dataset.action === 'delete-account') {
+      deleteAccount(button.dataset.id, button);
+    }
   });
   $('loginSubmit').addEventListener('click', submitLogin);
   $('loginInput').addEventListener('keydown', (event) => {
