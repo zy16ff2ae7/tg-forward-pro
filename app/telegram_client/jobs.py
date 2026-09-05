@@ -738,6 +738,60 @@ async def record_error(rule: RuleSnapshot, message: Any, error: str) -> None:
             source_msg_id=int(getattr(message, "id", 0) or 0),
             target_msg_id=None,
             status="error",
-            error=error[:1000],
+            error=error,
         )
+        await session.commit()
+
+
+def batch_error_text(failed: Sequence[str]) -> str:
+    """Причина сбоя прохода одной строкой — её человек читает на карточке."""
+    first = next((str(item) for item in failed if item), "неизвестная ошибка")
+    if len(failed) < 2:
+        return f"не ушло в {first}"
+    return f"не ушло в {len(failed)} чат(ов), первый — {first}"
+
+
+async def record_batch(
+    rule: RuleSnapshot,
+    *,
+    sent: int = 0,
+    failed: Sequence[str] = (),
+    target_id: int | None = None,
+) -> None:
+    """Итог одного прохода задачи «в несколько чатов»: сколько ушло и что нет.
+
+    Одна запись на проход, а не на чат: постер за круг обходит сотни чатов, и
+    строка на каждый превратила бы журнал в поток, в котором ничего не найти.
+    Отказ «подождите» (FloodWait) сюда не попадает — это пауза, а не сбой:
+    задача вернётся к этим чатам сама.
+
+    Порядок записи важен: сбой пишется раньше успеха, поэтому проход, в котором
+    что-то всё же ушло, не считается сломанным (см. ``repo.task_health``).
+    Причина при этом остаётся в журнале и видна на карточке — «в три чата не
+    ушло» человеку нужно знать, даже когда остальные сто получили.
+    """
+    if not sent and not failed:
+        return
+    async with SessionLocal() as session:
+        if failed:
+            await repo.log_forward(
+                session,
+                rule_id=rule.id,
+                user_id=rule.user_id,
+                # У расписанных задач нет входящего сообщения: они его создают.
+                source_msg_id=0,
+                target_msg_id=None,
+                status="error",
+                error=batch_error_text(failed),
+            )
+        if sent:
+            await repo.bump_forwarded(session, rule.id, sent)
+            await repo.log_forward(
+                session,
+                rule_id=rule.id,
+                user_id=rule.user_id,
+                source_msg_id=0,
+                target_msg_id=int(target_id) if target_id else None,
+                status="ok",
+            )
         await session.commit()

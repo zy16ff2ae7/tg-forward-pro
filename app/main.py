@@ -56,6 +56,20 @@ async def notify_expiring(bot: Bot) -> None:
             logger.debug("Не смогли напомнить пользователю {}", user_id)
 
 
+async def trim_logs(_bot: Bot) -> None:
+    """Подрезает журнал пересылок: он растёт с каждой отправкой.
+
+    Раньше не чистился никем: рассылка по сотне чатов пишет по строке на каждую
+    отправку, и за месяцы таблица становилась самой большой в базе, хотя нужна
+    только для ответа «работает ли задача и на чём сломалась».
+    """
+    async with SessionLocal() as session:
+        dropped = await repo.trim_forward_logs(session)
+        await session.commit()
+    if dropped:
+        logger.info("Журнал пересылок: убрано старых записей — {}", dropped)
+
+
 async def run_background_checks(bot: Bot) -> None:
     """Прогоняет фоновые проверки по очереди, независимо друг от друга.
 
@@ -68,6 +82,7 @@ async def run_background_checks(bot: Bot) -> None:
         ("USDT", crypto.check_pending),
         ("ЮKassa", yookassa.check_pending),
         ("напоминания о продлении", notify_expiring),
+        ("чистка журнала", trim_logs),
     )
     for name, check in checks:
         try:
@@ -81,7 +96,7 @@ async def run_background_checks(bot: Bot) -> None:
 
 
 async def background_loop(bot: Bot) -> None:
-    """Фоновые проверки: оплата USDT и картой, напоминания о продлении.
+    """Фоновые дела: оплата USDT и картой, напоминания о продлении, чистка журнала.
 
     Первый проход — сразу, без ожидания: пока сервис перезапускался, перевод
     мог уже прийти, и заставлять человека ждать пять минут не за что.

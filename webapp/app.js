@@ -231,33 +231,56 @@ const DEMO_STATE = {
     // edit — значения для формы «⚙️ Настроить»: те же поля, что принимает
     // /api/tasks (на сервере их отдаёт _edit_view). Без них у карточки не было
     // бы кнопки настройки, и в демо правку задачи посмотреть было бы нельзя.
+    // health — журнал задачи (на сервере repo.task_health): когда последний раз
+    // сработала и на чём сломалась. В демо показываем все три случая: работает,
+    // сломана сейчас, сбой уже в прошлом.
     { id: 1, title: 'Новости театра → Мой канал', kind: 'forward', kind_label: 'пересылка',
       source: 'Новости театра', target: 'Мой канал', archived: false, oneshot: false,
       enabled: true, mode: 'copy', delay: 60, forwarded: 842, account_id: 1,
       progress: { done: 842, total: null },
+      health: { ok_at: demoAgo(4), error: null, error_at: null, failing: false },
       edit: { account_id: 1, names: {}, source: 'Новости театра', target: 'Мой канал', mode: 'copy' },
       created_at: '2026-08-12T10:20:00' },
     { id: 2, title: 'Афиша → Зеркало афиши', kind: 'forward', kind_label: 'пересылка',
       source: 'Афиша', target: 'Зеркало афиши', archived: false, oneshot: false,
       enabled: true, mode: 'forward', delay: 0, forwarded: 317, account_id: 1,
       progress: { done: 317, total: null },
+      health: {
+        ok_at: demoAgo(60 * 26),
+        error: 'не ушло в Зеркало афиши: ChatWriteForbiddenError',
+        error_at: demoAgo(12),
+        failing: true,
+      },
       edit: { account_id: 1, names: {}, source: 'Афиша', target: 'Зеркало афиши', mode: 'forward' },
       created_at: '2026-08-18T09:05:00' },
     { id: 3, title: 'Подборки → Черновики', kind: 'forward', kind_label: 'пересылка',
       source: 'Подборки', target: 'Черновики', archived: false, oneshot: false,
       enabled: false, mode: 'copy', delay: 300, forwarded: 125, account_id: 1,
       progress: { done: 125, total: null },
+      health: { ok_at: null, error: null, error_at: null, failing: false },
       edit: { account_id: 1, names: {}, source: 'Подборки', target: 'Черновики', mode: 'copy' },
       created_at: '2026-08-21T18:40:00' },
     { id: 4, title: 'Парсер аудитории: Конкуренты', kind: 'parser', kind_label: 'парсер аудитории',
       source: 'Конкуренты', target: 'Конкуренты', archived: true, oneshot: true,
       enabled: false, mode: 'copy', delay: 0, forwarded: 640, account_id: 1,
       progress: { done: 640, total: 1000 },
+      health: {
+        ok_at: demoAgo(60 * 40),
+        error: 'FloodWaitError: 42',
+        error_at: demoAgo(60 * 44),
+        failing: false,
+      },
       edit: { account_id: 1, names: {}, source: 'Конкуренты', limit: 1000 },
       created_at: '2026-08-25T11:00:00' },
   ],
   nextId: 5,
 };
+
+/* Метки времени в демо считаем от «сейчас»: зашитая дата через месяц показала бы
+   «30 дней назад» вместо живого «4 минуты назад». */
+function demoAgo(minutes) {
+  return new Date(Date.now() - minutes * 60000).toISOString();
+}
 
 /* Демо-каталог повторяет COMMANDS и COMMAND_GROUPS из app/webapp_api.py:
    в демо-режиме кабинет должен выглядеть точно так же, как с сервером. */
@@ -816,6 +839,8 @@ function demoApi(path, options = {}) {
       delay: 0,
       forwarded: 0,
       progress: { done: 0, total: null },
+      // Журнала у новой задачи ещё нет — как и на сервере.
+      health: { ok_at: null, error: null, error_at: null, failing: false },
       account_id: Number(body.account_id) || 1,
       created_at: new Date().toISOString(),
     };
@@ -1419,14 +1444,57 @@ function aggregateTaskCounts() {
 }
 
 /* Метка состояния задачи. «Нет связи» важнее «работает»: включённая задача при
-   отключённом аккаунте не делает ничего, и об этом надо сказать прямо.
-   Сравнение строгое (=== false): в демо-данных поля просто нет. */
+   отключённом аккаунте не делает ничего, и об этом надо сказать прямо. Сбой —
+   там же: задача, которая последние разы только падала, «работает» лишь на
+   бумаге. Сравнение строгое (=== false): в демо-данных поля просто нет. */
 function taskBadge(task) {
   if (task.archived) return { kind: 'done', label: 'завершена' };
   if (!task.enabled) return { kind: 'paused', label: 'пауза' };
   if (task.account_online === false) return { kind: 'error', label: 'нет связи' };
+  if (task.health && task.health.failing) return { kind: 'error', label: 'сбой' };
   if (task.oneshot) return { kind: 'plan', label: 'по кнопке' };
   return { kind: 'live', label: 'работает' };
+}
+
+/* «5 минут назад» — по метке времени с сервера (она приходит в UTC с явной
+   пометкой, иначе браузер прочитал бы её как местное время). Ровно то, что
+   человеку нужно от журнала: давно ли задача что-то делала. */
+function timeAgo(iso) {
+  const at = iso ? new Date(iso).getTime() : 0;
+  if (!at || Number.isNaN(at)) return '';
+  const sec = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (sec < 60) return 'только что';
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min} ${pluralRu(min, 'минуту', 'минуты', 'минут')} назад`;
+  const hours = Math.round(min / 60);
+  if (hours < 24) return `${hours} ${pluralRu(hours, 'час', 'часа', 'часов')} назад`;
+  const days = Math.round(hours / 24);
+  return `${days} ${pluralRu(days, 'день', 'дня', 'дней')} назад`;
+}
+
+/* Русский счёт: 1 минуту / 2 минуты / 5 минут. */
+function pluralRu(n, one, few, many) {
+  const tail = n % 100;
+  if (tail >= 11 && tail <= 14) return many;
+  const last = n % 10;
+  if (last === 1) return one;
+  if (last >= 2 && last <= 4) return few;
+  return many;
+}
+
+/* Строка сбоя на карточке. Раньше причину было видно только в логе службы на
+   сервере: человек смотрел на бодрое «работает» и ждал сообщений, которых нет.
+   Показываем и починенный сбой — «в три чата не ушло» надо знать, даже когда
+   остальные сто получили; тогда строка спокойнее по цвету. */
+function taskAlertHtml(task) {
+  const health = task.health || {};
+  if (!health.error) return '';
+  const when = timeAgo(health.error_at);
+  return `
+    <div class="task__alert${health.failing ? '' : ' task__alert--past'}">
+      <span>⚠️ ${esc(health.error)}</span>
+      ${when ? `<i>${esc(when)}</i>` : ''}
+    </div>`;
 }
 
 /* Строка под названием: что это за задача и как настроена. */
@@ -1461,21 +1529,25 @@ function taskMetaLines(task) {
 
 /* Полоса прогресса. Долю рисуем только там, где сервер знает «сколько всего»
    (парсер — из лимита, автоподписка — из списка ссылок). У постоянных задач
-   конца нет, и вместо выдуманной доли идёт бегунок: честнее пустой шкалы. */
+   конца нет, и вместо выдуманной доли идёт бегунок: честнее пустой шкалы.
+   Справа — когда задача последний раз сработала: по одному счётчику не понять,
+   идёт работа прямо сейчас или встала неделю назад. */
 function taskProgressHtml(task) {
   const progress = task.progress || {};
   const done = Number(progress.done || 0);
   const total = Number(progress.total || 0);
+  const ago = timeAgo((task.health || {}).ok_at);
+  const when = ago ? `<span class="task__ago">${esc(ago)}</span>` : '';
   if (!total) {
     return `
       <div class="task__progress task__progress--endless"><span></span></div>
-      <div class="task__nums"><b>${done}</b><i>обработано</i></div>`;
+      <div class="task__nums"><b>${done}</b><i>обработано</i>${when}</div>`;
   }
   const pct = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
   return `
     <div class="task__progress"><span style="width:${pct}%"></span></div>
     <div class="task__nums">
-      <b>${done}</b><i>из ${total}</i><span class="task__pct">${pct}%</span>
+      <b>${done}</b><i>из ${total}</i>${when}<span class="task__pct">${pct}%</span>
     </div>`;
 }
 
@@ -1548,6 +1620,7 @@ function taskCardHtml(task, options) {
         <span class="badge badge--${badge.kind}">${badge.label}</span>
       </div>
       ${taskProgressHtml(task)}
+      ${taskAlertHtml(task)}
       ${actions}
     </div>`;
 }
@@ -2422,23 +2495,13 @@ function messageTitle(text, limit = 48) {
 
 /* «1 сообщение» / «2 сообщения» / «5 сообщений». */
 function messageWord(n) {
-  const tail = n % 100;
-  if (tail >= 11 && tail <= 14) return 'сообщений';
-  const last = n % 10;
-  if (last === 1) return 'сообщение';
-  if (last >= 2 && last <= 4) return 'сообщения';
-  return 'сообщений';
+  return pluralRu(n, 'сообщение', 'сообщения', 'сообщений');
 }
 
 /* «1 чат» / «2 чата» / «5 чатов»: счёт читают глазами, и «5 чат» выглядит
    недоделкой. */
 function chatWord(n) {
-  const tail = n % 100;
-  if (tail >= 11 && tail <= 14) return 'чатов';
-  const last = n % 10;
-  if (last === 1) return 'чат';
-  if (last >= 2 && last <= 4) return 'чата';
-  return 'чатов';
+  return pluralRu(n, 'чат', 'чата', 'чатов');
 }
 
 /* Итог под полем-списком: сколько чатов набрано, первые имена и «очистить».

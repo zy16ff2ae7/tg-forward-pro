@@ -803,6 +803,12 @@ async def delete_pending_login(session: AsyncSession, user_id: int) -> None:
 # ──────────────────────────────────── Логи ────────────────────────────────────
 
 
+# Журнал держим месяц: он нужен, чтобы ответить «работает ли задача и на чём
+# сломалась», а не быть вечным архивом. Одна рассылка пишет строку на каждую
+# отправку, поэтому без чистки таблица растёт быстрее всех остальных.
+FORWARD_LOG_TTL_DAYS = 30
+
+
 async def log_forward(
     session: AsyncSession,
     rule_id: int,
@@ -819,7 +825,83 @@ async def log_forward(
             source_msg_id=source_msg_id,
             target_msg_id=target_msg_id,
             status=status,
-            error=error,
+            # Причина сбоя приходит из чужих исключений: обрезаем на входе, иначе
+            # в базу уйдёт простыня, которую всё равно никто не прочитает.
+            error=error[:1000] if error else None,
         )
     )
     await session.flush()
+
+
+async def task_health(
+    session: AsyncSession, rule_ids: Sequence[int]
+) -> dict[int, dict]:
+    """Чем закончились последние срабатывания задач: ``{rule_id: {...}}``.
+
+    На каждую задачу: ``ok_at`` — когда последний раз сработала, ``error`` и
+    ``error_at`` — последний сбой, ``failing`` — сломана ли она **сейчас**
+    (после сбоя не было ни одного успеха). Без последнего признака старая
+    ошибка вечно висела бы на карточке уже починенной задачи.
+
+    Два запроса на любое число задач: список задач кабинета читается одним
+    ответом, и запрос на правило превратил бы его в двадцать походов в базу.
+    Задачи без журнала в ответе не появляются — вызывающий разбирает это
+    как «сбоев не было».
+    """
+    ids = [int(value) for value in rule_ids if value]
+    if not ids:
+        return {}
+
+    rows = await session.execute(
+        select(
+            ForwardLog.rule_id,
+            func.max(ForwardLog.id),
+            func.max(ForwardLog.created_at),
+        )
+        .where(ForwardLog.rule_id.in_(ids), ForwardLog.status == "ok")
+        .group_by(ForwardLog.rule_id)
+    )
+    health: dict[int, dict] = {}
+    last_ok: dict[int, int] = {}
+    for rule_id, log_id, created_at in rows:
+        last_ok[int(rule_id)] = int(log_id or 0)
+        health[int(rule_id)] = {
+            "ok_at": created_at,
+            "error": None,
+            "error_at": None,
+            "failing": False,
+        }
+
+    # Последний сбой каждой задачи: строку выбираем по наибольшему id, а не по
+    # времени, — id растёт монотонно, а две записи одной секунды по времени
+    # неразличимы.
+    newest = (
+        select(func.max(ForwardLog.id))
+        .where(ForwardLog.rule_id.in_(ids), ForwardLog.status != "ok")
+        .group_by(ForwardLog.rule_id)
+    )
+    errors = await session.execute(select(ForwardLog).where(ForwardLog.id.in_(newest)))
+    for log in errors.scalars():
+        entry = health.setdefault(
+            log.rule_id, {"ok_at": None, "error": None, "error_at": None, "failing": False}
+        )
+        entry["error"] = log.error or "неизвестная ошибка"
+        entry["error_at"] = log.created_at
+        entry["failing"] = log.id > last_ok.get(log.rule_id, 0)
+    return health
+
+
+async def trim_forward_logs(
+    session: AsyncSession, *, older_than_days: int = FORWARD_LOG_TTL_DAYS
+) -> int:
+    """Убирает старые записи журнала. Возвращает число удалённых.
+
+    Одним ``DELETE``, без вычитки строк: их может быть много, а интересен
+    только сам факт чистки — для журнала в логе службы.
+    """
+    cutoff = utcnow() - timedelta(days=max(1, int(older_than_days)))
+    result = await session.execute(
+        delete(ForwardLog).where(ForwardLog.created_at < cutoff)
+    )
+    await session.flush()
+    return int(result.rowcount or 0)

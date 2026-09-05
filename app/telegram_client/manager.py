@@ -13,7 +13,6 @@ from telethon.errors import (
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     PhoneNumberInvalidError,
-    RPCError,
     SessionPasswordNeededError,
 )
 from telethon.sessions import StringSession
@@ -28,7 +27,12 @@ from app.telegram_client.forwarder import (
     log_delivery_error,
     subscription_active,
 )
-from app.telegram_client.jobs import FLOATING_KINDS, MANUAL_ONLY_KINDS, SCHEDULED_KINDS
+from app.telegram_client.jobs import (
+    FLOATING_KINDS,
+    MANUAL_ONLY_KINDS,
+    SCHEDULED_KINDS,
+    record_batch,
+)
 from app.telegram_client.queue import DeliveryQueue
 from app.telegram_client.types import RuleSnapshot
 
@@ -715,6 +719,9 @@ class ClientManager:
 
             msg = st.get("msg") or messages[st["idx"] % len(messages)]
             sent = 0
+            # Чаты, которые круг потерял: о них человек узнаёт из карточки задачи,
+            # поэтому итог прохода уходит в журнал (см. jobs.record_batch).
+            failed: list[str] = []
             while st["queue"] and sent < POSTER_BATCH and time.time() < deadline:
                 chat_id = st["queue"][0]
                 try:
@@ -735,6 +742,7 @@ class ClientManager:
                     # Недоступный чат выкидываем из круга: иначе он держал бы
                     # очередь и остальные чаты не получили бы ничего.
                     logger.warning("Постер #{} не отправил в {}: {}", rule.id, chat_id, exc)
+                    failed.append(f"{chat_id}: {type(exc).__name__}")
                     st["queue"].pop(0)
                     continue
                 st["queue"].pop(0)
@@ -743,13 +751,9 @@ class ClientManager:
                 if st["queue"] and time.time() < deadline:
                     await asyncio.sleep(POSTER_CHAT_GAP)
 
-            if sent:
-                # Косметика: счётчик отправок, чтобы в кабинете было видно работу
-                async with SessionLocal() as session:
-                    db_rule = await repo.get_rule(session, rule.id, rule.user_id)
-                    if db_rule is not None:
-                        db_rule.forwarded_count = (db_rule.forwarded_count or 0) + sent
-                        await session.commit()
+            # Счётчик отправок и итог прохода — одним заходом в базу: по нему в
+            # кабинете видно и работу задачи, и потерянные чаты.
+            await record_batch(rule, sent=sent, failed=failed)
             if not st["queue"]:
                 # Круг закрыт — интервал считаем от него, а не от начала обхода.
                 st["last"] = time.time()
@@ -858,19 +862,11 @@ class ClientManager:
                 st["not_before"] = time.time() + wait
                 logger.warning("Рассылка #{}: Telegram просит подождать {} сек", rule.id, wait)
                 continue
-            except RPCError as exc:
-                logger.warning("Рассылка #{}: не ушло в {}: {}", rule.id, target_id, exc)
-                st["not_before"] = time.time() + MAILING_ERROR_PAUSE
-                continue
             except Exception as exc:  # noqa: BLE001 — одна рассылка не роняет цикл
-                logger.warning(
-                    "Рассылка #{}: сбой отправки в {}: {}: {}",
-                    rule.id,
-                    target_id,
-                    type(exc).__name__,
-                    exc,
-                )
-                st["not_before"] = time.time() + MAILING_ERROR_PAUSE
+                # Отказ по одному получателю (нет прав, чат удалён, сеть) — в
+                # журнал: иначе задача бодро «работает», сообщения не приходят, а
+                # причина видна только в логе службы на сервере.
+                await self._mailing_failed(rule, st, target_id, exc)
                 continue
 
             st["pos"] += 1
@@ -884,18 +880,29 @@ class ClientManager:
                 mailing_gap(rule.filters, cycle=cycle_closed),
             )
 
-            async with session_scope() as session:
-                await repo.bump_forwarded(session, rule.id)
-                await repo.log_forward(
-                    session,
-                    rule_id=rule.id,
-                    user_id=rule.user_id,
-                    # У рассылки нет входящего сообщения: это она его создаёт.
-                    source_msg_id=0,
-                    target_msg_id=int(target_id) or None,
-                    status="ok",
-                )
+            # Итог отправки — тем же способом, каким его пишет постер: счётчик,
+            # запись в журнале и, если не ушло, причина для карточки.
+            await record_batch(rule, sent=1, target_id=target_id)
             logger.debug("Рассылка #{}: отправлено в {}", rule.id, target_id)
+
+    async def _mailing_failed(
+        self, rule: RuleSnapshot, state: dict, target_id: int, exc: BaseException
+    ) -> None:
+        """Один получатель не принял сообщение: пишем сбой и держим паузу.
+
+        Пауза нужна, чтобы не долбиться в тот же чат каждую секунду, а запись в
+        журнале — чтобы сбой было видно на карточке задачи, а не только в логе
+        службы, до которого человеку не добраться.
+        """
+        logger.warning(
+            "Рассылка #{}: не ушло в {}: {}: {}",
+            rule.id,
+            target_id,
+            type(exc).__name__,
+            exc,
+        )
+        await record_batch(rule, failed=[f"{target_id}: {type(exc).__name__}"])
+        state["not_before"] = time.time() + MAILING_ERROR_PAUSE
 
     async def _finish_mailing(self, rule: RuleSnapshot, cycles: int) -> None:
         """Останавливает рассылку, сделавшую заданное число кругов.

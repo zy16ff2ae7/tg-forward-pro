@@ -11,6 +11,7 @@ import hmac
 import json
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import parse_qsl
 
@@ -412,8 +413,34 @@ async def list_tasks(request: web.Request) -> web.Response:
             for rule in rules
             if (rule.kind or "forward") == "parser"
         }
+        # Журнал по всем задачам сразу: запрос на карточку превратил бы один
+        # ответ в двадцать походов в базу.
+        health = await repo.task_health(session, [rule.id for rule in rules])
 
-    return _json({"tasks": [_task_view(rule, collected.get(rule.id)) for rule in rules]})
+    return _json(
+        {
+            "tasks": [
+                _task_view(rule, collected.get(rule.id), health.get(rule.id))
+                for rule in rules
+            ]
+        }
+    )
+
+
+async def _task_json(
+    rule, *, collected: int | None = None, extra: dict | None = None, status: int = 200
+) -> web.Response:
+    """Ответ с одной задачей — тем же составом полей, что и в списке.
+
+    Здоровье задачи читается здесь, а не в каждом обработчике: пять копий
+    одного словаря разъезжались бы при любом новом поле.
+    """
+    async with SessionLocal() as session:
+        health = await repo.task_health(session, [rule.id])
+    body: dict[str, Any] = {"task": _task_view(rule, collected, health.get(rule.id))}
+    if extra:
+        body.update(extra)
+    return _json(body, status=status)
 
 
 # Задачи, у которых источника нет по устройству: 0 в source_id тут по делу —
@@ -767,7 +794,7 @@ async def create_task(request: web.Request) -> web.Response:
     async with SessionLocal() as session:
         saved = await repo.get_rule(session, rule_id, user_id)
 
-    return _json({"task": _task_view(saved), "run": run_result}, status=201)
+    return await _task_json(saved, extra={"run": run_result}, status=201)
 
 
 @routes.patch("/api/tasks/{task_id}")
@@ -949,7 +976,7 @@ async def update_task(request: web.Request) -> web.Response:
         collected = (
             await repo.count_collected_items(session, task_id) if kind == "parser" else None
         )
-    return _json({"task": _task_view(saved, collected)})
+    return await _task_json(saved, collected=collected)
 
 
 @routes.post("/api/tasks/{task_id}/toggle")
@@ -977,7 +1004,7 @@ async def toggle_task(request: web.Request) -> web.Response:
         await session.commit()
 
     await manager.refresh_rules()
-    return _json({"task": _task_view(rule)})
+    return await _task_json(rule)
 
 
 def _mailing_finished(rule) -> bool:
@@ -1017,7 +1044,7 @@ async def switch_mode(request: web.Request) -> web.Response:
         await session.commit()
 
     await manager.refresh_rules()
-    return _json({"task": _task_view(rule)})
+    return await _task_json(rule)
 
 
 @routes.post("/api/tasks/{task_id}/archive")
@@ -1036,7 +1063,7 @@ async def archive_task(request: web.Request) -> web.Response:
         await session.commit()
 
     await manager.refresh_rules()
-    return _json({"task": _task_view(rule)})
+    return await _task_json(rule)
 
 
 @routes.post("/api/tasks/{task_id}/run")
@@ -1758,11 +1785,14 @@ async def _bot_username() -> str | None:
         return None
 
 
-def _task_view(rule, collected: int | None = None) -> dict:
+def _task_view(rule, collected: int | None = None, health: dict | None = None) -> dict:
     """Правило → вид задачи для мини-аппа.
 
     ``collected`` — сколько записей задача уже собрала (только для парсера,
     считает вызывающий, пока открыта сессия).
+    ``health`` — чем закончились последние срабатывания (``repo.task_health``):
+    без него карточка бодро показывала «работает» задаче, которая последние
+    сутки только падает, а причину было видно лишь в логе службы на сервере.
     """
     from app.telegram_client.filters import FilterConfig
     from app.telegram_client.jobs import (
@@ -1853,8 +1883,51 @@ def _task_view(rule, collected: int | None = None) -> dict:
             {"id": chat_id, "title": names.get(str(chat_id)) or str(chat_id)}
             for chat_id in chats
         ]
+    view["health"] = _health_view(health, names)
     view["edit"] = _edit_view(rule, kind, conf, chats, names)
     return view
+
+
+# id чата в тексте сбоя: «-1001234567890» человеку ничего не говорит, а название
+# у задачи уже запомнено. Пять цифр и больше — чтобы не трогать номера ошибок.
+_CHAT_ID_RE = re.compile(r"-?\d{5,}")
+# Причина сбоя на карточке: длиннее в узкий экран не влезает, а полный текст
+# остаётся в журнале.
+ERROR_TEXT_LIMIT = 160
+
+
+def _utc_iso(moment: datetime | None) -> str | None:
+    """Время из БД → строка с явной пометкой UTC.
+
+    В базе даты лежат без tzinfo, а браузер строку без пометки читает как
+    местное время: «5 минут назад» превращалось бы в «3 часа назад» ровно на
+    разницу часовых поясов.
+    """
+    if moment is None:
+        return None
+    return moment.replace(tzinfo=timezone.utc).isoformat()
+
+
+def _health_view(health: dict | None, names: dict[str, str]) -> dict:
+    """Здоровье задачи для карточки: когда сработала и на чём сломалась.
+
+    Ключ есть всегда, даже когда журнал пуст: кабинету не приходится угадывать,
+    «нет сбоев» это или «сервер не прислал».
+    """
+    health = health or {}
+    error = str(health.get("error") or "")
+    if error:
+        # Названия чатов вместо их id: они уже запомнены в настройках задачи.
+        error = _CHAT_ID_RE.sub(lambda m: names.get(m.group(0)) or m.group(0), error)
+        if len(error) > ERROR_TEXT_LIMIT:
+            error = f"{error[:ERROR_TEXT_LIMIT].rstrip()}…"
+    return {
+        "ok_at": _utc_iso(health.get("ok_at")),
+        "error": error or None,
+        "error_at": _utc_iso(health.get("error_at")),
+        # Сломана ли задача сейчас: после сбоя не было ни одного успеха.
+        "failing": bool(health.get("failing")),
+    }
 
 
 def _edit_view(rule, kind: str, conf, chats: list[int], names: dict[str, str]) -> dict:

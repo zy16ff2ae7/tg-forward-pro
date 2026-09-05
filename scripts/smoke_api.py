@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator
@@ -48,12 +49,14 @@ os.environ["LOG_LEVEL"] = "WARNING"
 import aiohttp  # noqa: E402
 from aiohttp import web  # noqa: E402
 from loguru import logger  # noqa: E402
+from sqlalchemy import select  # noqa: E402
 from telethon.errors import PhoneCodeInvalidError, SessionPasswordNeededError  # noqa: E402
 
 from app import accounts_login, paylink  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db import repo  # noqa: E402
 from app.db.database import dispose_db, init_db, session_scope  # noqa: E402
+from app.db.models import ForwardLog  # noqa: E402
 from app.errors import http_error_middleware  # noqa: E402
 from app.payments import crypto, service, yookassa  # noqa: E402
 from app.plans import PERIODS, rub_amount, usdt_amount  # noqa: E402
@@ -1204,6 +1207,147 @@ async def check_task_edit(cab: Cabinet, rep: Report, account_id: int) -> None:
     rep.note("поиск чатов подменён заглушкой: Telegram в разделе не участвует")
 
 
+async def check_task_health(cab: Cabinet, rep: Report, account_id: int) -> None:
+    """Здоровье задачи на карточке: когда сработала и на чём сломалась.
+
+    В журнал пересылок писали четыре места, а читать его не умел никто: карточка
+    показывала «работает» задаче, которая последние сутки только падала, а
+    причину было видно лишь в логе службы на сервере. Здесь весь путь проверяется
+    на живом сокете — от записи в журнале до строки, которую увидит человек:
+    пометка UTC (без неё «5 минут назад» съезжает на часовой пояс), название чата
+    вместо его id, обрезка под узкий экран и чистка старых записей.
+    """
+    rep.section("Здоровье задачи")
+
+    async def resolve_many(_account_id: int, queries) -> dict[str, tuple[int, str]]:
+        names = {
+            "@health-one": (-1001234567890, "Афиша"),
+            "@health-two": (-1009876543210, "Зеркало афиши"),
+        }
+        asked = [str(raw or "").strip() for raw in queries]
+        return {ref: names[ref] for ref in asked if ref in names}
+
+    async def journal(rule_id: int, *, status: str = "ok", error: str = "", age_days: int = 0):
+        """Строка журнала — тем же вызовом, каким её пишет планировщик."""
+        async with session_scope() as session:
+            await repo.log_forward(
+                session,
+                rule_id=rule_id,
+                user_id=SMOKE_USER_ID,
+                source_msg_id=0,
+                target_msg_id=None,
+                status=status,
+                error=error or None,
+            )
+            if age_days:
+                newest = await session.execute(
+                    select(ForwardLog)
+                    .where(ForwardLog.rule_id == rule_id)
+                    .order_by(ForwardLog.id.desc())
+                    .limit(1)
+                )
+                newest.scalar_one().created_at = repo.utcnow() - timedelta(days=age_days)
+
+    async def card(rule_id: int) -> dict:
+        """Карточка задачи так, как её видит кабинет — из общего списка."""
+        _, body = await cab.get("/api/tasks")
+        for task in (body or {}).get("tasks") or []:
+            if task.get("id") == rule_id:
+                return task
+        return {}
+
+    with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
+        resolve_many=resolve_many
+    ):
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "poster",
+                "account_id": account_id,
+                "targets": ["@health-one", "@health-two"],
+                "message": "объявление",
+                "interval": 5,
+            },
+        )
+    task = (body or {}).get("task") or {}
+    task_id = int(task.get("id") or 0)
+    if not rep.check(
+        "постинг для журнала создан — 201",
+        status == 201 and bool(task_id),
+        f"статус {status}, {(body or {}).get('error') or ''}",
+    ):
+        return
+
+    rep.check(
+        "у новой задачи здоровье есть, но пустое",
+        task.get("health") == {"ok_at": None, "error": None, "error_at": None, "failing": False},
+        f"{task.get('health')}",
+    )
+
+    await journal(task_id)
+    health = (await card(task_id)).get("health") or {}
+    rep.check(
+        "время последней отправки помечено UTC",
+        str(health.get("ok_at") or "").endswith("+00:00") and health.get("failing") is False,
+        f"{health}",
+    )
+
+    await journal(
+        task_id, status="error", error="не ушло в -1009876543210: ChatWriteForbiddenError"
+    )
+    health = (await card(task_id)).get("health") or {}
+    rep.check(
+        "сбой виден, id чата заменён названием",
+        health.get("failing") is True
+        and health.get("error") == "не ушло в Зеркало афиши: ChatWriteForbiddenError",
+        f"{health}",
+    )
+
+    await journal(task_id)
+    health = (await card(task_id)).get("health") or {}
+    rep.check(
+        "задача заработала — предупреждение не кричит, причина осталась",
+        health.get("failing") is False and bool(health.get("error")),
+        f"{health}",
+    )
+
+    await journal(task_id, status="error", error="очень длинная причина " * 40)
+    health = (await card(task_id)).get("health") or {}
+    reason = str(health.get("error") or "")
+    rep.check(
+        "длинная причина обрезана под узкий экран",
+        reason.endswith("…") and len(reason) <= 161,
+        f"{len(reason)} символов",
+    )
+
+    status, body = await cab.post(f"/api/tasks/{task_id}/toggle")
+    single = ((body or {}).get("task") or {}).get("health") or {}
+    rep.check(
+        "ответ на одну задачу того же состава, что карточка в списке",
+        status == 200 and bool(single.get("error")) and single.get("failing") is True,
+        f"статус {status}, {single}",
+    )
+    # Возвращаем задачу в работу: список задач по умолчанию отдаёт активные, и
+    # снятая с работы карточка в него не попадёт.
+    await cab.post(f"/api/tasks/{task_id}/toggle")
+
+    # Чистка журнала: он растёт быстрее остальных таблиц — по строке на каждый
+    # проход постинга, — а нужен только для ответа «работает ли задача».
+    await journal(task_id, age_days=repo.FORWARD_LOG_TTL_DAYS + 5)
+    async with session_scope() as session:
+        dropped = await repo.trim_forward_logs(session)
+    health = (await card(task_id)).get("health") or {}
+    rep.check(
+        "старая запись убрана, свежие на месте",
+        dropped == 1 and bool(health.get("error")),
+        f"убрано {dropped}, {health}",
+    )
+
+    status, _ = await cab.delete(f"/api/tasks/{task_id}")
+    rep.check("задача прогона удалена", status == 200, f"статус {status}")
+    rep.note("журнал наполнен вручную: планировщик и Telegram в разделе не участвуют")
+
+
 async def check_chats_and_accounts(cab: Cabinet, rep: Report, account_id: int) -> None:
     """Чаты и аккаунты: пустой список тут — честный ответ, а не поломка."""
     rep.section("Чаты и аккаунты")
@@ -1868,6 +2012,7 @@ async def run_all(rep: Report) -> None:
             await check_task_actions(cab, rep, rule_id)
             await check_mailing_and_library(cab, rep, account_id)
             await check_task_edit(cab, rep, account_id)
+            await check_task_health(cab, rep, account_id)
             await check_chats_and_accounts(cab, rep, account_id)
             await check_account_login(cab, rep)
             await check_subscription(cab, rep, me)

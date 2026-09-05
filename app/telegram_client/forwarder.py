@@ -168,5 +168,5 @@ async def log_delivery_error(
             source_msg_id=int(getattr(message, "id", 0) or 0),
             target_msg_id=None,
             status="error",
-            error=f"{type(error).__name__}: {error}"[:1000],
+            error=f"{type(error).__name__}: {error}",
         )
