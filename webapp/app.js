@@ -467,10 +467,13 @@ const DEMO_ACCOUNTS = [{
   needs_login: false,
   created_at: '2026-09-01T09:20:00',
 }];
-const DEMO_LOGIN = { pending: null, nextId: 3 };
+const DEMO_LOGIN = { pending: null, nextId: 3, sent: {} };
 const DEMO_MAX_ATTEMPTS = 5;
 const DEMO_CODE = '11111';
 const DEMO_PASSWORD = 'doca';
+// Пауза перед новым кодом на тот же номер — как на сервере: она принадлежит
+// номеру, поэтому «Отмена» и «Другой номер» её не снимают.
+const DEMO_RESEND_PAUSE_MS = 60000;
 
 /* Отказ в демо выглядит как отказ сервера: тот же status, тот же текст.
    Так шторка входа проверяется целиком, включая «осталось попыток». */
@@ -926,7 +929,26 @@ function demoLogin(clean, options) {
     if (!/^\+?\d{10,15}$/.test(phone)) {
       demoFail(400, 'Нужен номер в международном формате, например +79001234567.');
     }
-    DEMO_LOGIN.pending = { phone: phone.startsWith('+') ? phone : `+${phone}`, stage: 'code', attempts: 0 };
+    const full = phone.startsWith('+') ? phone : `+${phone}`;
+    const sentAt = DEMO_LOGIN.sent[full] || 0;
+    const wait = Math.ceil((DEMO_RESEND_PAUSE_MS - (Date.now() - sentAt)) / 1000);
+    if (sentAt && wait > 0) {
+      if (pending && pending.phone === full) {
+        demoFail(
+          409,
+          `Код на ${full} уже отправлен. Введите его или подождите ${wait} сек, чтобы запросить новый.`,
+          { stage: pending.stage, phone: full, wait, attempts_left: DEMO_MAX_ATTEMPTS - pending.attempts }
+        );
+      }
+      demoFail(
+        409,
+        `Код на ${full} отправляли меньше минуты назад. Подождите ${wait} сек: частые запросы ` +
+          'Telegram считает флудом и может закрыть вход на этот номер на несколько часов.',
+        { stage: 'phone', phone: full, wait }
+      );
+    }
+    DEMO_LOGIN.sent[full] = Date.now();
+    DEMO_LOGIN.pending = { phone: full, stage: 'code', attempts: 0 };
     return { stage: 'code', phone: DEMO_LOGIN.pending.phone, attempts_left: DEMO_MAX_ATTEMPTS };
   }
 
@@ -2734,6 +2756,20 @@ async function loginFailed(error) {
     await loadAccounts();
     return;
   }
+  const step = error.data && error.data.stage ? error.data : null;
+  if (step) {
+    // Сервер знает, где человек теперь стоит: код на номер уже ушёл — значит,
+    // ждём код, а номер набирать заново незачем.
+    state.login = {
+      stage: step.stage,
+      phone: step.phone || state.login.phone,
+      attemptsLeft: step.attempts_left != null ? step.attempts_left : state.login.attemptsLeft,
+    };
+    renderLoginStage(error.message);
+    $('loginInput').focus();
+    await loadAccounts();
+    return;
+  }
   loginReset();
   renderLoginStage(error.message);
   await loadAccounts();
@@ -2755,8 +2791,8 @@ async function restartLogin() {
   await loadAccounts();
 }
 
-/* Отключение аккаунта необратимо: сессия стирается, задачи на нём встают.
-   Поэтому спрашиваем подтверждение — нативным окном Telegram, если оно есть. */
+/* «Попробовать снова» под офлайн-аккаунтом: одна осечка не приговор, но и
+   молчать в ответ на нажатие нельзя — показываем, чем кончилась попытка. */
 async function retryAccount(id, button) {
   const account = state.accounts.find((item) => item.id === Number(id));
   const phone = account ? account.phone : `ID ${id}`;
@@ -2777,6 +2813,8 @@ async function retryAccount(id, button) {
   }
 }
 
+/* Отключение аккаунта необратимо: сессия стирается, задачи на нём встают.
+   Поэтому спрашиваем подтверждение — нативным окном Telegram, если оно есть. */
 async function deleteAccount(id, button) {
   const account = state.accounts.find((item) => item.id === Number(id));
   const phone = account ? account.phone : `ID ${id}`;

@@ -290,3 +290,21 @@ class PendingLogin(Base):
     # бесконечным. Лежит в БД, а не в памяти: шаг входа переживает перезапуск.
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
+class PhoneCodeSend(Base):
+    """Когда номеру последний раз уходил код входа.
+
+    Пауза между запросами кода жила в ``pending_logins.created_at``, а «Отмена»
+    эту строку удаляет — и следующий запрос уходил в Telegram сразу. В боевом
+    журнале так и вышло: один номер получил три кода за 43 секунды. Лимит висит
+    на самом номере, а не на человеке, поэтому и помним по номеру: отмена,
+    другой пользователь и перезапуск сервиса паузу не обнуляют.
+
+    Таблица короткоживущая: метки старше часа удаляются при следующей записи.
+    """
+
+    __tablename__ = "phone_code_sends"
+
+    phone: Mapped[str] = mapped_column(String(32), primary_key=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)

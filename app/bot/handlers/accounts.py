@@ -192,9 +192,20 @@ async def process_phone(message: Message, state: FSMContext) -> None:
     try:
         step = await login.start(message.from_user.id, message.text)
     except AppError as exc:
-        # Неверный формат номера — остаёмся на шаге. Всё остальное (номер
-        # заблокирован, шлюз выключен, Telegram не ответил) — конец попытки.
-        await _step_failed(exc, wait_msg, state, stay=isinstance(exc, ValidationError))
+        # Отказ может сам сказать, где человеку теперь место: код на этот номер
+        # уже ушёл — значит, ждём код, а не номер. Раньше такой отказ чистил FSM,
+        # и введённый код улетал в никуда: человек оставался в чате с ботом, а
+        # вход надо было начинать заново.
+        stage = str(exc.details.get("stage") or "")
+        if stage == "code":
+            await state.set_state(LoginStates.code)
+            await _step_failed(exc, wait_msg, state, stay=True)
+            return
+        # Неверный формат номера или пауза перед новым кодом — остаёмся на шаге.
+        # Всё остальное (номер заблокирован, шлюз выключен, Telegram не ответил)
+        # — конец попытки.
+        stay = isinstance(exc, ValidationError) or stage == "phone"
+        await _step_failed(exc, wait_msg, state, stay=stay)
         return
 
     await state.set_state(LoginStates.code)

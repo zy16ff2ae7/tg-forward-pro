@@ -14,6 +14,7 @@ from app.db.models import (
     Payment,
     PendingDelivery,
     PendingLogin,
+    PhoneCodeSend,
     Rule,
     SavedMessage,
     Subscription,
@@ -882,6 +883,35 @@ async def delete_pending_login(session: AsyncSession, user_id: int) -> None:
     if pending is not None:
         await session.delete(pending)
         await session.flush()
+
+
+# Метка «номеру уходил код» нужна ровно на время паузы. Час — с большим запасом
+# к минутной паузе, чтобы таблица не росла и не хранила номера дольше нужного.
+CODE_MARK_TTL = timedelta(hours=1)
+
+
+async def note_code_sent(session: AsyncSession, phone: str) -> None:
+    """Помнит, что номеру ушёл код: пауза должна переживать «Отмену».
+
+    Отмена входа удаляет ``pending_logins``, а вместе с ней раньше исчезала и
+    единственная отметка о времени отправки — новый запрос уходил в Telegram
+    сразу. Метка живёт отдельно и по номеру: лимит Telegram висит на номере.
+    """
+    await session.execute(
+        delete(PhoneCodeSend).where(PhoneCodeSend.sent_at < utcnow() - CODE_MARK_TTL)
+    )
+    mark = await session.get(PhoneCodeSend, phone)
+    if mark is None:
+        mark = PhoneCodeSend(phone=phone)
+        session.add(mark)
+    mark.sent_at = utcnow()
+    await session.flush()
+
+
+async def code_sent_at(session: AsyncSession, phone: str) -> datetime | None:
+    """Когда номеру последний раз уходил код. None — не уходил (или метка стёрлась)."""
+    mark = await session.get(PhoneCodeSend, phone)
+    return mark.sent_at if mark is not None else None
 
 
 # ──────────────────────────────────── Логи ────────────────────────────────────

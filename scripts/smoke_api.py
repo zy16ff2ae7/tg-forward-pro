@@ -65,6 +65,7 @@ from app.db.models import (  # noqa: E402
     CollectedItem,
     ForwardLog,
     PendingDelivery,
+    PhoneCodeSend,
     TelegramAccount,
 )
 from app.errors import http_error_middleware  # noqa: E402
@@ -92,6 +93,10 @@ LOGIN_PHONE = "+79001234567"
 DEAD_PHONE = "+79005550011"
 # Номер для аккаунта, который сорвался на подключении и потом вернулся в работу.
 REVIVE_PHONE = "+79005550022"
+# Второй номер в разделе входа: пауза перед новым кодом висит на номере, и что
+# она не задевает соседний номер, видно только со вторым. Аккаунт на него не
+# подключается — вход на нём бросают на первом шаге.
+PAUSE_PHONE = "+79005550033"
 # Ключи MTProto для раздела входа: сама готовность шлюза считается по ним, а в
 # .env разработчика их может не быть. Плейсхолдеры из .env.example не подходят —
 # settings.mtproto_ready считает их ненастроенными.
@@ -2088,6 +2093,80 @@ async def check_chats_and_accounts(cab: Cabinet, rep: Report, account_id: int) -
     )
 
 
+async def rewind_code_mark(phone: str) -> None:
+    """Отматывает метку «номеру уходил код» в прошлое: пауза кончилась.
+
+    Настоящую минуту прогон ждать не может, а проверить нужно обе половины
+    правила: и что пауза держит, и что она кончается. Метка — единственное, на
+    что смотрит сервис, поэтому сдвигаем её.
+    """
+    async with session_scope() as session:
+        mark = await session.get(PhoneCodeSend, phone)
+        if mark is not None:
+            mark.sent_at = repo.utcnow() - timedelta(
+                seconds=accounts_login.RESEND_COOLDOWN_SECONDS + 5
+            )
+
+
+async def check_code_pause(cab: Cabinet, rep: Report) -> None:
+    """Пауза перед новым кодом: она на номере, поэтому переживает «Другой номер».
+
+    В боевом журнале один номер получил три кода за 43 секунды при минутной
+    паузе: пауза считалась по незавершённому входу, а «Отмена» в боте и «Другой
+    номер» в кабинете эту строку удаляют. Telegram за такое закрывает вход на
+    номер на часы — то есть подключить аккаунт нельзя вообще.
+    """
+    status, body = await cab.post("/api/accounts/login/start", json={"phone": LOGIN_PHONE})
+    wait = (body or {}).get("wait") or 0
+    rep.check(
+        "повтор раньше минуты — 409 с остатком секунд, а не второй код",
+        status == 409 and 0 < wait <= accounts_login.RESEND_COOLDOWN_SECONDS,
+        f"статус {status}, {body}",
+    )
+    rep.check(
+        "отказ ведёт на ввод кода: код-то у человека уже есть",
+        (body or {}).get("stage") == "code"
+        and (body or {}).get("phone") == LOGIN_PHONE
+        and (body or {}).get("attempts_left") == accounts_login.MAX_CODE_ATTEMPTS,
+        f"{body}",
+    )
+
+    status, body = await cab.post("/api/accounts/login/cancel")
+    rep.check(
+        "«Другой номер» бросает начатый вход",
+        status == 200 and (body or {}).get("dropped") is True,
+        f"статус {status}, {body}",
+    )
+    status, body = await cab.post("/api/accounts/login/start", json={"phone": LOGIN_PHONE})
+    rep.check(
+        "после отмены код всё равно не уходит — пауза на номере, а не на попытке",
+        status == 409 and ((body or {}).get("wait") or 0) > 0,
+        f"статус {status}, {body}",
+    )
+    rep.check(
+        "и отказ теперь честно ведёт на ввод номера: вводить нечего",
+        (body or {}).get("stage") == "phone"
+        and "меньше минуты назад" in str((body or {}).get("error")),
+        f"{body}",
+    )
+
+    status, body = await cab.post("/api/accounts/login/start", json={"phone": PAUSE_PHONE})
+    rep.check(
+        "соседний номер ждать не заставляют",
+        status == 200 and (body or {}).get("phone") == PAUSE_PHONE,
+        f"статус {status}, {body}",
+    )
+
+    await rewind_code_mark(LOGIN_PHONE)
+    status, body = await cab.post("/api/accounts/login/start", json={"phone": LOGIN_PHONE})
+    rep.check(
+        "минута прошла — новый код уходит, вход продолжается",
+        status == 200 and (body or {}).get("stage") == "code",
+        f"статус {status}, {body}",
+    )
+    rep.note("Пауза перед новым кодом — 60 сек и живёт в БД по номеру: её не обходит ни отмена, ни перезапуск")
+
+
 async def walk_login(cab: Cabinet, rep: Report) -> None:
     """Проходит шаги входа по HTTP и сверяет состояние в ответе /api/accounts."""
     status, body = await cab.post("/api/accounts/login/start", json={"phone": "телефон"})
@@ -2112,6 +2191,8 @@ async def walk_login(cab: Cabinet, rep: Report) -> None:
         and pending.get("attempts_left") == accounts_login.MAX_CODE_ATTEMPTS,
         f"{pending}",
     )
+
+    await check_code_pause(cab, rep)
 
     status, body = await cab.post("/api/accounts/login/code", json={"code": "00000"})
     rep.check(

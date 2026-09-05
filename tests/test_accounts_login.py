@@ -27,6 +27,7 @@ from app import accounts_login
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal, session_scope
+from app.db.models import PhoneCodeSend
 from app.errors import ConflictError, FeatureUnavailable, NotFoundError, ValidationError
 from app.security import decrypt_session
 from app.telegram_client.manager import SESSION_REVOKED, manager
@@ -144,11 +145,22 @@ async def _pending(user_id: int):
         return await repo.get_pending_login(session, user_id)
 
 
-async def _rewind_code(user_id: int, seconds: int) -> None:
-    """Сдвигает время отправки кода в прошлое: иначе пауза не истечёт."""
+async def _rewind_code(user_id: int, seconds: int, phone: str = PHONE) -> None:
+    """Сдвигает время отправки кода в прошлое: иначе пауза не истечёт.
+
+    Точек отсчёта две — метка номера и время начатого входа, — а сервис берёт
+    самую свежую. Значит, сдвигать надо обе; какой-то из них может и не быть
+    (после удачного входа pending уже удалён). Подробнее о самой паузе —
+    ``tests/test_login_code_pause.py``.
+    """
     async with session_scope() as session:
+        past = utcnow() - timedelta(seconds=seconds)
+        mark = await session.get(PhoneCodeSend, phone)
+        if mark is not None:
+            mark.sent_at = past
         row = await repo.get_pending_login(session, user_id)
-        row.created_at = utcnow() - timedelta(seconds=seconds)
+        if row is not None:
+            row.created_at = past
 
 
 async def _accounts(user_id: int) -> list:
@@ -463,7 +475,9 @@ async def test_relogin_replaces_session_instead_of_second_account(gateway, user)
         account.is_active = False
         account.last_error = "Не запустился"
 
-    # Успешный вход убрал pending, поэтому пауза на повторный код не мешает.
+    # Пауза перед новым кодом висит на номере и удачный вход её не снимает:
+    # запрос кода — он и есть то, что лимитирует Telegram. Ждём её и входим снова.
+    await _rewind_code(user, accounts_login.RESEND_COOLDOWN_SECONDS + 5)
     await accounts_login.start(user, PHONE)
     second = await accounts_login.submit_code(user, "22222")
 

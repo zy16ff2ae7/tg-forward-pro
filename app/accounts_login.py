@@ -152,7 +152,13 @@ async def pending(user_id: int) -> PendingView | None:
 
 
 async def cancel(user_id: int) -> bool:
-    """Забывает незавершённый вход. True — было что забывать."""
+    """Забывает незавершённый вход. True — было что забывать.
+
+    Отметку о времени отправки кода (``phone_code_sends``) не трогаем: пауза
+    перед новым кодом принадлежит номеру, а не попытке входа. Иначе «Отмена»
+    становилась способом запросить код ещё раз без паузы — а Telegram считает
+    частые запросы флудом и закрывает вход на этот номер на часы.
+    """
     async with SessionLocal() as session:
         row = await repo.get_pending_login(session, user_id)
         if row is None:
@@ -160,6 +166,45 @@ async def cancel(user_id: int) -> bool:
         await repo.delete_pending_login(session, user_id)
         await session.commit()
     return True
+
+
+async def _pause_left(session, phone: str, pending: object | None) -> int:
+    """Сколько секунд ещё нельзя запрашивать код на этот номер.
+
+    Смотрим и метку номера, и время начатого входа: на базах, заведённых до
+    появления ``phone_code_sends``, метки ещё нет, а pending уже есть.
+    """
+    stamps = [await repo.code_sent_at(session, phone)]
+    if pending is not None:
+        stamps.append(getattr(pending, "created_at", None))
+    now = utcnow()
+    ages = [(now - stamp).total_seconds() for stamp in stamps if stamp is not None]
+    if not ages:
+        return 0
+    left = RESEND_COOLDOWN_SECONDS - min(ages)
+    return max(int(left) + 1, 0) if left > 0 else 0
+
+
+def _too_early(phone: str, wait: int, pending: object | None) -> ConflictError:
+    """Отказ на слишком ранний повтор — с указанием, где человек теперь стоит.
+
+    ``details`` читают и кабинет, и бот: код уже у человека — значит ждём код, а
+    не номер, и выкидывать его на первый шаг незачем.
+    """
+    if pending is not None:
+        stage = _PUBLIC_STAGE.get(getattr(pending, "stage", ""), "code")
+        left = max(MAX_CODE_ATTEMPTS - int(getattr(pending, "attempts", 0) or 0), 0)
+        return ConflictError(
+            f"Код на {phone} уже отправлен. Введите его или подождите {wait} сек, "
+            "чтобы запросить новый.",
+            details={"stage": stage, "phone": phone, "wait": wait, "attempts_left": left},
+        )
+    return ConflictError(
+        f"Код на {phone} отправляли меньше минуты назад. Подождите {wait} сек: "
+        "частые запросы Telegram считает флудом и может закрыть вход на этот "
+        "номер на несколько часов.",
+        details={"stage": "phone", "phone": phone, "wait": wait},
+    )
 
 
 async def start(user_id: int, phone_raw: str) -> LoginStep:
@@ -173,13 +218,10 @@ async def start(user_id: int, phone_raw: str) -> LoginStep:
 
     async with SessionLocal() as session:
         row = await repo.get_pending_login(session, user_id)
-        if row is not None and row.phone == phone:
-            age = (utcnow() - row.created_at).total_seconds()
-            if age < RESEND_COOLDOWN_SECONDS:
-                raise ConflictError(
-                    f"Код на {phone} уже отправлен. Введите его или подождите "
-                    f"{int(RESEND_COOLDOWN_SECONDS - age)} сек, чтобы запросить новый."
-                )
+        pending_here = row is not None and row.phone == phone
+        wait = await _pause_left(session, phone, row if pending_here else None)
+        if wait:
+            raise _too_early(phone, wait, row if pending_here else None)
 
     try:
         session_string, phone_code_hash = await manager.send_code(phone)
@@ -224,6 +266,9 @@ async def start(user_id: int, phone_raw: str) -> LoginStep:
         raise ConflictError(f"Не удалось отправить код: {type(exc).__name__}") from exc
 
     async with SessionLocal() as session:
+        # Метка номера ставится в той же транзакции, что и шаг входа: пауза
+        # должна начаться, даже если человек тут же нажмёт «Отмена».
+        await repo.note_code_sent(session, phone)
         await repo.save_pending_login(
             session,
             user_id=user_id,
