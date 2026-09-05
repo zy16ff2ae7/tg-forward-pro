@@ -6,7 +6,6 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
-    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -17,7 +16,7 @@ from app.bot import keyboards as kb
 from app.bot import texts
 from app.bot.media import WELCOME_PHOTO
 from app.bot.states import LoginStates
-from app.bot.utils import ensure_user, is_admin, smart_edit
+from app.bot.utils import answer_with_banner, ensure_user, is_admin, smart_edit
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
@@ -97,10 +96,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
     caption = texts.welcome(message.from_user.full_name or "друг")
     reply = kb.main_menu(is_admin(user.id))
-    if WELCOME_PHOTO.exists():
-        await message.answer_photo(FSInputFile(WELCOME_PHOTO), caption=caption, reply_markup=reply)
-    else:
-        await message.answer(caption, reply_markup=reply)
+    await answer_with_banner(message, WELCOME_PHOTO, caption, reply_markup=reply)
 
 
 @router.message(Command("app"))

@@ -2626,6 +2626,74 @@ async def check_bonus(cab: Cabinet, rep: Report) -> None:
         user.channel_bonus_at = None
 
 
+async def check_bot_entry(rep: Report) -> None:
+    """Вход в бота: /start обязан дойти, каким бы длинным ни стало приветствие.
+
+    Подпись к фото Telegram не обрезает: длиннее 1024 символов — отказ на всё
+    сообщение. Приветствие росло вместе со списком умений, переросло предел, и
+    /start отвечал человеку молчанием — в журнале боевого сервиса «message
+    caption is too long» набегало по нескольку раз в день.
+    """
+    rep.section("Вход в бота: /start")
+
+    from types import SimpleNamespace
+
+    from app.bot import texts
+    from app.bot.handlers.menu import cmd_start
+    from app.bot.utils import CAPTION_LIMIT
+
+    class FakeMessage:
+        """Сообщение в объёме /start: автор, текст и два способа ответить."""
+
+        def __init__(self) -> None:
+            self.text = "/start"
+            self.from_user = SimpleNamespace(
+                id=SMOKE_USER_ID, username="doch", full_name="Иван Петров", is_bot=False
+            )
+            self.message = self  # ensure_user берёт .message у нажатий кнопок
+            self.sent: list[dict] = []
+
+        async def answer(self, text, reply_markup=None, **kwargs):
+            self.sent.append({"kind": "text", "text": text, "markup": reply_markup})
+            return self
+
+        async def answer_photo(self, photo, caption=None, reply_markup=None, **kwargs):
+            self.sent.append({"kind": "photo", "text": caption, "markup": reply_markup})
+            return self
+
+    greeting = texts.welcome("Иван Петров")
+    rep.check(
+        "приветствие длиннее подписи к фото — значит, делить его надо",
+        len(greeting) > CAPTION_LIMIT,
+        f"{len(greeting)} символов при пределе {CAPTION_LIMIT}",
+    )
+
+    message = FakeMessage()
+    await cmd_start(message, state=None)
+    kinds = [item["kind"] for item in message.sent]
+    rep.check("человек получил ответ", bool(message.sent), f"сообщений {len(kinds)}")
+    long_caption = [
+        len(item["text"] or "")
+        for item in message.sent
+        if item["kind"] == "photo" and len(item["text"] or "") > CAPTION_LIMIT
+    ]
+    rep.check(
+        "подписи длиннее предела не уходят — Telegram отказал бы во всём сообщении",
+        not long_caption,
+        f"нарушений {len(long_caption)}",
+    )
+    whole = "\n".join(item["text"] or "" for item in message.sent)
+    rep.check("приветствие дошло целиком, без обрезки", greeting in whole,
+              f"порядок сообщений: {', '.join(kinds)}")
+    menu = [item for item in message.sent if item["markup"] is not None]
+    rep.check(
+        "меню лежит на сообщении с текстом — его же правят кнопки",
+        len(menu) == 1 and menu[0]["kind"] == "text",
+        f"кнопки на «{menu[0]['kind'] if menu else 'нигде'}»",
+    )
+    rep.note("бота не трогаем: сообщения принимает подделка, Telegram в прогоне не участвует")
+
+
 async def check_misc(cab: Cabinet, rep: Report) -> None:
     """Мелочи, которые ломаются молча: неизвестный маршрут и чужой метод."""
     rep.section("Прочее")
@@ -2665,6 +2733,7 @@ async def run_all(rep: Report) -> None:
             await check_pay_disabled(cab, rep)
             await check_pay_page(cab, rep)
             await check_pay_card(cab, rep)
+            await check_bot_entry(rep)
             await check_misc(cab, rep)
     finally:
         await runner.cleanup()

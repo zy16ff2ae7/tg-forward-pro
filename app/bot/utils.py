@@ -1,12 +1,18 @@
 """Мелкие помощники для хендлеров."""
 from __future__ import annotations
 
-from aiogram.types import CallbackQuery, Message
+from pathlib import Path
+
+from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from app.config import settings
 from app.db.database import SessionLocal
 from app.db import repo
 from app.db.models import User
+
+# Предел Telegram на подпись к медиа. Текст длиннее он не обрезает, а отвечает
+# отказом на sendPhoto — «message caption is too long».
+CAPTION_LIMIT = 1024
 
 
 async def ensure_user(
@@ -70,6 +76,28 @@ async def smart_edit(message: Message, text: str, reply_markup=None, **kwargs):
         if "not modified" in (exc.message or "").lower():
             return False
         return await _fallback()
+
+
+async def answer_with_banner(
+    message: Message, photo: Path, text: str, reply_markup=None, **kwargs
+) -> Message:
+    """Баннер с текстом: подписью, пока влезает, иначе картинка и текст отдельно.
+
+    Подпись длиннее 1024 символов Telegram не обрезает — он отказывает во всём
+    сообщении. На /start это значило, что человек в ответ не получал ничего: ни
+    картинки, ни меню, ни объяснения. Приветствие доросло до 1090 символов, и
+    вход в бота перестал работать — в журнале копились «message caption is too
+    long». Теперь длинный текст уходит вторым сообщением, а меню — вместе с
+    текстом: его же потом правит smart_edit.
+    """
+    if not photo.exists():
+        return await message.answer(text, reply_markup=reply_markup, **kwargs)
+    if len(text) <= CAPTION_LIMIT:
+        return await message.answer_photo(
+            FSInputFile(photo), caption=text, reply_markup=reply_markup, **kwargs
+        )
+    await message.answer_photo(FSInputFile(photo))
+    return await message.answer(text, reply_markup=reply_markup, **kwargs)
 
 
 def parse_callback(data: str, prefix: str) -> list[str]:
