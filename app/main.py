@@ -13,6 +13,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 from loguru import logger
 
+from app.bot import commands as bot_commands
 from app.bot.handlers import accounts, admin, menu, rules, subscription
 from app.webapp_api import setup_webapp_routes
 from app.config import BASE_DIR, settings
@@ -151,6 +152,12 @@ async def on_startup(bot: Bot) -> None:
         logger.info("Вебхук установлен: {}", settings.public_url)
     else:
         logger.info("Работаем на long polling")
+
+    # Подсказка команд по «/» в поле ввода: список ни разу не публиковался, и
+    # человек узнавал о командах только из /help — а до /help надо догадаться.
+    # Кнопку «Меню» занимает кабинет (ниже), поэтому подсказка — единственное
+    # место, где команды видно.
+    await bot_commands.publish(bot)
 
     # Кнопка мини-аппа в меню бота (по умолчанию для всех пользователей)
     mini_url = settings.mini_app_url
