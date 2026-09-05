@@ -19,6 +19,7 @@ import asyncio
 import random
 import re
 import time
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Callable, Awaitable, Sequence
 
@@ -90,6 +91,30 @@ NOT_A_CHAT_LINK = frozenset(
 )
 
 MAX_PARSER_LIMIT = 10_000
+
+# Отказы Telegram, которые не значат «не получилось»: в чате мы и так есть, а
+# заявку уже отправили и её рассматривает админ. Исправлять человеку нечего,
+# поэтому такие ответы не попадают в причины сбоя на карточке.
+JOIN_ALREADY_FINE: frozenset[str] = frozenset(
+    {"UserAlreadyParticipantError", "InviteRequestSentError"}
+)
+
+# Пауза между вступлениями: без неё Telegram быстро отвечает «подождите».
+JOIN_PAUSE_SECONDS = 2
+
+
+@dataclass
+class JoinOutcome:
+    """Что вышло из захода в чаты: вступили, уже были, не пустили.
+
+    Одного числа не хватало: «вступили в 0 из 5» человек читал как поломку, хотя
+    в четырёх чатах аккаунт уже сидел, а в пятый его не пустил админ — и об этом
+    знал только лог службы на сервере.
+    """
+
+    joined: int = 0
+    already: int = 0
+    problems: list[str] = field(default_factory=list)
 
 
 def task_title(rule: Any) -> str:
@@ -564,10 +589,10 @@ async def _autosubscribe(client: Any, message: Any, rule: RuleSnapshot) -> None:
     if not targets:
         return
 
-    joined = await _join_all(client, targets)
-    if joined:
-        await record_ok(rule, message, count=joined)
-        logger.info("Автоподписка #{}: вступили в {} чат(ов)", rule.id, joined)
+    outcome = await _join_all(client, targets)
+    if outcome.joined:
+        await record_ok(rule, message, count=outcome.joined)
+        logger.info("Автоподписка #{}: вступили в {} чат(ов)", rule.id, outcome.joined)
 
 
 _HANDLERS: dict[str, Callable[[Any, Any, RuleSnapshot], Awaitable[None]]] = {
@@ -662,6 +687,7 @@ async def run_autosubscribe(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
     targets = [
         str(item).strip() for item in (rule.filters.subscribe_to or []) if str(item).strip()
     ]
+    outcome = JoinOutcome()
 
     # Если задан источник — сначала читаем из него последние посты на предмет ссылок
     if rule.source_id:
@@ -669,7 +695,10 @@ async def run_autosubscribe(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
             async for message in client.iter_messages(rule.source_id, limit=20):
                 targets.extend(_invite_targets(message_text(message)))
         except RPCError as exc:
+            # Непрочитанный источник — половина работы: ссылки из его постов
+            # задача не увидит. Раньше об этом знал только лог службы.
             logger.warning("Автоподписка #{}: источник не прочитан: {}", rule.id, exc)
+            outcome.problems.append(f"источник не прочитан ({type(exc).__name__})")
 
     # порядок сохраняем, но дубли убираем
     unique: list[str] = []
@@ -678,17 +707,33 @@ async def run_autosubscribe(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
             unique.append(target)
 
     if not unique:
-        return {"ok": False, "error": "Не указано ни одного канала для подписки", "joined": 0}
+        return {
+            "ok": False,
+            "error": "Не указано ни одного канала для подписки",
+            **_join_summary(outcome, 0),
+        }
 
     try:
-        joined = await _join_all(client, unique)
+        await _join_all(client, unique, outcome)
     except FloodWaitError as exc:
+        # Вступления, сделанные до отказа, остались в outcome — их и показываем:
+        # «вступили в 0» после трёх удачных заходов было бы неправдой.
         return {
             "ok": False,
             "error": f"Telegram просит подождать {int(getattr(exc, 'seconds', 60))} сек",
-            "joined": 0,
+            **_join_summary(outcome, len(unique)),
         }
-    return {"ok": True, "joined": joined, "total": len(unique)}
+    return {"ok": True, **_join_summary(outcome, len(unique))}
+
+
+def _join_summary(outcome: JoinOutcome, total: int) -> dict[str, Any]:
+    """Итог захода в чаты — полями ответа кабинету."""
+    return {
+        "joined": outcome.joined,
+        "already": outcome.already,
+        "total": total,
+        "problems": list(outcome.problems),
+    }
 
 
 def _invite_targets(text: str) -> list[str]:
@@ -706,12 +751,18 @@ def _invite_targets(text: str) -> list[str]:
     return found
 
 
-async def _join_all(client: Any, targets: list[str]) -> int:
-    """Вступает в перечисленные чаты. FloodWait пробрасывает наверх."""
+async def _join_all(client: Any, targets: list[str], outcome: JoinOutcome | None = None) -> JoinOutcome:
+    """Вступает в перечисленные чаты и рассказывает, что из этого вышло.
+
+    FloodWait пробрасывает наверх: у задачи по сообщениям есть свой повтор после
+    паузы (``run_job``). Чтобы при этом не потерялись уже сделанные вступления,
+    итог можно передать своим — тогда после исключения в нём остаётся всё, во
+    что успели войти до отказа.
+    """
     from telethon.tl.functions.channels import JoinChannelRequest
     from telethon.tl.functions.messages import ImportChatInviteRequest
 
-    joined = 0
+    result = outcome if outcome is not None else JoinOutcome()
     for target in targets:
         try:
             if target.startswith("+") or target.lower().startswith("joinchat/"):
@@ -719,15 +770,21 @@ async def _join_all(client: Any, targets: list[str]) -> int:
                 await client(ImportChatInviteRequest(invite_hash))
             else:
                 await client(JoinChannelRequest(target))
-            joined += 1
+            result.joined += 1
         except FloodWaitError:
             raise
         except RPCError as exc:
-            # «заявка отправлена», «уже участник», «нет прав» — не ошибка задачи
-            logger.info("Автоподписка: не вступили в {}: {}", target, type(exc).__name__)
+            name = type(exc).__name__
+            logger.info("Автоподписка: не вступили в {}: {}", target, name)
+            if name in JOIN_ALREADY_FINE:
+                # «уже участник», «заявка отправлена» — тут нечего исправлять,
+                # и краснеть карточке незачем.
+                result.already += 1
+            else:
+                result.problems.append(f"не пустили в {target} ({name})")
         # пауза между вступлениями, иначе Telegram быстро присылает FloodWait
-        await asyncio.sleep(2)
-    return joined
+        await asyncio.sleep(JOIN_PAUSE_SECONDS)
+    return result
 
 
 # ─────────────────────────────────── Журнал ──────────────────────────────────
@@ -853,6 +910,75 @@ async def record_batch(
                 user_id=rule.user_id,
                 source_msg_id=0,
                 target_msg_id=int(target_id) if target_id else None,
+                status="ok",
+            )
+        await session.commit()
+
+
+def oneshot_problem_text(problems: Sequence[str]) -> str:
+    """Помехи разового запуска одной строкой — её человек читает на карточке.
+
+    Причины уже написаны словами («не пустили в @chat (…)», «источник не
+    прочитан (…)»), поэтому склеивать их незачем: показываем первую и говорим,
+    сколько таких же было ещё. На экране 390 px длинное перечисление всё равно
+    не читается.
+    """
+    first = next((str(item) for item in problems if item), "неизвестная ошибка")
+    if len(problems) < 2:
+        return first
+    return f"{first} — и ещё {len(problems) - 1}"
+
+
+async def record_oneshot(rule: RuleSnapshot, result: dict[str, Any]) -> None:
+    """Итог разового запуска — в журнал задачи, а не только во всплывающий тост.
+
+    Раньше «Telegram просит подождать 40 сек», «аккаунт не в сети» и даже удачный
+    сбор жили ровно до закрытия подсказки: на карточке оставались метка «по
+    кнопке» и ноль собранных, и по ней нельзя было понять, запускали задачу час
+    назад или ни разу. Теперь запуск виден так же, как проход расписанной задачи.
+
+    Порядок записи тот же, что в ``record_batch``: сбой раньше успеха, поэтому
+    запуск с помехами не считается сломанным (см. ``repo.task_health``), но
+    причина на карточке остаётся. Успехом не дополняем два случая: неудачный
+    запуск (у разовой задачи нет следующего прохода, который сам всё исправит, —
+    за кнопкой должен вернуться человек) и запуск, который прошёл до конца, но не
+    сделал ничего, а помехи назвал: «не пустили ни в один чат» — это сбой, как бы
+    гладко ни завершился сам проход.
+
+    Отдельная функция, а не ``record_batch``: тому нужны отправки по чатам, и
+    удачный сбор без единой отправки он просто не записал бы.
+    """
+    ok = bool(result.get("ok"))
+    joined = int(result.get("joined") or 0)
+    problems = [str(item) for item in (result.get("problems") or ()) if item]
+    reason = str(result.get("error") or "") if not ok else oneshot_problem_text(problems)
+    # Что запуск успел сделать: вступления, чаты, где мы и так есть, и собранные
+    # записи. Ноль при названных помехах — это не «сработала», а «не смогла».
+    done = joined + int(result.get("already") or 0) + int(result.get("collected") or 0)
+
+    async with SessionLocal() as session:
+        if not ok or problems:
+            await repo.log_forward(
+                session,
+                rule_id=rule.id,
+                user_id=rule.user_id,
+                # У разовой задачи нет входящего сообщения: её запускают кнопкой.
+                source_msg_id=0,
+                target_msg_id=None,
+                status="error",
+                error=reason or None,
+            )
+        # Вступления считаем и у неудачного запуска: три чата из десяти — это
+        # три чата, а полоса выполнения читает именно этот счётчик.
+        if joined:
+            await repo.bump_forwarded(session, rule.id, joined)
+        if ok and (done or not problems):
+            await repo.log_forward(
+                session,
+                rule_id=rule.id,
+                user_id=rule.user_id,
+                source_msg_id=0,
+                target_msg_id=None,
                 status="ok",
             )
         await session.commit()

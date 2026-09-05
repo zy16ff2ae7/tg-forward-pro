@@ -333,14 +333,54 @@ const DEMO_STATE = {
         library_ids: [], gap: 8, cycle: 60, repeats: 3, typing: true, random_pick: false,
       },
       created_at: '2026-08-29T14:15:00' },
+    // Разовая задача в работе: без неё в демо не было ни кнопки «Запустить», ни
+    // её итога — единственная разовая задача лежала в архиве. Полоса выполнения
+    // считает вступления из счётчика задачи, «всего» — длину списка каналов
+    // (_task_view: у автоподписки без источника total = len(subscribe_to)).
+    { id: 6, title: 'Автоподписка: 5 кан.', kind: 'autosubscribe', kind_label: 'автоподписка',
+      source: 'все чаты аккаунта', target: '', archived: false, oneshot: true,
+      enabled: true, mode: 'copy', delay: 0, forwarded: 0, account_id: 1,
+      progress: { done: 0, total: 5 },
+      health: { ok_at: null, error: null, error_at: null, failing: false },
+      edit: {
+        account_id: 1, names: {},
+        targets: ['@theatre_one', '@theatre_two', '@closed', '+AbCdEf123', '@afisha'],
+      },
+      created_at: '2026-09-01T08:30:00' },
   ],
-  nextId: 6,
+  nextId: 7,
 };
 
 /* Метки времени в демо считаем от «сейчас»: зашитая дата через месяц показала бы
    «30 дней назад» вместо живого «4 минуты назад». */
 function demoAgo(minutes) {
   return new Date(Date.now() - minutes * 60000).toISOString();
+}
+
+/* Итог разового запуска — в журнал демо-задачи, как это делает сервер
+   (jobs.record_oneshot + repo.task_health). Без этого демо врало о главном:
+   нажал «Запустить» — и на карточке по-прежнему ноль и ни одной даты, будто
+   задачу не запускали. Порядок тот же: сбой пишется раньше успеха, поэтому
+   проход с помехами не краснеет, но причина на карточке остаётся. */
+function demoJournalRun(task, run) {
+  const problems = run.problems || [];
+  const done = (run.joined || 0) + (run.already || 0) + (run.collected || 0);
+  const wroteError = !run.ok || problems.length > 0;
+  const wroteOk = !!run.ok && (done > 0 || problems.length === 0);
+  const health = task.health || (task.health = {});
+  if (wroteError) {
+    health.error = run.ok
+      ? problems[0] + (problems.length > 1 ? ` — и ещё ${problems.length - 1}` : '')
+      : run.error || 'Запуск не удался';
+    health.error_at = demoAgo(0);
+  }
+  if (wroteOk) health.ok_at = demoAgo(0);
+  health.failing = wroteError && !wroteOk;
+  if (run.joined) task.forwarded = (task.forwarded || 0) + run.joined;
+  const total = (task.progress || {}).total || null;
+  task.progress = run.collected != null
+    ? { done: run.collected, total: total || 200 }
+    : { done: task.forwarded || 0, total };
 }
 
 /* Демо-каталог повторяет COMMANDS и COMMAND_GROUPS из app/webapp_api.py:
@@ -1021,11 +1061,25 @@ function demoApi(path, options = {}) {
       return { ok: true };
     }
     if (tail === 'run' && task) {
-      if (!task.oneshot) return { ok: false, error: 'Задача работает по сообщениям' };
-      if (!task.enabled || task.archived) return { ok: false, error: 'Задача не активна' };
-      return task.kind === 'parser'
+      // Отказы — как у сервера (409 и текст): кабинет показывает их через catch,
+      // а не через сводку запуска.
+      if (!task.oneshot) {
+        demoFail(409, 'Эта задача работает по сообщениям — запуск вручную не нужен');
+      }
+      if (!task.enabled || task.archived) demoFail(409, 'Задача не активна');
+      const run = task.kind === 'parser'
         ? { ok: true, collected: 640, limit: 200 }
-        : { ok: true, joined: 3, total: 5 };
+        : {
+            ok: true,
+            joined: 3,
+            total: 5,
+            already: 1,
+            problems: ['не пустили в @closed (ChatAdminRequiredError)'],
+          };
+      demoJournalRun(task, run);
+      // Сводку сервер отдаёт полем run (POST /api/tasks/{id}/run → {"run": …}) —
+      // в демо было иначе, и кабинет показывал безликое «Готово» вместо итога.
+      return { ok: true, run };
     }
     if (tail === 'results') {
       return Object.assign({ kind: task ? task.kind : 'parser', total: 0, items: [] }, DEMO_RESULTS[id] || {});
@@ -1073,8 +1127,11 @@ function demoApi(path, options = {}) {
     const run = kind === 'parser'
       ? { ok: true, collected: 128, limit: Number(body.limit) || 200 }
       : kind === 'autosubscribe'
-        ? { ok: true, joined: 2, total: (body.targets || []).length }
+        ? { ok: true, joined: 2, already: 0, total: (body.targets || []).length, problems: [] }
         : null;
+    // Первый запуск разовой задачи сервер тоже пишет в её журнал — новая
+    // карточка не должна выглядеть как ни разу не запущенная.
+    if (run) demoJournalRun(task, run);
     return { ok: true, id: task.id, task, run };
   }
 
@@ -2029,12 +2086,28 @@ async function taskAction(action, id, button) {
   }
 }
 
-/* Сводка запуска разовой задачи → понятная фраза для тоста. */
+/* Сводка запуска разовой задачи → понятная фраза для тоста. Заходы в чаты
+   объясняем целиком: «вступили в 0 из 5» человек читает как поломку, хотя в
+   четырёх аккаунт уже сидел, а в пятый его не пустил админ. Отказ на середине
+   («подождите 40 сек») тоже не отменяет сделанного — сколько успели, столько и
+   говорим. Полностью тот же итог остаётся на карточке: сервер пишет его в
+   журнал задачи, и подсказка больше не единственное место, где он был. */
 function runMessage(run) {
   if (!run) return 'Готово';
-  if (!run.ok) return run.error || 'Запуск не удался';
+  const done = [];
+  if (run.joined) done.push(`вступили в ${run.joined}`);
+  if (run.already) done.push(`уже были в ${run.already}`);
+  if (!run.ok) {
+    const reason = run.error || 'Запуск не удался';
+    return done.length ? `${reason} — ${done.join(', ')}` : reason;
+  }
   if (run.collected != null) return `Собрано участников: ${run.collected}`;
-  if (run.joined != null) return `Вступили в чаты: ${run.joined} из ${run.total}`;
+  if (run.joined != null) {
+    const parts = [`Вступили в чаты: ${run.joined} из ${run.total}`];
+    if (run.already) parts.push(`уже были в ${run.already}`);
+    if ((run.problems || []).length) parts.push(run.problems[0]);
+    return parts.join(', ');
+  }
   return 'Готово';
 }
 

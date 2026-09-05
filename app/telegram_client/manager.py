@@ -1172,23 +1172,32 @@ class ClientManager:
     async def run_task_now(self, rule) -> dict:
         """Запускает разовую задачу (парсер, автоподписка) на живом клиенте.
 
-        Возвращает сводку запуска: {"ok": bool, ...}.
+        Возвращает сводку запуска: {"ok": bool, ...} — и её же кладёт в журнал
+        задачи. Здесь единственное место, куда сходятся оба запуска (кнопка в
+        кабинете и первый запуск при создании), поэтому и запись одна на оба.
         """
-        from app.telegram_client.jobs import run_oneshot
+        from app.telegram_client.jobs import record_oneshot, run_oneshot
 
         snapshot = _snapshot(rule)
         client = self._clients.get(rule.account_id)
         if client is None or not client.is_connected():
-            return {
+            result = {
                 "ok": False,
                 "error": "Аккаунт не в сети. Перезапустите его в боте и повторите запуск.",
             }
+        else:
+            try:
+                result = await run_oneshot(client, snapshot)
+            except Exception as exc:  # noqa: BLE001 — результат нужен в API, а не в лог
+                logger.exception("Задача #{} не выполнилась", rule.id)
+                result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
+        # Журнал не должен уронить запуск: сводку человек уже ждёт в ответе.
         try:
-            return await run_oneshot(client, snapshot)
-        except Exception as exc:  # noqa: BLE001 — результат нужен в API, а не в лог
-            logger.exception("Задача #{} не выполнилась", rule.id)
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            await record_oneshot(snapshot, result)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Запуск задачи #{} не попал в журнал: {}", rule.id, exc)
+        return result
 
     def start_periodic_refresh(self, interval: int = 60) -> None:
         """Фоновое обновление кэша правил, чтобы правки из бота подхватывались сами."""

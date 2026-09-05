@@ -1980,18 +1980,28 @@ async def check_task_cleanup(cab: Cabinet, rep: Report, account_id: int) -> None
         reborn == doomed,
         f"было #{doomed}, стало #{reborn}",
     )
+    reborn_health = reborn_task.get("health") or {}
     rep.check(
-        "новая задача с тем же номером — с чистой карточкой",
-        reborn_task.get("health")
-        == {"ok_at": None, "error": None, "error_at": None, "failing": False}
+        "новая задача с тем же номером не унесла чужую историю",
+        "чат закрыт" not in str(reborn_health.get("error") or "")
         and (reborn_task.get("progress") or {}).get("done") == 0,
-        f"{reborn_task.get('health')}, найдено "
+        f"{reborn_health}, найдено "
         f"{(reborn_task.get('progress') or {}).get('done')}",
+    )
+    # Разовую задачу сервис запускает сразу при создании, и итог этого запуска
+    # обязан попасть в её журнал: иначе карточка выглядит как «ни разу не
+    # запускали» ровно там, где запуск уже был (в прогоне живого клиента нет,
+    # поэтому это отказ «аккаунт не в сети»).
+    rep.check(
+        "запуск при создании попал в журнал новой задачи",
+        bool(reborn_health.get("error_at") or reborn_health.get("ok_at")),
+        f"{reborn_health}",
     )
 
     # База после старого удаления: строки есть, задачи нет. Так выглядели все
     # базы до этой правки — их лечит фоновый проход, а не ручные запросы.
     await fill(reborn)
+    orphans = {name: count for name, count in (await rows(reborn)).items() if count}
     async with session_scope() as session:
         rule = await repo.get_rule(session, reborn, SMOKE_USER_ID)
         await session.delete(rule)
@@ -1999,8 +2009,8 @@ async def check_task_cleanup(cab: Cabinet, rep: Report, account_id: int) -> None
         dropped = await repo.drop_orphan_records(session)
     rep.check(
         "фоновый проход убирает следы задач, которых уже нет",
-        dropped == {"forward_logs": 1, "collected_items": 1, "pending_deliveries": 1},
-        f"{dropped}",
+        dropped == orphans,
+        f"убрал {dropped}, а лежало {orphans}",
     )
     async with session_scope() as session:
         rep.check(
