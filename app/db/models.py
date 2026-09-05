@@ -133,6 +133,14 @@ class Subscription(Base):
     )
     active_until: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     reminded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Когда начался текущий непрерывный доступ. Нужен напоминанию «скоро конец»:
+    # без него оно смотрело только на остаток и у трёхдневного пробного периода
+    # срабатывало в первую же минуту — «продлевайте» приходило вместе с
+    # «здравствуйте». Пусто у строк, созданных до этой колонки.
+    period_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Когда сказали, что срок вышел и задачи встали. Одна беда — одно письмо;
+    # продление метку снимает, чтобы о следующем конце сказать снова.
+    expired_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Копилка: дни, снятые с активного периода и ждущие распределения.
     # В отличие от active_until они не «горят» — не привязаны к конкретной дате.
     banked_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

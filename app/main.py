@@ -93,7 +93,7 @@ async def notify_dead_accounts(bot: Bot) -> None:
     async with SessionLocal() as session:
         notices: list[tuple[int, str]] = []
         for account in await repo.accounts_awaiting_relogin_notice(session):
-            rules = await repo.count_working_rules(session, account.id)
+            rules = await repo.count_working_rules(session, account_id=account.id)
             reason = (account.last_error or "").rstrip(".")
             notices.append(
                 (account.user_id, dead_account_text(account.phone, reason, rules))
@@ -108,6 +108,56 @@ async def notify_dead_accounts(bot: Bot) -> None:
             await bot.send_message(user_id, text, reply_markup=relogin_notice())
         except Exception:  # noqa: BLE001
             logger.debug("Не смогли сказать пользователю {} про выпавший аккаунт", user_id)
+
+
+EXPIRED_LEAD = "⛔ <b>Абонемент закончился.</b>"
+
+
+def expired_text(rules: int) -> str:
+    """Сообщение о конце срока: что встало и что вернётся после продления.
+
+    Число задач — не украшение: это единственное, что отличает «у вас всё
+    стоит» от «стоять нечему». Пустой список задач до этой строки не доходит.
+    """
+    return (
+        f"{EXPIRED_LEAD}\n\n"
+        f"Пересылка остановлена: задач — {rules}. Они пойдут сами, как только "
+        "абонемент продлён — настройки и подключённые аккаунты на месте."
+    )
+
+
+async def notify_expired(bot: Bot) -> None:
+    """Говорит, что срок вышел и задачи встали.
+
+    Боевой случай: пять абонементов кончились один-три дня назад, и сервис не
+    сказал об этом ни слова — выборка истёкших подписок в репозитории была, но
+    её никто не вызывал. Пересылка при этом молча выключена: ``forwarder``
+    пропускает сообщения без абонемента, а кабинет до этой правки продолжал
+    писать на карточке «работает».
+
+    Напоминание «скоро конец» — другой разговор и другая метка: там человек
+    ещё работает, здесь уже нет. Пишем только тем, у кого есть что остановить:
+    без включённых задач конец срока ничего не изменил, и письмо было бы
+    попыткой продать воздух.
+
+    Метку ставим до отправки — цикл ходит каждые пять минут, а беда одна.
+    """
+    async with SessionLocal() as session:
+        notices: list[tuple[int, str]] = []
+        for sub in await repo.subscriptions_awaiting_expiry_notice(session):
+            rules = await repo.count_working_rules(session, user_id=sub.user_id)
+            await repo.mark_expiry_notified(session, sub)
+            if rules:
+                notices.append((sub.user_id, expired_text(rules)))
+        await session.commit()
+
+    from app.bot.keyboards import payment_menu
+
+    for user_id, text in notices:
+        try:
+            await bot.send_message(user_id, text, reply_markup=payment_menu(user_id))
+        except Exception:  # noqa: BLE001
+            logger.debug("Не смогли сказать пользователю {} про конец срока", user_id)
 
 
 async def trim_logs(_bot: Bot) -> None:
@@ -147,6 +197,7 @@ async def run_background_checks(bot: Bot) -> None:
         ("USDT", crypto.check_pending),
         ("ЮKassa", yookassa.check_pending),
         ("напоминания о продлении", notify_expiring),
+        ("конец абонемента", notify_expired),
         ("выпавшие аккаунты", notify_dead_accounts),
         ("уборка базы", trim_logs),
     )

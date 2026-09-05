@@ -77,6 +77,18 @@ def _is_active(sub: Subscription | None, now: datetime) -> bool:
     return sub is not None and sub.active_until > now
 
 
+def _start_period(sub: Subscription, now: datetime) -> None:
+    """Отмечает начало нового непрерывного доступа, если прежний уже кончился.
+
+    Продление живого абонемента прежнюю точку не двигает: доступ не прерывался,
+    и «половина периода» считается по всему сроку целиком. А вот истёкший
+    абонемент оплачивают заново — там период начинается сейчас, и напоминание
+    о конце снова должно ждать середины.
+    """
+    if sub.period_start is None or not _is_active(sub, now):
+        sub.period_start = now
+
+
 async def has_active_subscription(session: AsyncSession, user_id: int) -> bool:
     sub = await session.get(Subscription, user_id)
     return _is_active(sub, utcnow())
@@ -99,11 +111,13 @@ async def activate_subscription(
     new_until = base + timedelta(days=30 * months)
 
     if sub is None:
-        sub = Subscription(user_id=user_id, active_until=new_until)
+        sub = Subscription(user_id=user_id, active_until=new_until, period_start=now)
         session.add(sub)
     else:
+        _start_period(sub, now)
         sub.active_until = new_until
         sub.reminded_at = None
+        sub.expired_notified_at = None
     await session.flush()
     return new_until
 
@@ -114,8 +128,9 @@ async def grant_trial(session: AsyncSession, user_id: int) -> datetime | None:
         return None
     if await session.get(Subscription, user_id) is not None:
         return None
-    until = utcnow() + timedelta(days=settings.trial_days)
-    session.add(Subscription(user_id=user_id, active_until=until))
+    now = utcnow()
+    until = now + timedelta(days=settings.trial_days)
+    session.add(Subscription(user_id=user_id, active_until=until, period_start=now))
     await session.flush()
     return until
 
@@ -136,11 +151,13 @@ async def add_subscription_days(
     new_until = base + timedelta(days=max(0, days))
 
     if sub is None:
-        sub = Subscription(user_id=user_id, active_until=new_until)
+        sub = Subscription(user_id=user_id, active_until=new_until, period_start=now)
         session.add(sub)
     else:
+        _start_period(sub, now)
         sub.active_until = new_until
         sub.reminded_at = None
+        sub.expired_notified_at = None
     await session.flush()
     return new_until
 
@@ -176,8 +193,31 @@ async def count_active_subscriptions(session: AsyncSession) -> int:
     return int(result.scalar() or 0)
 
 
+def _reminder_is_premature(sub: Subscription, now: datetime) -> bool:
+    """Рано ли говорить «скоро конец»: не прошло и половины периода.
+
+    Боевой случай: пробный период — три дня, напоминать велено за три, и новичок
+    получал «Абонемент заканчивается, продлите» через минуту после «/start»
+    (у одного — через 1,2 секунды). Формально верно, по делу — обман: человек
+    ещё ничего не попробовал, а его уже просят платить.
+
+    Поэтому срок напоминания не только «за N дней», но и «не раньше середины
+    периода»: у месяца это по-прежнему N дней, у трёх пробных дней — полтора.
+    Строки без начала периода (созданные до этой колонки) считаем как раньше.
+    """
+    start = sub.period_start
+    if start is None or start >= sub.active_until:
+        return False
+    return (sub.active_until - now) > (sub.active_until - start) / 2
+
+
 async def expiring_soon(session: AsyncSession) -> Sequence[Subscription]:
-    """Подписки, которые истекут в течение суток и по которым ещё не напоминали."""
+    """Живые абонементы, которым пора напомнить о продлении.
+
+    Два условия, а не одно: остаток меньше ``RENEW_REMIND_DAYS`` и позади хотя
+    бы половина периода (см. ``_reminder_is_premature``). Уже напомненные и уже
+    истёкшие сюда не попадают — про конец срока говорит ``notify_expired``.
+    """
     now = utcnow()
     threshold = now + timedelta(days=settings.renew_remind_days)
     result = await session.execute(
@@ -187,15 +227,34 @@ async def expiring_soon(session: AsyncSession) -> Sequence[Subscription]:
             Subscription.reminded_at.is_(None),
         )
     )
-    return result.scalars().all()
+    return [sub for sub in result.scalars().all() if not _reminder_is_premature(sub, now)]
 
 
-async def expired_subscriptions(session: AsyncSession) -> Sequence[Subscription]:
-    now = utcnow()
+async def subscriptions_awaiting_expiry_notice(
+    session: AsyncSession,
+) -> Sequence[Subscription]:
+    """Абонементы, которые кончились, а хозяину об этом ещё не говорили.
+
+    Раньше здесь была ``expired_subscriptions`` — выборка без единого вызова:
+    конец срока не замечал никто, пересылка просто переставала работать
+    (``forwarder`` молча пропускает сообщения без абонемента), а человек видел
+    в кабинете бодрое «работает».
+    """
     result = await session.execute(
-        select(Subscription).where(Subscription.active_until <= now)
+        select(Subscription)
+        .where(
+            Subscription.active_until <= utcnow(),
+            Subscription.expired_notified_at.is_(None),
+        )
+        .order_by(Subscription.user_id)
     )
     return result.scalars().all()
+
+
+async def mark_expiry_notified(session: AsyncSession, sub: Subscription) -> None:
+    """Помечает, что про этот конец срока хозяину уже сказали."""
+    sub.expired_notified_at = utcnow()
+    await session.flush()
 
 
 async def mark_reminded(session: AsyncSession, user_id: int) -> None:
@@ -245,9 +304,13 @@ async def unbank_days(session: AsyncSession, user_id: int, days: int) -> int:
 
     now = utcnow()
     base = max(now, sub.active_until) if sub.active_until and sub.active_until > now else now
+    _start_period(sub, now)
     sub.active_until = base + timedelta(days=moved)
     sub.banked_days -= moved
     sub.reminded_at = None
+    # Дни из копилки — такое же продление, как оплата: если срок успел кончиться,
+    # про следующий конец надо будет сказать снова.
+    sub.expired_notified_at = None
     await session.flush()
     return moved
 
@@ -377,20 +440,27 @@ async def mark_error_notified(session: AsyncSession, account: TelegramAccount) -
     await session.flush()
 
 
-async def count_working_rules(session: AsyncSession, account_id: int) -> int:
-    """Сколько задач на аккаунте работало бы: включённые и не в архиве.
+async def count_working_rules(
+    session: AsyncSession,
+    *,
+    account_id: int | None = None,
+    user_id: int | None = None,
+) -> int:
+    """Сколько задач работало бы: включённые и не в архиве.
 
-    Это и есть цена мёртвой сессии — столько задач молча ничего не делает.
+    Это и есть цена простоя — столько задач молча ничего не делает. Считаем по
+    аккаунту (мёртвая сессия) или по человеку (кончился абонемент): вопрос один
+    и тот же, отличается только чем ограничить выборку.
     """
-    result = await session.execute(
-        select(func.count())
-        .select_from(Rule)
-        .where(
-            Rule.account_id == account_id,
-            Rule.enabled.is_(True),
-            Rule.archived.is_(False),
-        )
+    query = select(func.count()).select_from(Rule).where(
+        Rule.enabled.is_(True),
+        Rule.archived.is_(False),
     )
+    if account_id is not None:
+        query = query.where(Rule.account_id == account_id)
+    if user_id is not None:
+        query = query.where(Rule.user_id == user_id)
+    result = await session.execute(query)
     return int(result.scalar_one())
 
 

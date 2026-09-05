@@ -25,24 +25,11 @@ from sqlalchemy import text
 from app import main
 from app.db import repo
 from app.db.database import SessionLocal, engine, ensure_schema, session_scope
-from app.db.models import Rule, TelegramAccount
+from app.db.models import TelegramAccount
 from app.telegram_client.manager import SESSION_REVOKED, SESSION_UNREADABLE
-from tests.helpers import RecordingBot
+from tests.helpers import RecordingBot, add_rule
 
 PHONE = "+79013533606"
-
-
-async def add_rule(user_id: int, account_id: int, **fields) -> None:
-    async with session_scope() as session:
-        session.add(
-            Rule(
-                user_id=user_id,
-                account_id=account_id,
-                source_id=-1001,
-                target_id=-1002,
-                **fields,
-            )
-        )
 
 
 async def kill_session(account_id: int, reason: str = SESSION_REVOKED) -> None:

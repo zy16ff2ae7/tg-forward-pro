@@ -14,6 +14,8 @@ from types import SimpleNamespace
 from urllib.parse import urlencode
 
 from app.config import settings
+from app.db.database import session_scope
+from app.db.models import Rule
 
 TEST_USER_ID = 768_000_001
 
@@ -80,3 +82,22 @@ class RecordingBot:
     @property
     def recipients(self) -> list[int]:
         return [chat_id for chat_id, _ in self.messages]
+
+
+async def add_rule(user_id: int, account_id: int, **fields) -> None:
+    """Задача с обязательным минимумом полей: остальное — по вкусу теста.
+
+    Нужна везде, где проверяется «сколько задач встало»: и у выпавшего
+    аккаунта, и у кончившегося абонемента. Обязательные колонки одни и те же,
+    поэтому и заготовка одна.
+    """
+    async with session_scope() as session:
+        session.add(
+            Rule(
+                user_id=user_id,
+                account_id=account_id,
+                source_id=-1001,
+                target_id=-1002,
+                **fields,
+            )
+        )

@@ -1682,9 +1682,23 @@ function aggregateTaskCounts() {
    отключённом аккаунте не делает ничего, и об этом надо сказать прямо. Сбой —
    там же: задача, которая последние разы только падала, «работает» лишь на
    бумаге. Сравнение строгое (=== false): в демо-данных поля просто нет. */
+/* Признак «абонемент кончился» — общий для всех задач, поэтому берётся из
+   состояния кабинета, а не из полей задачи: сервер уже отдаёт его в /api/me,
+   и второе такое же поле в каждой задаче было бы тем же самым дважды.
+   Строгое `=== false`: у демо-данных и старого ответа поля нет, и молчать про
+   абонемент там правильнее, чем гадать. */
+function subscriptionStopped() {
+  const sub = (state.me || {}).subscription;
+  return !!sub && sub.active === false;
+}
+
 function taskBadge(task) {
   if (task.archived) return { kind: 'done', label: 'завершена' };
   if (!task.enabled) return { kind: 'paused', label: 'пауза' };
+  // Кончившийся абонемент — впереди «нет связи»: пересылка выключена целиком,
+  // и связь с аккаунтом тут уже ничего не меняет. Иначе карточка писала
+  // «работает» ровно тогда, когда сервис молча ничего не делает.
+  if (subscriptionStopped()) return { kind: 'error', label: 'нет абонемента' };
   if (task.account_online === false) return { kind: 'error', label: 'нет связи' };
   if (task.health && task.health.failing) return { kind: 'error', label: 'сбой' };
   if (task.oneshot) return { kind: 'plan', label: 'по кнопке' };
@@ -1773,6 +1787,16 @@ function windowMigrationHint(task) {
    Показываем и починенный сбой — «в три чата не ушло» надо знать, даже когда
    остальные сто получили; тогда строка спокойнее по цвету. */
 function taskAlertHtml(task) {
+  // Кончившийся абонемент объясняем прямо на карточке: значка «нет абонемента»
+  // мало — из него не видно, что делать. Только у задач, которые иначе шли бы:
+  // архив и пауза стоят по своей причине, и абонемент им ничего не менял.
+  if (!task.archived && task.enabled && subscriptionStopped()) {
+    return `
+      <div class="task__alert">
+        <span>⛔ Абонемент закончился — задача стоит. Продлите на вкладке «Оплата»,
+        и она пойдёт сама: настройки на месте.</span>
+      </div>`;
+  }
   const health = task.health || {};
   if (!health.error) return '';
   const when = timeAgo(health.error_at);
@@ -1922,10 +1946,13 @@ function taskCardHtml(task, options) {
 function renderTasks(tasks) {
   const holder = $('taskList');
   // Подпись экрана честно считает по всем трём спискам, а не по видимому.
+  // Без абонемента включённые задачи не работают, а стоят — иначе подпись
+  // писала «4 работают» прямо над четырьмя карточками «нет абонемента».
   const counts = state.tasksByStatus;
+  const live = (counts.active || []).length;
   $('taskSummary').textContent =
-    `${(counts.active || []).length} работают · ${(counts.paused || []).length} на паузе · ` +
-    `${(counts.done || []).length} в архиве`;
+    `${live} ${subscriptionStopped() ? 'ждут абонемента' : 'работают'} · ` +
+    `${(counts.paused || []).length} на паузе · ${(counts.done || []).length} в архиве`;
 
   // tasksByStatus[active] может быть пустым просто потому, что у пользователя
   // нет активных рассылок. Скелетон в этом случае не нужен — покажем сразу
