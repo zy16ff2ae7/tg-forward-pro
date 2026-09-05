@@ -36,7 +36,7 @@ from app.plans import (
     stars_amount,
     usdt_amount,
 )
-from app.telegram_client.jobs import MAX_PARSER_LIMIT, ONE_SHOT_KINDS
+from app.telegram_client.jobs import MAX_PARSER_LIMIT, ONE_SHOT_KINDS, window_tz_minutes
 from app.telegram_client.manager import manager
 
 # initData считаем свежим в течение суток
@@ -697,6 +697,11 @@ async def _apply_task_settings(
             filters["window_start"] = str(payload.get("start") or "00:00")[:5]
         if given("end"):
             filters["window_end"] = str(payload.get("end") or "23:59")[:5]
+        # Чьи часы у окна: смещение кабинета от UTC (его знает браузер человека).
+        # Без него окно считалось по часам сервера — а он стоит в UTC, и
+        # московское «окно 10:00–20:00» работало 13:00–23:00 по Москве.
+        if given("tz"):
+            filters["window_tz"] = window_tz_minutes(payload.get("tz"))
     elif kind == "mailing":
         for field, name, default in (
             ("gap", "gap_seconds", 5),
@@ -2077,6 +2082,11 @@ def _task_view(
         view["interval_min"] = max(1, conf.interval_seconds // 60)
         view["window_start"] = conf.window_start
         view["window_end"] = conf.window_end
+        # Чьи часы у окна: смещение хозяина от UTC в минутах. null — часы
+        # сервера (он стоит в UTC), и карточка обязана сказать это словами:
+        # иначе «окно 10:00–20:00» у московского хозяина читается как его
+        # собственное время, а работает на три часа позже.
+        view["window_tz"] = window_tz_minutes(conf.window_tz)
         # Тексты постинга лежат в библиотеке — как у рассылки, тем же счётом.
         view.update(_own_texts_state(conf, texts))
 
@@ -2217,6 +2227,10 @@ def _edit_view(
         edit["interval"] = max(1, conf.interval_seconds // 60)
         edit["start"] = conf.window_start
         edit["end"] = conf.window_end
+        # Смещение окна от UTC — тем же именем, каким его принимает /api/tasks.
+        # Кабинет присылает своё при каждом сохранении, но форме оно нужно и
+        # прежним: по нему видно, чьи часы у задачи сейчас.
+        edit["tz"] = window_tz_minutes(conf.window_tz)
     elif kind == "mailing":
         # Текст рассылки лежит в библиотеке, но правят его здесь: поле показывает
         # то, что уйдёт, — как у постинга. Раньше поле стояло пустым, а набранный
@@ -2359,7 +2373,7 @@ COMMANDS: list[dict] = [
         "status": "ready",
         "needs": ["account", "targets", "message"],
         "optional": ["interval", "start", "end"],
-        "hint": "Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Текст наберите здесь либо возьмите из библиотеки — она общая с рассылкой, и правка записи меняет обе задачи. Переносы строк внутри сообщения сохраняются как есть — прайс уйдёт целиком. Нужно второе сообщение — отделите его пустой строкой: за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ.",
+        "hint": "Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Текст наберите здесь либо возьмите из библиотеки — она общая с рассылкой, и правка записи меняет обе задачи. Переносы строк внутри сообщения сохраняются как есть — прайс уйдёт целиком. Нужно второе сообщение — отделите его пустой строкой: за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ по вашим часам.",
         "tags": ["ваш текст", "каждые N минут", "окно времени"],
     },
     {

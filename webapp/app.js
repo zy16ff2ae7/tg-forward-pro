@@ -100,8 +100,8 @@ const FIELD_SPEC = {
     note: 'пустая строка делит сообщения, простой перенос — нет',
   },
   interval: { label: 'Интервал (мин)', control: 'number', placeholder: '2', note: 'минимум 1 минута' },
-  start: { label: 'Начало (ЧЧ:ММ)', placeholder: '00:00' },
-  end: { label: 'Конец (ЧЧ:ММ)', placeholder: '23:59' },
+  start: { label: 'Начало (ЧЧ:ММ)', placeholder: '00:00', note: 'по вашим часам — кабинет берёт их с этого устройства' },
+  end: { label: 'Конец (ЧЧ:ММ)', placeholder: '23:59', note: 'после этого времени круги ждут до утра' },
   gap: { label: 'Пауза между чатами (сек)', control: 'number', placeholder: '5', note: 'быстрее секунды Telegram всё равно не даст' },
   cycle: { label: 'Пауза перед новым кругом (сек)', control: 'number', placeholder: '10' },
   repeats: { label: 'Сколько кругов', control: 'number', placeholder: '1', note: '0 — крутить без конца' },
@@ -362,7 +362,7 @@ const DEMO_COMMANDS = [
   { id: 'poster', group: 'own', kind: 'poster', emoji: '📤', title: 'Постинг по расписанию', status: 'ready',
     needs: ['account', 'targets', 'message'], optional: ['interval', 'start', 'end'],
     description: 'Ваше объявление висит в чатах постоянно: сам шлёт его во все выбранные каждые N минут, пока открыто окно времени. Текст берётся здесь или из библиотеки.',
-    hint: 'Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Текст наберите здесь либо возьмите из библиотеки — она общая с рассылкой, и правка записи меняет обе задачи. Переносы строк внутри сообщения сохраняются как есть — прайс уйдёт целиком. Нужно второе сообщение — отделите его пустой строкой: за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ.',
+    hint: 'Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Текст наберите здесь либо возьмите из библиотеки — она общая с рассылкой, и правка записи меняет обе задачи. Переносы строк внутри сообщения сохраняются как есть — прайс уйдёт целиком. Нужно второе сообщение — отделите его пустой строкой: за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ по вашим часам.',
     tags: ['ваш текст', 'каждые N минут', 'окно времени'] },
   { id: 'mailing', group: 'own', kind: 'mailing', emoji: '📨', title: 'Рассылка по очереди', status: 'ready',
     needs: ['account', 'targets', 'message'], optional: ['gap', 'cycle', 'repeats', 'typing', 'random_pick'],
@@ -769,6 +769,9 @@ function demoTaskFill(task, body, command) {
     task.interval_min = Number(body.interval) || 2;
     task.window_start = body.start || '00:00';
     task.window_end = body.end || '23:59';
+    // Чьи часы у окна: смещение от UTC приходит вместе с задачей (на сервере это
+    // filters.window_tz). Без него окно считалось бы по часам сервера.
+    task.window_tz = body.tz === undefined ? browserTz() : windowTz(body.tz);
     // Счёт сообщений у постинга стоит в самой карточке, рядом с расписанием.
     Object.assign(task, demoOwnTextsState(libraryIds));
   }
@@ -826,6 +829,7 @@ function demoTaskEdit(body, command, chats, libraryIds) {
     edit.interval = Number(body.interval) || 2;
     edit.start = body.start || '00:00';
     edit.end = body.end || '23:59';
+    edit.tz = body.tz === undefined ? browserTz() : windowTz(body.tz);
   } else if (kind === 'mailing') {
     Object.assign(edit, demoOwnTextsEdit(libraryIds));
     edit.gap = Number(body.gap) || 5;
@@ -1636,6 +1640,57 @@ function pluralRu(n, one, few, many) {
   return many;
 }
 
+/* Часы этого устройства: смещение от UTC в минутах (Москва — 180). Именно его
+   кабинет отдаёт задаче вместе с окном постинга: сервер стоит в UTC, и без
+   смещения московское «окно 10:00–20:00» работало на нём 13:00–23:00 по Москве —
+   последний круг уходил людям в полночь. */
+function browserTz() {
+  return -new Date().getTimezoneOffset();
+}
+
+/* Смещение из ответа сервера. Непонятное значение — как отсутствие: значит окно
+   считается по часам сервера, и карточка обязана сказать это словами (тем же
+   правилом, что jobs.window_tz_minutes). */
+function windowTz(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes) || Math.abs(minutes) > 14 * 60) return null;
+  return Math.trunc(minutes);
+}
+
+/* «UTC+3» / «UTC−4:30» / «UTC» — подпись часового пояса окна. */
+function tzLabel(minutes) {
+  const total = Math.abs(minutes);
+  const hours = Math.floor(total / 60);
+  const rest = total % 60;
+  if (!minutes) return 'UTC';
+  return `UTC${minutes > 0 ? '+' : '−'}${hours}${rest ? `:${String(rest).padStart(2, '0')}` : ''}`;
+}
+
+/* Окно постинга на карточке: время и чьи это часы. Своё смещение не подписываем —
+   человек и так смотрит на свои часы; чужое (задачу ставили в другом поясе) и
+   серверное (задача старше настройки) называем прямо, иначе окно читается как
+   местное, а работает на три часа позже. */
+function windowLine(task) {
+  const line = `окно ${task.window_start}–${task.window_end}`;
+  const tz = windowTz(task.window_tz);
+  if (tz === null) return `${line} по часам сервера`;
+  return tz === browserTz() ? line : `${line} (${tzLabel(tz)})`;
+}
+
+/* Приписка к подсказке правки: окно этой задачи считается по чужим часам.
+   Сохранение поставит часы этого устройства — сказать об этом надо до, а не
+   после того, как круги уехали на три часа. */
+function windowMigrationHint(task) {
+  if (!task || (task.kind || '') !== 'poster' || !task.edit) return '';
+  const stored = windowTz(task.edit.tz);
+  const mine = browserTz();
+  if (stored === mine) return '';
+  const was = stored === null ? 'по часам сервера' : `по ${tzLabel(stored)}`;
+  return ` Окно этой задачи считалось ${was} — сохраните, и оно станет по вашим ` +
+    `часам (${tzLabel(mine)}).`;
+}
+
 /* Строка сбоя на карточке. Раньше причину было видно только в логе службы на
    сервере: человек смотрел на бодрое «работает» и ждал сообщений, которых нет.
    Показываем и починенный сбой — «в три чата не ушло» надо знать, даже когда
@@ -1664,7 +1719,7 @@ function taskMetaLines(task) {
     // Авто-постер: показываем расписание вместо «задержки в секундах».
     lines.push(`каждые ${task.interval_min || 1} мин`);
     if (task.window_start && task.window_end) {
-      lines.push(`окно ${task.window_start}–${task.window_end}`);
+      lines.push(windowLine(task));
     }
     // Что уходит — теми же словами, что у рассылки: тексты обеих задач лежат в
     // библиотеке, поэтому и «вся библиотека», и повисшие ссылки бывают у обеих.
@@ -2897,7 +2952,8 @@ function openTaskSheet(command, prefill, task) {
   ].map(fieldHtml).join('');
   $('taskHint').textContent = editing
     ? 'Тип задачи и аккаунт не меняются — это была бы уже другая задача. Новый чат в ' +
-      'списке кабинет найдёт через аккаунт, для прежних чатов связь не нужна.'
+      'списке кабинет найдёт через аккаунт, для прежних чатов связь не нужна.' +
+      windowMigrationHint(task)
     : state.activeCommand.hint
       || 'Аккаунт должен быть подписан на источник и иметь право писать в приёмник.';
   $('taskSubmit').textContent = editing ? '💾 Сохранить' : 'Запустить задачу';
@@ -3397,6 +3453,10 @@ function collectTaskPayload() {
   text('message', values.message);
   text('start', values.start);
   text('end', values.end);
+  // Окно задаётся по часам того, кто его ставит, поэтому вместе с ЧЧ:ММ уходит
+  // смещение этого устройства от UTC. Сервер стоит в UTC: без смещения окно
+  // «10:00–20:00» у московского хозяина работало 13:00–23:00 по Москве.
+  if (values.start !== undefined || values.end !== undefined) body.tz = browserTz();
   if (values.keywords !== undefined && (values.keywords || editing)) {
     body.keywords = splitList(values.keywords);
   }

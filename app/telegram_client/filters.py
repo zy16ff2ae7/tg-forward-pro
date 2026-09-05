@@ -72,6 +72,10 @@ class FilterConfig:
     interval_seconds: int = 120  # интервал между отправками
     window_start: str = "00:00"  # начало окна ЧЧ:ММ
     window_end: str = "23:59"  # конец окна ЧЧ:ММ
+    # Чьи это часы: смещение хозяина задачи от UTC в минутах (Москва — 180).
+    # None — часы сервера, как у задач, созданных до появления настройки
+    # (см. jobs.window_now_sec).
+    window_tz: int | None = None
     # ── Рассылка по чатам (kind="mailing") ──
     gap_seconds: int = 5  # пауза между получателями
     gap_jitter: int = 0  # случайная добавка к паузе между получателями
@@ -113,6 +117,7 @@ class FilterConfig:
             "interval_seconds": self.interval_seconds,
             "window_start": self.window_start,
             "window_end": self.window_end,
+            "window_tz": self.window_tz,
             "gap_seconds": self.gap_seconds,
             "gap_jitter": self.gap_jitter,
             "cycle_seconds": self.cycle_seconds,

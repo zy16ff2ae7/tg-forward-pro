@@ -1529,6 +1529,182 @@ async def check_task_edit(cab: Cabinet, rep: Report, account_id: int) -> None:
     rep.note("поиск чатов подменён заглушкой: Telegram в разделе не участвует")
 
 
+async def check_poster_window(cab: Cabinet, rep: Report, account_id: int) -> None:
+    """Окно постинга по часам хозяина: PATCH /api/tasks/{id} и карточка.
+
+    Окно «с 10:00 до 20:00» человек задаёт по своим часам, а сервер стоит в UTC:
+    московское окно работало на нём с 13:00 до 23:00 по Москве — последний круг
+    уходил людям в полночь. Теперь рядом с окном лежит смещение хозяина от UTC,
+    и здесь проверяется весь путь на живом сокете: кабинет прислал смещение —
+    оно легло в настройки задачи, вернулось в карточку и в форму правки, и
+    планировщик по нему решает, открыто окно или нет.
+    """
+    rep.section("Окно постинга")
+
+    async def resolve_many(_account_id: int, queries) -> dict[str, tuple[int, str]]:
+        names = {"@window-one": (-7001, "Афиша")}
+        return {ref: names[ref] for ref in (str(q or "").strip() for q in queries) if ref in names}
+
+    async def make(**extra) -> tuple[int, dict]:
+        status, body = await cab.post(
+            "/api/tasks",
+            json={
+                "command": "poster",
+                "account_id": account_id,
+                "targets": ["@window-one"],
+                "message": "афиша",
+                "start": "10:00",
+                "end": "20:00",
+                **extra,
+            },
+        )
+        return status, (body or {}).get("task") or {}
+
+    with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
+        resolve_many=resolve_many
+    ):
+        status, task = await make(tz=180)
+        task_id = int(task.get("id") or 0)
+        rep.check(
+            "постинг с часами хозяина создан — 201",
+            status == 201 and bool(task_id),
+            f"статус {status}",
+        )
+        if not task_id:
+            return
+        rep.check(
+            "карточка и форма правки знают, чьи это часы",
+            (task.get("window_start"), task.get("window_end")) == ("10:00", "20:00")
+            and task.get("window_tz") == 180
+            and (task.get("edit") or {}).get("tz") == 180,
+            f"{task.get('window_start')}–{task.get('window_end')}, "
+            f"tz={task.get('window_tz')} / {(task.get('edit') or {}).get('tz')}",
+        )
+
+        # То же смещение обязано лежать в настройках задачи: планировщик читает
+        # окно оттуда, а не из ответа кабинета.
+        async with session_scope() as session:
+            rule = await repo.get_rule(session, task_id, SMOKE_USER_ID)
+            stored = dict(rule.filters or {})
+        rep.check(
+            "смещение лежит в настройках задачи — планировщик его увидит",
+            stored.get("window_tz") == 180,
+            f"window_tz={stored.get('window_tz')}",
+        )
+
+        # Правка окна из другого пояса переносит на него и часы.
+        status, body = await cab.patch(
+            f"/api/tasks/{task_id}", json={"start": "09:00", "tz": -300}
+        )
+        saved = (body or {}).get("task") or {}
+        rep.check(
+            "правка из другого пояса переносит окно на его часы",
+            status == 200
+            and (saved.get("window_start"), saved.get("window_end")) == ("09:00", "20:00")
+            and saved.get("window_tz") == -300,
+            f"статус {status}, {saved.get('window_start')}–{saved.get('window_end')}, "
+            f"tz={saved.get('window_tz')}",
+        )
+
+        status, body = await cab.patch(f"/api/tasks/{task_id}", json={"interval": 15})
+        saved = (body or {}).get("task") or {}
+        rep.check(
+            "правка не про окно смещение не сбрасывает",
+            status == 200 and saved.get("interval_min") == 15 and saved.get("window_tz") == -300,
+            f"статус {status}, {saved.get('interval_min')} мин., tz={saved.get('window_tz')}",
+        )
+
+        # Форма правки возвращается серверу как есть — вместе с часами.
+        status, body = await cab.patch(f"/api/tasks/{task_id}", json=saved.get("edit") or {})
+        rep.check(
+            "форма правки возвращает часы без изменений",
+            status == 200 and ((body or {}).get("task") or {}).get("window_tz") == -300,
+            f"статус {status}, tz={((body or {}).get('task') or {}).get('window_tz')}",
+        )
+
+        # Планировщик решает по часам хозяина. Окно строим вокруг «сейчас» у
+        # хозяина, который живёт на шесть часов восточнее сервера: у него оно
+        # открыто, по часам сервера — закрыто. Раньше задача в этот момент
+        # молчала, зато писала людям поздним вечером.
+        from app.telegram_client.jobs import window_now_sec, window_tz_minutes
+        from app.telegram_client.manager import _hhmm_to_sec, _in_window
+
+        def hhmm(seconds: int) -> str:
+            seconds %= 24 * 3600
+            return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}"
+
+        server_tz = int((time.localtime().tm_gmtoff or 0) // 60)
+        owner_tz = server_tz + 6 * 60  # хозяин живёт на шесть часов восточнее
+        owner_sec = window_now_sec(owner_tz)
+        window = (hhmm(owner_sec - 1800), hhmm(owner_sec + 1800))
+        status, body = await cab.patch(
+            f"/api/tasks/{task_id}",
+            json={"start": window[0], "end": window[1], "tz": owner_tz},
+        )
+        saved = (body or {}).get("task") or {}
+        async with session_scope() as session:
+            rule = await repo.get_rule(session, task_id, SMOKE_USER_ID)
+            stored = dict(rule.filters or {})
+        start = _hhmm_to_sec(str(stored.get("window_start") or "00:00"))
+        end = _hhmm_to_sec(str(stored.get("window_end") or "23:59"))
+        by_owner = _in_window(window_now_sec(window_tz_minutes(stored.get("window_tz"))), start, end)
+        by_server = _in_window(window_now_sec(None), start, end)
+        rep.check(
+            "окно открыто по часам хозяина и закрыто по часам сервера",
+            status == 200 and saved.get("window_tz") == owner_tz and by_owner and not by_server,
+            f"окно {window[0]}–{window[1]}, у хозяина {by_owner}, у сервера {by_server}",
+        )
+
+        # Ерунда вместо пояса — «часы сервера», а не окно, съехавшее на сутки.
+        status, body = await cab.patch(
+            f"/api/tasks/{task_id}", json={"start": "10:00", "end": "20:00", "tz": "полдень"}
+        )
+        saved = (body or {}).get("task") or {}
+        rep.check(
+            "ерунда вместо пояса — часы сервера, окно на месте",
+            status == 200
+            and saved.get("window_tz") is None
+            and (saved.get("window_start"), saved.get("window_end")) == ("10:00", "20:00"),
+            f"статус {status}, tz={saved.get('window_tz')}, "
+            f"{saved.get('window_start')}–{saved.get('window_end')}",
+        )
+        status, body = await cab.patch(f"/api/tasks/{task_id}", json={"tz": 1500})
+        rep.check(
+            "пояса дальше UTC±14 не существует — тоже часы сервера",
+            status == 200 and ((body or {}).get("task") or {}).get("window_tz") is None,
+            f"tz={((body or {}).get('task') or {}).get('window_tz')}",
+        )
+
+        # Старый клиент смещения не присылает: выдумывать ему пояс нельзя.
+        status, legacy = await make()
+        legacy_id = int(legacy.get("id") or 0)
+        rep.check(
+            "задача без смещения — «по часам сервера», а не выдуманный пояс",
+            status == 201
+            and legacy.get("window_tz") is None
+            and (legacy.get("edit") or {}).get("tz") is None,
+            f"статус {status}, tz={legacy.get('window_tz')}",
+        )
+
+    # Прибираем за собой: следующие разделы видят кабинет без этих задач.
+    for victim in (task_id, legacy_id):
+        if victim:
+            await cab.delete(f"/api/tasks/{victim}")
+    status, body = await cab.get("/api/library")
+    for item in (body or {}).get("items") or []:
+        await cab.delete(f"/api/library/{item.get('id')}")
+    rep.check(
+        "задачи прогона удалены",
+        not [
+            t
+            for t in ((await cab.get("/api/tasks"))[1] or {}).get("tasks") or []
+            if t.get("id") in {task_id, legacy_id}
+        ],
+        "",
+    )
+    rep.note("часы сервера берём его же — прогон проверяет разницу, а не конкретный пояс")
+
+
 async def check_task_health(cab: Cabinet, rep: Report, account_id: int) -> None:
     """Здоровье задачи на карточке: когда сработала и на чём сломалась.
 
@@ -2479,6 +2655,7 @@ async def run_all(rep: Report) -> None:
             await check_task_actions(cab, rep, rule_id)
             await check_mailing_and_library(cab, rep, account_id)
             await check_task_edit(cab, rep, account_id)
+            await check_poster_window(cab, rep, account_id)
             await check_task_health(cab, rep, account_id)
             await check_task_cleanup(cab, rep, account_id)
             await check_chats_and_accounts(cab, rep, account_id)

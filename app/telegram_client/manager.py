@@ -688,10 +688,10 @@ class ClientManager:
             mailing_pick,
             mailing_send,
             own_text_item,
+            window_now_sec,
+            window_tz_minutes,
         )
 
-        now = time.localtime()
-        now_sec = now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec
         deadline = time.time() + POSTER_TICK_BUDGET
 
         async with self._lock:
@@ -710,6 +710,12 @@ class ClientManager:
                 continue
             start = _hhmm_to_sec(f.window_start if hasattr(f, "window_start") else "00:00")
             end = _hhmm_to_sec(f.window_end if hasattr(f, "window_end") else "23:59")
+            # Окно сверяем с часами хозяина задачи, а не сервера: сервер стоит в
+            # UTC, и московское «окно 10:00–20:00» работало на нём 13:00–23:00 по
+            # Москве — последний круг уходил людям в полночь. Смещение задача
+            # хранит рядом с окном; у задач до этой настройки его нет, и окно
+            # остаётся по часам сервера (кабинет так и пишет).
+            now_sec = window_now_sec(window_tz_minutes(getattr(f, "window_tz", None)))
             if not _in_window(now_sec, start, end):
                 continue
 

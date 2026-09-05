@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+import time
 from types import SimpleNamespace
 from typing import Any, Callable, Awaitable, Sequence
 
@@ -269,6 +270,54 @@ MAILING_MAX_GAP = 7 * 24 * 3600  # неделя: дальше это уже не
 POSTER_CHAT_GAP = 2.0
 POSTER_BATCH = 8
 POSTER_TICK_BUDGET = 15.0
+
+# ── Окно постинга: чьи это часы ──
+#
+# Окно «с 10:00 до 20:00» человек задаёт по своим часам — он им и объявления
+# рассылает. Сервер же живёт по своим: наш стоит в UTC, и московское «окно
+# 10:00–20:00» превращалось на нём в 13:00–23:00 по Москве. Смысл окна — не
+# писать людям ночью — при этом терялся ровно наоборот: последний круг уходил
+# в полночь.
+#
+# Поэтому рядом с окном задача хранит смещение хозяина от UTC в минутах
+# (``window_tz``: Москва — 180, Нью-Йорк — −240), и планировщик сверяется с
+# часами хозяина. У задач, созданных до этого, смещения нет: их окно так и
+# остаётся по часам сервера, а кабинет об этом честно говорит — иначе правка
+# сдвинула бы время рассылки у тех, кто уже подобрал окно под серверные часы.
+WINDOW_TZ_LIMIT = 14 * 60  # дальше UTC±14 часовых поясов на Земле не бывает
+SECONDS_IN_DAY = 24 * 3600
+
+
+def window_tz_minutes(value: Any) -> int | None:
+    """Смещение хозяина задачи от UTC в минутах. Непонятное значение → ``None``.
+
+    ``None`` означает «часы сервера»: так работали все задачи до появления
+    смещения, и так же остаётся, если кабинет прислал ерунду вместо часового
+    пояса. Выдумывать за человека пояс нельзя — окно поехало бы молча.
+    """
+    if value is None or isinstance(value, bool) or value == "":
+        return None
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return None
+    if abs(minutes) > WINDOW_TZ_LIMIT:
+        return None
+    return minutes
+
+
+def window_now_sec(tz_minutes: int | None, now: float | None = None) -> int:
+    """Сколько секунд прошло с полуночи там, где живёт хозяин задачи.
+
+    Смещение известно — считаем от UTC: эпоха Unix начинается ровно в UTC-полночь,
+    поэтому остаток от суток и есть время на часах со сдвигом. Смещения нет —
+    остаются часы сервера, как было до появления этой настройки.
+    """
+    moment = time.time() if now is None else float(now)
+    if tz_minutes is None:
+        local = time.localtime(moment)
+        return local.tm_hour * 3600 + local.tm_min * 60 + local.tm_sec
+    return int((moment + tz_minutes * 60) % SECONDS_IN_DAY)
 
 
 def mailing_recipients(rule: Any) -> list[int]:
