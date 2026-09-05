@@ -632,12 +632,16 @@ function demoTaskFill(task, body, command) {
   }
   if (kind === 'mailing') {
     const repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
+    // Живые записи считаем отдельно от ссылок: сообщение могли удалить из
+    // библиотеки, и на карточке нужен честный счёт (на сервере — _task_view).
+    const alive = libraryIds.filter((id) => DEMO_LIBRARY.items.some((item) => item.id === id));
     task.mailing = {
       recipients: chats.length,
-      messages_count: libraryIds.length,
+      messages_count: alive.length,
       // Пустой список записей планировщик читает как «вся библиотека», и
       // карточка обязана сказать это словами, а не показывать ноль.
       whole_library: !libraryIds.length,
+      messages_gone: libraryIds.length - alive.length,
       gap_seconds: Number(body.gap) || 5,
       cycle_seconds: Number(body.cycle) || 10,
       repeats,
@@ -1540,6 +1544,9 @@ function taskMetaLines(task) {
     lines.push(`пауза ${info.gap_seconds || 5} сек`);
     if (info.messages_count) lines.push(`${info.messages_count} сообщ.`);
     else if (info.whole_library) lines.push('вся библиотека');
+    // Сообщения удалили из библиотеки, а рассылка на них ссылается: без этой
+    // строки карточка бодро «работает», а в чаты ничего не уходит.
+    else if (info.messages_gone) lines.push('рассылать нечего');
     lines.push(info.repeats ? `${info.repeats} круг(ов)` : 'круги без конца');
   } else if (task.oneshot) {
     lines.push('запуск по кнопке');

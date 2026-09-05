@@ -209,3 +209,62 @@ async def test_the_card_says_out_loud_that_the_whole_library_goes(
     assert task["mailing"]["whole_library"] is True
     assert task["mailing"]["messages_count"] == 0
     assert task["edit"]["message"] == ""
+
+
+async def test_the_card_admits_the_messages_were_deleted(client, auth_headers, mailing):
+    """Сообщения убрали из библиотеки — карточка говорит, что рассылать нечего.
+
+    Ссылки в задаче при этом остаются: молча выбросить их нельзя, пустой список
+    планировщик читает как «вся библиотека» — рассылка начала бы слать всё
+    подряд. Поэтому счёт на карточке считаем по живым записям, а про повисшие
+    ссылки говорим отдельно: раньше карточка бодро показывала два сообщения,
+    которых уже нет.
+    """
+    for item in await library(client, auth_headers):
+        assert (
+            await client.delete(f"/api/library/{item['id']}", headers=auth_headers)
+        ).status == 200
+
+    response = await client.get("/api/tasks", headers=auth_headers)
+    task = next(
+        item for item in (await response.json())["tasks"] if item["id"] == mailing["id"]
+    )
+
+    assert task["mailing"]["messages_count"] == 0
+    assert task["mailing"]["messages_gone"] == 2
+    # Это не «вся библиотека»: выбор был, его записи удалили.
+    assert task["mailing"]["whole_library"] is False
+    assert task["edit"]["message"] == ""
+    assert await stored_ids(mailing["id"]), "ссылки на месте — иначе уйдёт вся библиотека"
+
+
+async def test_a_live_message_is_still_counted(client, auth_headers, mailing):
+    """Удалили одно из двух — карточка честно показывает одно, а не два."""
+    items = await library(client, auth_headers)
+    await client.delete(f"/api/library/{items[0]['id']}", headers=auth_headers)
+
+    response = await client.get("/api/tasks", headers=auth_headers)
+    task = next(
+        item for item in (await response.json())["tasks"] if item["id"] == mailing["id"]
+    )
+
+    assert (task["mailing"]["messages_count"], task["mailing"]["messages_gone"]) == (1, 1)
+    assert task["edit"]["message"] == (items[1]["text"] or "")
+
+
+async def test_a_new_text_clears_the_dead_links(client, auth_headers, mailing):
+    """Правка после уборки в библиотеке оставляет только новую запись.
+
+    Кабинет присылает форму целиком, вместе с повисшими ссылками. Держать их
+    дальше незачем: записей нет, и в очереди они были бы дырой.
+    """
+    for item in await library(client, auth_headers):
+        await client.delete(f"/api/library/{item['id']}", headers=auth_headers)
+
+    response = await patch(client, auth_headers, mailing["id"], message="снова с нуля")
+
+    assert response.status == 200, await response.text()
+    task = (await response.json())["task"]
+    assert task["edit"]["message"] == "снова с нуля"
+    assert (task["mailing"]["messages_count"], task["mailing"]["messages_gone"]) == (1, 0)
+    assert len(await stored_ids(mailing["id"])) == 1

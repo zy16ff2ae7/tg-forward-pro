@@ -863,6 +863,42 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
             f"{(saved.get('edit') or {}).get('message')!r}",
         )
 
+        # Уборка в библиотеке не должна оставлять задачу с молчаливым «работает»:
+        # записи удалили — карточка обязана сказать, что рассылать нечего. Сами
+        # ссылки при этом остаются: пустой список планировщик читает как «вся
+        # библиотека», и рассылка начала бы слать всё подряд.
+        status, body = await cab.get("/api/library")
+        used = [
+            int(item.get("id") or 0)
+            for item in (body or {}).get("items") or []
+            if item.get("text") == "переписанный текст"
+        ]
+        for item_id in used:
+            await cab.delete(f"/api/library/{item_id}")
+        status, body = await cab.get("/api/tasks")
+        card = next(
+            (t for t in (body or {}).get("tasks") or [] if t.get("id") == mailing_id), {}
+        )
+        gone = card.get("mailing") or {}
+        rep.check(
+            "сообщение удалили — на карточке нечего рассылать, а не прежний счёт",
+            gone.get("messages_count") == 0
+            and gone.get("messages_gone") == len(used)
+            and gone.get("whole_library") is False,
+            f"{gone}",
+        )
+        status, body = await cab.patch(
+            f"/api/tasks/{mailing_id}", json={"message": "снова с нуля"}
+        )
+        saved = ((body or {}).get("task") or {}).get("mailing") or {}
+        rep.check(
+            "новый текст убирает повисшие ссылки",
+            status == 200
+            and saved.get("messages_count") == 1
+            and saved.get("messages_gone") == 0,
+            f"статус {status}, {saved}",
+        )
+
         status, body = await cab.post(
             "/api/tasks",
             json={

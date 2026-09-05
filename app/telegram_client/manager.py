@@ -860,7 +860,15 @@ class ClientManager:
                         rule.id,
                         int(MAILING_EMPTY_PAUSE),
                     )
+                    # Причина видна только в логе службы, до которого человеку не
+                    # добраться, — а на карточке задача бодро «работает». Пишем её
+                    # в журнал один раз на простой: строка каждую минуту утопила
+                    # бы карточку в одинаковых сбоях.
+                    if not st.get("empty"):
+                        st["empty"] = True
+                        await self._mailing_nothing_to_send(rule)
                     continue
+                st["empty"] = False
                 await mailing_send(client, rule, item, target_id)
             except FloodWaitError as exc:
                 # Telegram явно сказал, сколько ждать, — слушаемся, иначе на
@@ -910,6 +918,26 @@ class ClientManager:
         )
         await record_batch(rule, failed=[f"{target_id}: {type(exc).__name__}"])
         state["not_before"] = time.time() + MAILING_ERROR_PAUSE
+
+    async def _mailing_nothing_to_send(self, rule: RuleSnapshot) -> None:
+        """Рассылке нечего отправлять — говорим об этом на карточке задачи.
+
+        Так бывает после уборки в библиотеке: сообщения удалили, а рассылка
+        осталась и ссылается на то, чего уже нет. Раньше про это знал только лог
+        службы, до которого человеку не добраться: карточка показывала
+        «работает», журнал был пуст, и человек ждал сообщений, которых не будет.
+        """
+        async with session_scope() as session:
+            await repo.log_forward(
+                session,
+                rule_id=rule.id,
+                user_id=rule.user_id,
+                # У расписанных задач нет входящего сообщения: они его создают.
+                source_msg_id=0,
+                target_msg_id=None,
+                status="error",
+                error="рассылать нечего: в библиотеке не осталось сообщений",
+            )
 
     async def _finish_mailing(self, rule: RuleSnapshot, cycles: int) -> None:
         """Останавливает рассылку, сделавшую заданное число кругов.

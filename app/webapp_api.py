@@ -1911,13 +1911,22 @@ def _task_view(
         # кругов (repeats=0) конца нет — тогда и total остаётся null, как у
         # остальных бесконечных задач.
         recipients = len(chats)
+        # Считаем только те записи, что ещё живы: сообщение могли удалить из
+        # библиотеки, и ссылка на него осталась в задаче. Раньше карточка
+        # показывала прежний счёт, а рассылать было нечего. Когда текстов не
+        # передали (texts=None), счёт остаётся прежним — гадать не о чём.
+        ids = [int(value) for value in (conf.library_ids or [])]
+        alive = ids if texts is None else [item for item in ids if item in texts]
         view["mailing"] = {
             "recipients": recipients,
-            "messages_count": len(conf.library_ids),
+            "messages_count": len(alive),
             # Пустой список записей означает «вся библиотека» — так его читает
             # планировщик. Карточка обязана сказать это словами: без пометки она
             # молчала о том, что уйдёт, а счёт сообщений показывал ноль.
-            "whole_library": not conf.library_ids,
+            "whole_library": not ids,
+            # Сколько ссылок повисло: карточка скажет, что сообщения удалены, —
+            # иначе задача бодро «работает», а в чаты ничего не уходит.
+            "messages_gone": len(ids) - len(alive),
             "gap_seconds": conf.gap_seconds,
             "cycle_seconds": conf.cycle_seconds,
             "repeats": conf.repeats,

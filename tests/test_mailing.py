@@ -19,11 +19,12 @@ from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 from telethon.errors import FloodWaitError, RPCError
 
 from app.db import repo
 from app.db.database import session_scope
-from app.db.models import Rule, Subscription
+from app.db.models import ForwardLog, Rule, Subscription
 from app.telegram_client import jobs
 from app.telegram_client.filters import FilterConfig
 from app.telegram_client.manager import manager
@@ -270,6 +271,62 @@ async def test_empty_library_sends_nothing_and_does_not_spam(create_user, create
 
     assert client.sent == []
     assert manager._mailing_state[rule_id]["not_before"] > time.time()
+
+
+async def test_nothing_to_send_is_said_on_the_card(create_user, create_account, no_pauses):
+    """Рассылать нечего — причина попадает на карточку, и только один раз.
+
+    Так бывает после уборки в библиотеке: задача осталась, а сообщений больше
+    нет. Раньше про это знал только лог службы, до которого человеку не
+    добраться: карточка показывала «работает», а в чаты ничего не уходило.
+    Повторять строку каждую минуту тоже нельзя — журнал утонул бы в одинаковых
+    сбоях, поэтому пишем её один раз на простой.
+    """
+    rule_id, user_id, account_id = await make_mailing(
+        create_user, create_account, targets=[-1001]
+    )
+    manager._clients[account_id] = FakeClient()
+
+    await manager._mailing_tick()
+    # Пауза после простоя не даёт дойти до отправки — снимаем её руками, иначе
+    # второй тик вернулся бы раньше проверки и «один раз» вышло бы само собой.
+    manager._mailing_state[rule_id]["not_before"] = 0.0
+    await manager._mailing_tick()
+
+    async with session_scope() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ForwardLog.status, ForwardLog.error).where(
+                        ForwardLog.rule_id == rule_id
+                    )
+                )
+            )
+            .all()
+        )
+        health = await repo.task_health(session, [rule_id])
+
+    assert [row[0] for row in rows] == ["error"]
+    assert "рассылать нечего" in str(rows[0][1])
+    assert "рассылать нечего" in str((health.get(rule_id) or {}).get("error"))
+
+
+async def test_a_fresh_message_ends_the_pause(create_user, create_account, no_pauses):
+    """Сообщение появилось — рассылка идёт дальше и о простое больше не пишет."""
+    rule_id, user_id, account_id = await make_mailing(
+        create_user, create_account, targets=[-1001]
+    )
+    client = FakeClient()
+    manager._clients[account_id] = client
+
+    await manager._mailing_tick()
+    async with session_scope() as session:
+        await repo.add_saved_message(session, user_id=user_id, text="наконец-то")
+    manager._mailing_state[rule_id]["not_before"] = 0.0
+    await manager._mailing_tick()
+
+    assert client.sent == [(-1001, "наконец-то")]
+    assert manager._mailing_state[rule_id]["empty"] is False
 
 
 async def test_flood_wait_pauses_the_whole_mailing(create_user, create_account, no_pauses):
