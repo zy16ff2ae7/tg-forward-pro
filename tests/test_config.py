@@ -194,13 +194,26 @@ def test_mtproto_ready_rejects_placeholders():
 
 
 def test_public_api_pair_is_recognized_and_reported(clean_base_dir):
-    """Ключи официального клиента: вход аккаунтов по ним Telegram запрещает."""
+    """Ключи официального клиента: предупреждаем о риске, а не обещаем отказ.
+
+    Боевой случай: на этом сервисе стоит пара Telegram Desktop (api_id 2040), и
+    вход по номеру на ней прошёл — код ушёл, аккаунт поднялся. Прежний текст
+    обещал обратное («подключить аккаунт по номеру не получится»), то есть
+    отговаривал от рабочей кнопки. Заодно он звал сменить пару, не сказав цену:
+    сессии привязаны к прежнему api_id, и после подмены их пришлось бы вводить
+    заново.
+    """
     tdesktop = Settings(api_id=2040, api_hash="b18441a1ff607e10a989891a5462e627")
     assert tdesktop.api_keys_are_public is True
     # Шлюз при этом считается рабочим: чтения и пересылка на них живут.
     assert tdesktop.mtproto_ready is True
     problems = tdesktop.warnings()
-    assert any("my.telegram.org" in text for text in problems)
+    notice = next(text for text in problems if "my.telegram.org" in text)
+    # Имя ошибки — то, что человек увидит в логе и найдёт поиском.
+    assert "ApiIdPublishedFloodError" in notice
+    assert "может отказать" in notice, "риск подан как приговор"
+    assert "не получится" not in notice, "обещаем отказ там, где вход работает"
+    assert "входа заново" in notice, "не сказали цену смены ключей"
 
     own = Settings(api_id=123456, api_hash="a" * 32)
     assert own.api_keys_are_public is False
