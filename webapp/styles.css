@@ -1499,10 +1499,15 @@ button { border: none; background: none; cursor: pointer; }
 .result__title { font-size: 13.5px; font-weight: 600; }
 .result__sub { margin-top: 2px; font-size: 11.5px; color: var(--muted); }
 
+/* Тост всплывает над тем, что сейчас висит внизу: навигацией, плавающей кнопкой
+   «Запустить задачу», панелью выбранных чатов, кнопкой открытой шторки. Подъём
+   считает toastLift() и кладёт в --toast-lift; здесь — отступ для пустого низа
+   (только навигация). Раньше подъёма не было, и сообщение об успехе ложилось
+   ровно на кнопку, которую человек нажал: подписи было не прочитать. */
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(var(--nav-h) + 26px + env(safe-area-inset-bottom));
+  bottom: var(--toast-lift, calc(var(--nav-h) + 26px + env(safe-area-inset-bottom)));
   z-index: 80;
   transform: translate(-50%, 14px);
   max-width: 86vw;

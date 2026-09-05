@@ -224,9 +224,40 @@ function esc(value) {
 }
 
 let toastTimer = null;
+
+/* Внизу экрана тесно: навигация, плавающая кнопка «Запустить задачу», панель
+   выбранных чатов, кнопка открытой шторки. Тост ложился прямо на них — сообщение
+   об успехе закрывало подпись кнопки, которую человек только что нажал. Поэтому
+   считаем, сколько места занято снизу прямо сейчас, и поднимаем тост над этим.
+   Считаем по экрану (getBoundingClientRect), поэтому вырез снизу уже учтён. */
+const TOAST_FLOATING = ['addTaskBtn', 'chatBar'];
+
+function toastLift() {
+  const view = window.innerHeight;
+  const nodes = TOAST_FLOATING.map($).concat(
+    // Кнопка открытой шторки: она последняя в панели, то есть у самого низа.
+    Array.from(document.querySelectorAll('.sheet.is-open .sheet__panel .btn--block'))
+  );
+  let lift = 0;
+  for (const node of nodes) {
+    if (!node) continue;
+    const box = node.getBoundingClientRect();
+    // Скрытое (hidden, закрытая шторка) высоты не имеет и низ не занимает.
+    if (!box.height || box.top >= view) continue;
+    lift = Math.max(lift, view - box.top + 10);
+  }
+  // Тост — сообщение снизу: выше середины экрана не поднимаем, иначе он уедет
+  // в пустоту от того места, где человек работает.
+  return Math.min(lift, Math.round(view * 0.45));
+}
+
 function toast(text) {
   const node = $('toast');
   node.textContent = text;
+  node.style.removeProperty('--toast-lift');
+  const base = parseFloat(getComputedStyle(node).bottom) || 0;
+  const lift = toastLift();
+  if (lift > base) node.style.setProperty('--toast-lift', `${lift}px`);
   node.classList.add('is-show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => node.classList.remove('is-show'), 2600);
