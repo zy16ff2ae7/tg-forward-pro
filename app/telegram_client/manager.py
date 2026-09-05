@@ -46,6 +46,12 @@ PUBLIC_LOGIN_UNAVAILABLE = (
     "Бот и кабинет работают, но шлюз входа по номеру ещё не настроен на стороне сервиса."
 )
 
+# Что показать, когда ключ сессии мёртв: аккаунт вышел из Telegram сам («Устройства»
+# → выйти), сменил пароль или его сессию убил вход тем же ключом с другой машины.
+# Эта строка попадает человеку в кабинет как есть, поэтому в ней сказано, что
+# делать, а не что за исключение поймал Telethon.
+SESSION_REVOKED = "Аккаунт вышел из Telegram — подключите номер заново"
+
 # Рассылка по чатам: шаг у неё в секундах (пауза между получателями), поэтому
 # тик планировщика — секунда, а не 20 секунд, как у авто-постера.
 MAILING_TICK_SECONDS = 1.0
@@ -293,13 +299,35 @@ class ClientManager:
             events.NewMessage(incoming=True),
         )
         try:
-            await client.start()  # для StringSession без авторизации start() = connect
+            # start() у Telethon для неавторизованной сессии спрашивает номер и
+            # код через input(). Под systemd stdin закрыт, поэтому вместо
+            # понятной причины и в журнал, и человеку в кабинет попадало «EOF
+            # when reading a line» — про такое не догадаешься, что аккаунт надо
+            # подключить заново. Подключаемся сами и сами смотрим авторизацию.
+            await client.connect()
+            authorized = await client.is_user_authorized()
         except Exception as exc:  # noqa: BLE001
             logger.error("Аккаунт #{} ({}) не запустился: {}", account.id, account.phone, exc)
             async with session_scope() as session:
                 db_account = await session.get(TelegramAccount, account.id)
                 if db_account is not None:
                     await repo.set_account_error(session, db_account, f"{type(exc).__name__}: {exc}")
+            return False
+
+        if not authorized:
+            # Сессию отозвали из Telegram («Устройства» → выйти), сменили пароль
+            # или её убил вход тем же ключом с другой машины. Ключ уже мёртв:
+            # чинить нечего, человеку нужно подключить номер заново.
+            logger.error(
+                "Сессия аккаунта #{} ({}) больше не действует — нужен повторный вход",
+                account.id,
+                account.phone,
+            )
+            await client.disconnect()
+            async with session_scope() as session:
+                db_account = await session.get(TelegramAccount, account.id)
+                if db_account is not None:
+                    await repo.set_account_error(session, db_account, SESSION_REVOKED)
             return False
 
         me = await client.get_me()
@@ -371,7 +399,11 @@ class ClientManager:
                     if ok:
                         db_account.last_seen_at = repo.utcnow()
                         await repo.set_account_error(db, db_account, None)
-                    else:
+                    elif not db_account.last_error:
+                        # Причину, если она известна, записал start_account.
+                        # Общая подпись затирала её — и в кабинете вместо
+                        # «сессия больше не действует» оставалось безадресное
+                        # «не удалось запустить сессию».
                         await repo.set_account_error(db, db_account, "Не удалось запустить сессию")
 
         # Планировщик авто-постера поднимаем, только когда аккаунты реально

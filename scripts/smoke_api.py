@@ -55,8 +55,18 @@ from telethon.errors import PhoneCodeInvalidError, SessionPasswordNeededError  #
 from app import accounts_login, paylink  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db import repo  # noqa: E402
-from app.db.database import dispose_db, init_db, session_scope  # noqa: E402
-from app.db.models import CollectedItem, ForwardLog, PendingDelivery  # noqa: E402
+from app.db.database import (  # noqa: E402
+    SessionLocal,
+    dispose_db,
+    init_db,
+    session_scope,
+)
+from app.db.models import (  # noqa: E402
+    CollectedItem,
+    ForwardLog,
+    PendingDelivery,
+    TelegramAccount,
+)
 from app.errors import http_error_middleware  # noqa: E402
 from app.payments import crypto, service, yookassa  # noqa: E402
 from app.plans import PERIODS, rub_amount, usdt_amount  # noqa: E402
@@ -78,6 +88,8 @@ USDT_WALLET = "TQn9Y2khDD95J42FQtQTdwVVR93o1n1gLz"
 # Номер, на который «подключается» аккаунт в разделе входа. Он же удаляется в
 # конце раздела, чтобы остальные проверки видели ту же одну учётку из seed().
 LOGIN_PHONE = "+79001234567"
+# Номер для мёртвой сессии — отдельный, чтобы не трогать засеянный аккаунт.
+DEAD_PHONE = "+79005550011"
 # Ключи MTProto для раздела входа: сама готовность шлюза считается по ним, а в
 # .env разработчика их может не быть. Плейсхолдеры из .env.example не подходят —
 # settings.mtproto_ready считает их ненастроенными.
@@ -2694,6 +2706,99 @@ async def check_bot_entry(rep: Report) -> None:
     rep.note("бота не трогаем: сообщения принимает подделка, Telegram в прогоне не участвует")
 
 
+async def check_dead_session(cab: Cabinet, rep: Report) -> None:
+    """Мёртвая сессия аккаунта: кабинет говорит, что делать, а не «EOF».
+
+    Ключ Telethon умирает сам: аккаунт вышел из Telegram («Устройства» →
+    завершить сеанс), сменил облачный пароль или тем же ключом вошли с другой
+    машины. Раньше запуск такого аккаунта звал ``client.start()``, а тот для
+    неавторизованной сессии просит номер и код через ``input()``. Под systemd
+    stdin закрыт — и в журнал, и человеку в кабинет уходило «EOF when reading a
+    line». Telegram здесь не участвует: клиент подменён.
+    """
+    rep.section("Мёртвая сессия аккаунта")
+
+    from app.security import encrypt_session
+    from app.telegram_client.manager import SESSION_REVOKED
+
+    class DeadClient:
+        """Сессия подключается, но Telegram её не признаёт."""
+
+        def __init__(self) -> None:
+            self.starts = 0
+            self.disconnects = 0
+
+        def add_event_handler(self, callback, event=None) -> None:
+            return None
+
+        async def connect(self) -> None:
+            return None
+
+        async def is_user_authorized(self) -> bool:
+            return False
+
+        async def start(self, *args, **kwargs):
+            # Тот самый интерактивный путь — под systemd он и падал с EOF.
+            self.starts += 1
+            raise EOFError("EOF when reading a line")
+
+        async def get_me(self):
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+        def is_connected(self) -> bool:
+            return False
+
+    async with session_scope() as session:
+        account = await repo.add_account(
+            session,
+            user_id=SMOKE_USER_ID,
+            phone=DEAD_PHONE,
+            session_encrypted=encrypt_session("1AaBb-dead-session"),
+        )
+        await session.flush()
+        dead_id = account.id
+
+    async with SessionLocal() as session:
+        row = await session.get(TelegramAccount, dead_id)
+        session.expunge(row)
+
+    client = DeadClient()
+    with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
+        _new_client=lambda session_string="": client
+    ):
+        started = await manager.start_account(row, "1AaBb-dead-session")
+
+    rep.check("мёртвая сессия не поднимается", started is False, f"результат {started}")
+    rep.check("номер и код в консоли не спрашивали", client.starts == 0,
+              f"start() вызван раз: {client.starts}")
+    rep.check("соединение за собой закрыли", client.disconnects == 1,
+              f"disconnect() вызван раз: {client.disconnects}")
+
+    status, body = await cab.get("/api/accounts")
+    shown = [item for item in ((body or {}).get("accounts") or []) if item.get("id") == dead_id]
+    reason = shown[0].get("last_error") if shown else None
+    rep.check(
+        "кабинет объясняет причину словами",
+        status == 200 and reason == SESSION_REVOKED,
+        f"причина: {reason}",
+    )
+    rep.check("про «EOF» человеку больше не пишут", "EOF" not in str(reason))
+    rep.check(
+        "аккаунт погашен и показан не в сети",
+        bool(shown) and shown[0].get("is_active") is False and shown[0].get("online") is False,
+        f"{shown[0] if shown else 'аккаунта нет в списке'}",
+    )
+
+    async with session_scope() as session:
+        row = await session.get(TelegramAccount, dead_id)
+        if row is not None:
+            await session.delete(row)
+    rep.note("аккаунт прогона убран — остальные разделы видят прежний список")
+
+
 async def check_misc(cab: Cabinet, rep: Report) -> None:
     """Мелочи, которые ломаются молча: неизвестный маршрут и чужой метод."""
     rep.section("Прочее")
@@ -2734,6 +2839,7 @@ async def run_all(rep: Report) -> None:
             await check_pay_page(cab, rep)
             await check_pay_card(cab, rep)
             await check_bot_entry(rep)
+            await check_dead_session(cab, rep)
             await check_misc(cab, rep)
     finally:
         await runner.cleanup()

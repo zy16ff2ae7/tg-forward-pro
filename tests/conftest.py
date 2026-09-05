@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import itertools
 import os
 import tempfile
@@ -42,6 +43,25 @@ async def database():
     yield
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+
+
+@pytest.fixture(autouse=True)
+async def delivery_queue_per_test():
+    """Очередь доставки одна на процесс, а цикл событий у каждого теста свой.
+
+    Внутренняя ``asyncio.Queue`` привязывается к тому циклу, в котором её
+    впервые дождались. Тест, поднявший очередь (любой, кто зовёт
+    ``manager.start_all``), оставлял её привязанной к своему циклу — и в
+    следующем тесте воркеры молча умирали на «bound to a different event loop»,
+    а отправки «не доходили». Порядок файлов начинал решать, проходят ли тесты.
+    Поэтому после каждого теста очередь останавливаем и выдаём чистое хранилище.
+    """
+    from app.telegram_client.manager import delivery_queue
+
+    yield
+    if delivery_queue._started:
+        await delivery_queue.stop(drain=False, timeout=1.0)
+    delivery_queue._queue = asyncio.Queue(maxsize=delivery_queue._maxsize)
 
 
 @pytest.fixture
