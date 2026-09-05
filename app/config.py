@@ -113,6 +113,11 @@ class Settings:
     max_rules_free: int = 3
     renew_remind_days: int = 3
 
+    # Подарок за подписку на канал сервиса: разово, один раз на аккаунт.
+    # Пусто — бонуса нет нигде: ни карточки в кабинете, ни кнопки в боте.
+    bonus_channel: str | None = None
+    bonus_days: int = 3
+
     # Оплата
     # Где пользователь платит:
     #   external (по умолчанию) — внутри Telegram только звёзды, карта и USDT
@@ -223,6 +228,48 @@ class Settings:
         if self.mtproto_ready:
             return "ready"
         return "setup_required"
+
+    # ─────────────────── Подарок за подписку на канал ────────────────────
+
+    @property
+    def bonus_chat(self) -> str | None:
+        """Канал бонуса в виде, понятном Bot API: ``@username`` или ``-100…``.
+
+        В ``.env`` его пишут как угодно — ``@name``, ``name``,
+        ``https://t.me/name``. Приватная ссылка-приглашение (``t.me/+hash``)
+        не годится совсем: ``getChatMember`` по ней не работает, а значит
+        проверить подписку нечем — такой бонус считаем ненастроенным.
+        """
+        raw = (self.bonus_channel or "").strip()
+        if not raw:
+            return None
+        if raw.startswith("-") and raw[1:].isdigit():
+            return raw
+        low = raw.lower()
+        for prefix in ("https://", "http://"):
+            if low.startswith(prefix):
+                raw, low = raw[len(prefix) :], low[len(prefix) :]
+        for prefix in ("t.me/", "telegram.me/"):
+            if low.startswith(prefix):
+                raw = raw[len(prefix) :]
+                break
+        name = raw.strip("/").lstrip("@")
+        if not name or name.startswith("+"):
+            return None
+        return "@" + name
+
+    @property
+    def bonus_url(self) -> str | None:
+        """Ссылка на канал для кнопки «Открыть канал»."""
+        chat = self.bonus_chat
+        if not chat or not chat.startswith("@"):
+            return None
+        return "https://t.me/" + chat[1:]
+
+    @property
+    def bonus_enabled(self) -> bool:
+        """Есть ли что дарить и где проверять подписку."""
+        return bool(self.bonus_chat) and self.bonus_days > 0
 
     # ─────────────────────── Готовность способов оплаты ───────────────────────
 
@@ -412,6 +459,18 @@ class Settings:
                 "EXTERNAL_PAYMENTS_URL без https:// — Telegram не откроет такую "
                 "ссылку, а платить по http небезопасно"
             )
+        if (self.bonus_channel or "").strip() and not self.bonus_chat:
+            problems.append(
+                "BONUS_CHANNEL не похож на публичный канал (@имя или -100…): "
+                "по приватной ссылке-приглашению подписку не проверить — "
+                "подарок за подписку отключён"
+            )
+        if self.bonus_enabled:
+            problems.append(
+                f"Подарок за подписку включён ({self.bonus_days} дн., {self.bonus_chat}) — "
+                "бот должен быть администратором этого канала, иначе Telegram не "
+                "покажет ему подписчиков и проверка всегда будет отвечать «не вижу вас»"
+            )
         if self.delivery_workers < 1:
             problems.append("DELIVERY_WORKERS меньше 1 — очередь доставки не сможет работать")
         if self.delivery_queue_maxsize < 10:
@@ -493,6 +552,8 @@ def load_settings() -> Settings:
         trial_days=_get_int("TRIAL_DAYS", 3),
         max_rules_free=_get_int("MAX_RULES_FREE", 3),
         renew_remind_days=_get_int("RENEW_REMIND_DAYS", 3),
+        bonus_channel=_get("BONUS_CHANNEL"),
+        bonus_days=max(0, _get_int("BONUS_DAYS", 3)),
         pay_mode=_get_mode("PAY_MODE", PAY_MODES, "external"),
         external_payments_url=_get("EXTERNAL_PAYMENTS_URL"),
         yookassa_shop_id=_get("YOOKASSA_SHOP_ID"),

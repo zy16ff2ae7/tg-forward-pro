@@ -32,6 +32,9 @@ class User(Base):
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    # Когда человек забрал подарок за подписку на канал. Метка одна на аккаунт:
+    # подарок разовый, и отписка-подписка второго раза не даёт.
+    channel_bonus_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     accounts: Mapped[list["TelegramAccount"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

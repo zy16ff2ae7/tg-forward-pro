@@ -389,3 +389,78 @@ def test_payment_price_line_skips_unconfigured(monkeypatch):
         Settings(price_stars=100, price_rub=990, yookassa_shop_id="1", yookassa_secret_key="2"),
     )
     assert bot_texts.price_line() == "Стоимость: 100 ⭐  ·  990 ₽"
+
+
+# ──────────────────── подарок за подписку на канал ────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("@papin4_do4a", "@papin4_do4a"),
+        ("papin4_do4a", "@papin4_do4a"),
+        ("https://t.me/papin4_do4a", "@papin4_do4a"),
+        ("http://t.me/papin4_do4a/", "@papin4_do4a"),
+        ("t.me/papin4_do4a", "@papin4_do4a"),
+        ("telegram.me/papin4_do4a", "@papin4_do4a"),
+        ("  @papin4_do4a  ", "@papin4_do4a"),
+        ("-1001234567890", "-1001234567890"),
+    ],
+)
+def test_bonus_channel_accepts_any_spelling(raw, expected):
+    """В .env канал пишут как удобно — Bot API получает один и тот же вид."""
+    assert Settings(bonus_channel=raw).bonus_chat == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "",
+        "   ",
+        "https://t.me/+AbCdEf",  # приватная ссылка: getChatMember по ней не работает
+        "@",
+        "t.me/",
+    ],
+)
+def test_bonus_channel_rejects_uncheckable(raw):
+    settings_ = Settings(bonus_channel=raw)
+    assert settings_.bonus_chat is None
+    assert settings_.bonus_enabled is False
+
+
+def test_bonus_url_only_for_public_username():
+    assert Settings(bonus_channel="papin4_do4a").bonus_url == "https://t.me/papin4_do4a"
+    # У числового id публичной ссылки нет — кнопку «Открыть канал» не рисуем
+    assert Settings(bonus_channel="-1001234567890").bonus_url is None
+
+
+def test_bonus_disabled_by_zero_days():
+    """BONUS_DAYS=0 — выключатель: канал настроен, а дарить нечего."""
+    assert Settings(bonus_channel="@papin4_do4a", bonus_days=0).bonus_enabled is False
+
+
+def test_bonus_days_never_negative(monkeypatch):
+    monkeypatch.setenv("BONUS_DAYS", "-5")
+    assert load_settings().bonus_days == 0
+
+
+def test_bonus_channel_read_from_env(monkeypatch):
+    monkeypatch.setenv("BONUS_CHANNEL", "https://t.me/papin4_do4a")
+    loaded = load_settings()
+    assert loaded.bonus_chat == "@papin4_do4a"
+    assert loaded.bonus_enabled is True
+
+
+def test_warnings_report_broken_bonus_channel():
+    problems = Settings(bonus_channel="https://t.me/+AbCdEf").warnings()
+    assert any("BONUS_CHANNEL" in text for text in problems)
+
+
+def test_warnings_remind_bot_must_be_channel_admin():
+    """Без прав администратора getChatMember не видит подписчиков."""
+    problems = Settings(bonus_channel="@papin4_do4a").warnings()
+    assert any("Подарок за подписку включён" in text for text in problems)
+    assert any("администратором этого канала" in text for text in problems)
+    # Выключенный подарок ни о чём не напоминает
+    assert not any("Подарок за подписку" in text for text in Settings().warnings())

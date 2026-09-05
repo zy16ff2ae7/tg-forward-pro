@@ -67,6 +67,14 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         await show_subscription_message(message)
         return
 
+    if deep_link == "bonus":
+        # «3 дня за подписку» из кабинета: сразу на экран подарка, а не в меню
+        # оплаты — иначе человек ищет обещанный подарок среди кнопок цен.
+        from app.bot.handlers.subscription import show_bonus_message
+
+        await show_bonus_message(message)
+        return
+
     if deep_link in ("add_account", "resume_login"):
         # Из кабинета нажали «Подключить аккаунт» — человек должен попасть
         # на сам шаг входа, а не в список аккаунтов: иначе он оказывается в

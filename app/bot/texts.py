@@ -8,10 +8,20 @@ from app.timeutil import utcnow
 
 
 def welcome(name: str) -> str:
+    from app import bonus
+
     status_line = (
         "\n\n⚙️ Вход аккаунтов по телефону сейчас на настройке. "
         "Кабинет, меню, подписки и платежи уже можно проверять."
         if not settings.public_login_enabled
+        else ""
+    )
+    # Подарок за подписку — сразу в приветствии: это первое, что человеку
+    # стоит знать, если он ещё не платил.
+    bonus_line = (
+        f"\n\n🎁 <b>{settings.bonus_days} дн. бесплатно</b> за подписку на "
+        f"{bonus.channel()} — /bonus"
+        if bonus.enabled()
         else ""
     )
     return (
@@ -33,6 +43,7 @@ def welcome(name: str) -> str:
         "• фильтры по словам и типам медиа, задержка, автозамены текста;\n"
         "• несколько аккаунтов, неограниченные правила, абонемент на месяц.\n\n"
         "Откройте кабинет кнопкой ниже или начните с раздела 👤 Аккаунты."
+        f"{bonus_line}"
         f"{status_line}"
     )
 
@@ -88,6 +99,33 @@ def subscription_status(active_until: datetime | None, rules_count: int) -> str:
         f"Действует до: <b>{active_until:%d.%m.%Y %H:%M}</b> (UTC)\n"
         f"Осталось дней: <b>{max(days, 0)}</b>\n"
         f"Правил у вас: {rules_count}"
+    )
+
+
+def bonus_card(claimed: bool) -> str:
+    """Экран подарка за подписку на канал сервиса."""
+    from app import bonus
+
+    if not bonus.enabled():
+        return (
+            "🎁 <b>Подарок за подписку</b>\n\n"
+            "Сейчас подарок не действует — канал не настроен."
+        )
+    channel = bonus.channel()
+    if claimed:
+        return (
+            "🎁 <b>Подарок за подписку</b>\n\n"
+            f"Дни за подписку на {channel} уже начислены. "
+            "Подарок даётся один раз на аккаунт."
+        )
+    return (
+        "🎁 <b>Подарок за подписку</b>\n\n"
+        f"Подпишитесь на {channel} — и получите "
+        f"<b>{settings.bonus_days} дн.</b> работы задач бесплатно.\n\n"
+        "1️⃣ «Открыть канал» и подписаться\n"
+        "2️⃣ «Проверить подписку» — дни начислятся сразу\n\n"
+        "Подарок один на аккаунт. Дни складываются с текущим абонементом, "
+        "так что ничего не сгорит."
     )
 
 

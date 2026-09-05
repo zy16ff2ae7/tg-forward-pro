@@ -78,6 +78,12 @@ body::before {
 button, input, select, textarea { font: inherit; color: inherit; }
 button { border: none; background: none; cursor: pointer; }
 .hidden { display: none !important; }
+/* Атрибут hidden обязан прятать. Наши правила задают display (.btn —
+   inline-flex, .picker__bulk — flex), а любое авторское правило сильнее
+   браузерного [hidden] { display: none }: без этой строки элемент с hidden
+   продолжал показываться — так на экране оставались «Оплатить на сайте» при
+   выключенной оплате и «Готово» в выборе одного чата. */
+[hidden] { display: none !important; }
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 
 /* ═══════════════════════════ Заставка загрузки ═══════════════════════════ */
@@ -1063,6 +1069,29 @@ button { border: none; background: none; cursor: pointer; }
 .sub__actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-top: 12px; }
 .sub__actions .btn--primary { grid-column: 1 / -1; }
 .sub__web { width: 100%; margin-top: 8px; }
+
+/* ───────────────── Подарок за подписку на канал ───────────────── */
+
+.card--bonus { position: relative; overflow: hidden; }
+
+.card--bonus::after {
+  content: "";
+  position: absolute;
+  top: -80px;
+  left: -30px;
+  width: 170px;
+  height: 170px;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(34, 211, 238, 0.18), transparent 65%);
+}
+
+.bonus__row { display: flex; align-items: flex-start; gap: 12px; }
+
+/* Кнопки в одну колонку: обе подписи длинные, и в два столбца на 390 px они
+   обрезаются по краю. Перенос здесь — поведение по умолчанию, а не медиазапрос. */
+.bonus__actions { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 12px; }
+.bonus__note { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.bonus__note--done { color: #7DF0C0; }
 
 /* ══════════════════════════ Настройки в шторке ══════════════════════════ */
 

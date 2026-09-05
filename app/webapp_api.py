@@ -18,7 +18,7 @@ from aiogram.types import LabeledPrice
 from aiohttp import web
 from loguru import logger
 
-from app import accounts_login, paylink, webapp_build
+from app import accounts_login, bonus, paylink, webapp_build
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
@@ -313,6 +313,7 @@ async def me(request: web.Request) -> web.Response:
             rule.forwarded_count
             for rule in await repo.list_rules(session, user_id, include_archived=False)
         )
+        db_user = await repo.get_user(session, user_id)
 
     days_left = 0
     if until:
@@ -357,6 +358,9 @@ async def me(request: web.Request) -> web.Response:
                 "external": settings.external_payment_methods(),
                 "url": paylink.pay_url(user_id),
             },
+            # Подарок за подписку на канал сервиса. Выключен настройками —
+            # приходит enabled: false, и карточка в кабинете не появляется.
+            "bonus": bonus.info(db_user.channel_bonus_at if db_user else None),
         }
     )
 
@@ -1405,7 +1409,61 @@ async def distribute_subscription(request: web.Request) -> web.Response:
     )
 
 
+@routes.post("/api/subscription/bonus")
+@require_auth
+async def claim_bonus(request: web.Request) -> web.Response:
+    """Подарок за подписку на канал сервиса: проверить и начислить.
+
+    Тела у запроса нет — что дарим и за какой канал, решает сервер: цифру дней
+    с клиента принимать нельзя. Отказы разведены по кодам (см.
+    ``bonus.HTTP_STATUS``): 403 — «подпишитесь», 409 — «уже получено»,
+    503 — «проверить не смогли». Кабинету это нужно, чтобы не звать человека
+    подписываться на канал, в котором он уже стоит.
+    """
+    user_id = request[USER_ID_KEY]
+    tg_user = request[TG_USER_KEY]
+
+    async with SessionLocal() as session:
+        # Кабинет мог открыться сразу на «Аккаунтах», минуя /api/me, — тогда
+        # строки пользователя ещё нет, и начислять было бы некому.
+        await repo.get_or_create_user(
+            session,
+            user_id=user_id,
+            username=tg_user.get("username"),
+            full_name=" ".join(
+                part
+                for part in (tg_user.get("first_name"), tg_user.get("last_name"))
+                if part
+            )
+            or tg_user.get("username"),
+        )
+        await session.commit()
+
+        result = await bonus.claim(session, _bot, user_id)
+        if result.granted:
+            await session.commit()
+        else:
+            await session.rollback()
+
+    payload: dict[str, Any] = {
+        "status": result.status,
+        "granted": result.granted,
+        "days": result.days,
+        "until": result.until.isoformat() if result.until else None,
+        "channel": bonus.channel(),
+        "url": settings.bonus_url or "",
+        "message": bonus.message(result),
+    }
+    if not result.granted:
+        # Тот же текст ещё и в error: кабинет и старые клиенты показывают
+        # именно его, не разбирая status.
+        payload["error"] = payload["message"]
+    logger.info("Подарок за подписку {}: {}", user_id, result.status)
+    return _json(payload, status=bonus.HTTP_STATUS.get(result.status, 503))
+
+
 _bot: Any = None
+
 
 
 async def _bot_username() -> str | None:

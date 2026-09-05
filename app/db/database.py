@@ -82,6 +82,9 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 # здесь и доливаются точечно. Значения по умолчанию совпадают с моделями,
 # поэтому старые строки получают ровно то же, что имели бы при создании с нуля.
 ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "users": {
+        "channel_bonus_at": "DATETIME",
+    },
     "rules": {
         "kind": "TEXT NOT NULL DEFAULT 'forward'",
         "archived": "BOOLEAN NOT NULL DEFAULT 0",

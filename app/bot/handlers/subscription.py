@@ -13,6 +13,7 @@ from aiogram.types import (
 )
 from loguru import logger
 
+from app import bonus
 from app.bot import keyboards as kb
 from app.bot import texts
 from app.bot.utils import ensure_user, smart_edit
@@ -137,6 +138,79 @@ async def bank_give(callback: CallbackQuery) -> None:
     if callback.message is not None:
         await smart_edit(callback.message, f"↩️ Добавлено дней: <b>{moved}</b>\n\n" + text,
                          reply_markup=markup)
+
+
+# ───────────────────── Подарок за подписку на канал ──────────────────────
+
+
+async def _bonus_claimed(user_id: int) -> bool:
+    async with SessionLocal() as session:
+        user = await repo.get_user(session, user_id)
+    return bool(user is not None and user.channel_bonus_at)
+
+
+async def show_bonus_message(message: Message) -> None:
+    """Экран подарка. Сюда ведут /start bonus и кнопка из кабинета."""
+    await ensure_user(message)
+    assert message.from_user is not None
+    claimed = await _bonus_claimed(message.from_user.id)
+    await message.answer(
+        texts.bonus_card(claimed), reply_markup=kb.bonus_menu(claimed)
+    )
+
+
+@router.message(Command("bonus"))
+async def cmd_bonus(message: Message) -> None:
+    await show_bonus_message(message)
+
+
+@router.callback_query(F.data == "bonus:open")
+async def open_bonus(callback: CallbackQuery) -> None:
+    await callback.answer()
+    assert callback.from_user is not None
+    claimed = await _bonus_claimed(callback.from_user.id)
+    if callback.message is not None:
+        await smart_edit(
+            callback.message,
+            texts.bonus_card(claimed),
+            reply_markup=kb.bonus_menu(claimed),
+        )
+
+
+@router.callback_query(F.data == "bonus:check")
+async def check_bonus(callback: CallbackQuery) -> None:
+    """Проверяет подписку на канал и начисляет дни — один раз на аккаунт.
+
+    Проверка и начисление — те же, что в кабинете (``app/bonus.py``): бот и
+    мини-апп не могут разойтись в ответе, сколько бы раз человек ни переходил
+    из одного в другой.
+    """
+    await callback.answer()
+    assert callback.from_user is not None
+    user_id = callback.from_user.id
+
+    async with SessionLocal() as session:
+        result = await bonus.claim(session, callback.bot, user_id)
+        if result.granted:
+            await session.commit()
+        else:
+            await session.rollback()
+
+    text = bonus.message(result)
+    if not result.granted:
+        # Отказ показываем всплывашкой: экран с инструкцией остаётся на месте,
+        # и человеку не приходится открывать его заново, чтобы дойти до канала.
+        await callback.answer(text, show_alert=True)
+        return
+    if callback.message is not None:
+        await smart_edit(
+            callback.message,
+            "🎁 <b>Подарок начислен</b>\n\n"
+            + text
+            + "\n\n"
+            + await _status_text(user_id),
+            reply_markup=kb.payment_menu(user_id),
+        )
 
 
 async def show_subscription_message(message: Message) -> None:

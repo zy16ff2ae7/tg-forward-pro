@@ -191,12 +191,26 @@
         <button class="btn sub__web" id="webPayBtn" hidden>🌐 Оплатить на сайте</button>
       </div>
 
-      <div class="section-label">возможности</div>
-      <div class="card card--row" id="freeSubCard" role="button" tabindex="0">
-        <div class="card__emoji" aria-hidden="true">🎁</div>
-        <div class="card__body">
-          <div class="card__title">Бесплатная подписка</div>
-          <div class="card__desc">Проверьте доступное задание на 24 часа для каждого аккаунта.</div>
+      <!-- ── Подарок за подписку на канал сервиса ──
+           Блок целиком появляется только если подарок настроен на сервере
+           (/api/me → bonus.enabled): обещать дни за канал, которого нет,
+           нельзя. Раньше здесь стояла карточка-заглушка «Бесплатная подписка»,
+           которая всего лишь открывала бота. -->
+      <div id="bonusBlock" hidden>
+        <div class="section-label">бесплатные дни</div>
+        <div class="card card--bonus">
+          <div class="bonus__row">
+            <div class="card__emoji" aria-hidden="true">🎁</div>
+            <div class="card__body">
+              <div class="card__title" id="bonusTitle">Дни за подписку на канал</div>
+              <div class="card__desc" id="bonusDesc"></div>
+            </div>
+          </div>
+          <div class="bonus__actions">
+            <button class="btn btn--primary" id="bonusOpen">📣 Открыть канал</button>
+            <button class="btn" id="bonusCheck">🔄 Проверить подписку</button>
+          </div>
+          <div class="bonus__note" id="bonusNote"></div>
         </div>
       </div>
 

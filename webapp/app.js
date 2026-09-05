@@ -312,6 +312,14 @@ const DEMO_FEATURES = { account_login_enabled: true, account_login_status: 'read
    «заморозить» и «распределить» было видно в работе. */
 const DEMO_BANK = { banked: 0, days_left: 27 };
 
+/* Подарок за подписку: канал настоящий, начисление — местное. Держим состояние
+   между запросами, иначе карточку «подарок получен» в демо не увидеть. */
+const DEMO_BONUS = { channel: '@papin4_do4a', days: 3, claimed: false, claimed_at: null };
+
+function demoBonusUrl() {
+  return `https://t.me/${DEMO_BONUS.channel.replace(/^@/, '')}`;
+}
+
 function demoMe() {
   return {
     id: 1,
@@ -330,6 +338,14 @@ function demoMe() {
     // Демо показывает оба контура: звёзды внутри Telegram, карта и крипта — на
     // сайте. Ссылку демо не выдаёт: подписать её может только сервер.
     pay: { mode: 'external', inline: ['stars', 'manual'], external: ['yookassa', 'usdt'], url: null },
+    bonus: {
+      enabled: true,
+      channel: DEMO_BONUS.channel,
+      url: demoBonusUrl(),
+      days: DEMO_BONUS.days,
+      claimed: DEMO_BONUS.claimed,
+      claimed_at: DEMO_BONUS.claimed_at,
+    },
   };
 }
 
@@ -713,6 +729,25 @@ function demoApi(path, options = {}) {
     DEMO_BANK.banked -= moved;
     DEMO_BANK.days_left += moved;
     return { ok: true, moved, banked_days: DEMO_BANK.banked, active: true, days_left: DEMO_BANK.days_left };
+  }
+  if (clean === '/api/subscription/bonus') {
+    // Подписку в демо проверить негде, поэтому первое нажатие всегда дарит дни,
+    // а второе отвечает ровно как сервер — 409 и тот же текст.
+    if (DEMO_BONUS.claimed) {
+      demoFail(409, 'Подарок за подписку уже получен: он даётся один раз на аккаунт.');
+    }
+    DEMO_BONUS.claimed = true;
+    DEMO_BONUS.claimed_at = new Date().toISOString();
+    DEMO_BANK.days_left += DEMO_BONUS.days;
+    return {
+      status: 'granted',
+      granted: true,
+      days: DEMO_BONUS.days,
+      until: null,
+      channel: DEMO_BONUS.channel,
+      url: demoBonusUrl(),
+      message: `Готово! Подарок за подписку — ${DEMO_BONUS.days} дн.`,
+    };
   }
   if (clean === '/api/subscription') {
     return {
@@ -2862,6 +2897,71 @@ function openExternal(url) {
   else location.href = url;
 }
 
+/* ───────────────── Подарок за подписку на канал ───────────────── */
+
+/* Что дарим, за какой канал и забирали ли уже — решает сервер и присылает в
+   /api/me → bonus. Кабинет ничего не придумывает: выключен подарок — блока в
+   «Аккаунтах» нет вовсе, чтобы не обещать дни за несуществующий канал. */
+function renderBonus() {
+  const block = $('bonusBlock');
+  if (!block) return;
+  const info = (state.me && state.me.bonus) || {};
+  state.bonus = info;
+  block.hidden = !info.enabled;
+  if (!info.enabled) return;
+
+  const days = Number(info.days) || 0;
+  const channel = info.channel || 'канал сервиса';
+  $('bonusTitle').textContent = `${days} дн. бесплатно за подписку`;
+  $('bonusDesc').textContent = info.claimed
+    ? `Дни за подписку на ${channel} уже начислены.`
+    : `Подпишитесь на ${channel} и нажмите «Проверить подписку» — дни начислятся сразу.`;
+
+  const note = $('bonusNote');
+  note.textContent = info.claimed
+    ? '✅ Подарок получен — он даётся один раз на аккаунт.'
+    : 'Подарок один на аккаунт. Дни складываются с текущим абонементом.';
+  note.classList.toggle('bonus__note--done', Boolean(info.claimed));
+
+  // Забранный подарок оставляет только ссылку на канал: кнопка «Проверить»
+  // могла бы ответить лишь «уже получено» — такую кнопку рисовать незачем.
+  $('bonusCheck').hidden = Boolean(info.claimed);
+  $('bonusOpen').hidden = !info.url;
+}
+
+/* Ссылку на канал открываем именно как Telegram-ссылку: openLink увёл бы
+   человека во внешний браузер, где он не подписан. */
+function openBonusChannel() {
+  const url = (state.bonus || {}).url;
+  if (!url) {
+    toast('Канал не настроен');
+    return;
+  }
+  if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
+  else openExternal(url);
+}
+
+/* Проверка подписки и начисление — один запрос: канал и число дней сервер
+   берёт у себя, с клиента их принимать нельзя. */
+async function claimBonus(button) {
+  const info = state.bonus || {};
+  try {
+    const data = await withLoading(button, () =>
+      api('/api/subscription/bonus', { method: 'POST', body: '{}' })
+    );
+    toast(data.message || 'Подарок начислен');
+    if (state.me) state.me.bonus = { ...info, claimed: true, days: data.days };
+    renderBonus();
+    // Дни уже в подписке — обновляем копилку, бейдж и шапку одним запросом.
+    await loadAccounts();
+  } catch (error) {
+    toast(error.message);
+    // 403 — «не вижу вас в канале»: сразу открываем канал, чтобы человек не
+    // искал его сам. Остальные отказы говорят за себя.
+    if (error.status === 403) openBonusChannel();
+  }
+}
+
 async function moveBankDays(direction, button) {
   const path = direction === 'freeze' ? '/api/subscription/bank' : '/api/subscription/distribute';
   try {
@@ -3200,7 +3300,14 @@ function bindEvents() {
   $('freezeBtn').addEventListener('click', (event) => {
     moveBankDays('freeze', event.currentTarget);
   });
-  $('freeSubCard').addEventListener('click', () => openBot('trial'));
+  // Подарок за подписку: канал открываем ссылкой, а дни начисляет сервер —
+  // он же и проверяет подписку.
+  $('bonusOpen').addEventListener('click', () => {
+    openBonusChannel();
+  });
+  $('bonusCheck').addEventListener('click', (event) => {
+    claimBonus(event.currentTarget);
+  });
 
   // шторки
   $('settingsBtn').addEventListener('click', () => $('settingsSheet').classList.add('is-open'));
@@ -3359,6 +3466,9 @@ async function boot() {
       renderTopUpButton();
       // Кнопка «на сайте» появляется только если контур внешней оплаты включён.
       renderWebPayButton();
+      // Подарок за подписку на канал — тоже по ответу сервера: выключен, и
+      // карточки в «Аккаунтах» просто нет.
+      renderBonus();
     } catch (error) {
       toast(error.message);
     }

@@ -119,6 +119,52 @@ async def grant_trial(session: AsyncSession, user_id: int) -> datetime | None:
     return until
 
 
+async def add_subscription_days(
+    session: AsyncSession, user_id: int, days: int
+) -> datetime:
+    """Добавляет к подписке ``days`` суток. Возвращает новую дату окончания.
+
+    От ``activate_subscription`` отличается только единицей счёта: там месяцы
+    тарифа, здесь сутки подарка. Точка отсчёта общая — активный абонемент
+    продлевается, истёкший начинается заново от «сейчас»: иначе подарок
+    достался бы прошлому и человек не увидел бы ни дня.
+    """
+    now = utcnow()
+    sub = await session.get(Subscription, user_id)
+    base = max(now, sub.active_until) if sub and sub.active_until > now else now
+    new_until = base + timedelta(days=max(0, days))
+
+    if sub is None:
+        sub = Subscription(user_id=user_id, active_until=new_until)
+        session.add(sub)
+    else:
+        sub.active_until = new_until
+        sub.reminded_at = None
+    await session.flush()
+    return new_until
+
+
+async def claim_channel_bonus(
+    session: AsyncSession, user_id: int, days: int
+) -> datetime | None:
+    """Отмечает подарок за подписку выданным и начисляет дни.
+
+    ``None`` — подарок уже забирали (или пользователя нет). Метку ставит
+    условный UPDATE ``WHERE channel_bonus_at IS NULL``: два одновременных
+    нажатия «Проверить подписку» дадут ровно одну выдачу, потому что вторым
+    запросом обновлять уже нечего. Проверка «а он подписан?» живёт выше, в
+    app/bonus.py: репозиторий про Telegram ничего не знает.
+    """
+    result = await session.execute(
+        update(User)
+        .where(User.id == user_id, User.channel_bonus_at.is_(None))
+        .values(channel_bonus_at=utcnow())
+    )
+    if result.rowcount != 1:
+        return None
+    return await add_subscription_days(session, user_id, days)
+
+
 async def count_active_subscriptions(session: AsyncSession) -> int:
     now = utcnow()
     result = await session.execute(

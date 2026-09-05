@@ -6,7 +6,7 @@ from typing import Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app import paylink
+from app import bonus, paylink
 from app.config import settings
 from app.db.models import Rule, TelegramAccount
 from app.plans import PERIODS, stars_amount
@@ -230,6 +230,12 @@ def payment_menu(user_id: int | None = None) -> InlineKeyboardMarkup:
         "usdt": "🪙 USDT (TRC-20)",
         "manual": "👤 Через администратора",
     }
+    # Бесплатные дни — первой строкой: это самый дешёвый для человека способ
+    # получить абонемент, и прятать его под кнопками оплаты нечестно.
+    if bonus.enabled():
+        builder.row(
+            InlineKeyboardButton(text="🎁 " + bonus.offer(), callback_data="bonus:open")
+        )
     inline_methods = settings.inline_payment_methods()
     for method in inline_methods:
         builder.row(
@@ -251,6 +257,26 @@ def payment_menu(user_id: int | None = None) -> InlineKeyboardMarkup:
                 )
             )
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="menu:main"))
+    return builder.as_markup()
+
+
+def bonus_menu(claimed: bool = False) -> InlineKeyboardMarkup:
+    """Подарок за подписку: открыть канал и проверить подписку.
+
+    Кнопки «Проверить» после выдачи нет: подарок разовый, и повторное нажатие
+    может ответить только «уже получено» — такую кнопку лучше не рисовать.
+    """
+    builder = InlineKeyboardBuilder()
+    url = settings.bonus_url
+    if url:
+        builder.row(InlineKeyboardButton(text="📣 Открыть канал", url=url))
+    if not claimed:
+        builder.row(
+            InlineKeyboardButton(
+                text="🔄 Проверить подписку", callback_data="bonus:check"
+            )
+        )
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="menu:sub"))
     return builder.as_markup()
 
 

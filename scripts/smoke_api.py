@@ -24,6 +24,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterator
 from urllib.parse import quote
 
@@ -97,6 +98,40 @@ def stubbed_gateway(**overrides: Any) -> Iterator[None]:
         for name in overrides:
             delattr(manager, name)
 
+
+
+class SubscriberBot:
+    """Бот в объёме проверки подписки: один ``getChatMember``.
+
+    Настоящий Bot API прогону недоступен (и не нужен), а без бота подарок
+    отвечает только «не смогли проверить» — путь начисления остался бы
+    непроверенным целиком.
+    """
+
+    def __init__(self, status: str = "member") -> None:
+        self.status = status
+        self.calls: list[tuple[str, int]] = []
+
+    async def get_chat_member(self, chat_id: Any, user_id: int) -> Any:
+        self.calls.append((chat_id, user_id))
+        return SimpleNamespace(status=self.status, is_member=True)
+
+
+@contextmanager
+def stubbed_bot(bot: Any) -> Iterator[Any]:
+    """Подставляет бота в уже поднятое приложение и убирает после раздела.
+
+    setup_webapp_routes держит бота в переменной модуля — там же его и меняем,
+    чтобы не поднимать второй сервер ради одного эндпоинта.
+    """
+    import app.webapp_api as webapp_api
+
+    before = webapp_api._bot
+    webapp_api._bot = bot
+    try:
+        yield bot
+    finally:
+        webapp_api._bot = before
 
 
 @contextmanager
@@ -1509,6 +1544,113 @@ async def check_pay_card(cab: Cabinet, rep: Report) -> None:
     rep.note("вызов ЮKassa заменён заглушкой: прогон не ходит в сеть и не создаёт счёт")
 
 
+async def check_bonus(cab: Cabinet, rep: Report) -> None:
+    """Подарок за подписку на канал: выключенный, без бота и с ботом.
+
+    Проверка подписки — единственный вызов Bot API в этом разделе, поэтому бот
+    подменяется заглушкой: наружу прогон не ходит, а проверять надо своё —
+    коды отказов, разовость подарка и то, что дни действительно прибавились.
+    """
+    rep.section("Подарок за подписку на канал")
+
+    with configured(bonus_channel=None):
+        status, body = await cab.get("/api/me")
+        info = (body or {}).get("bonus") or {}
+        rep.check(
+            "подарок выключен — /api/me не обещает дней",
+            status == 200 and info.get("enabled") is False and info.get("days") == 0,
+            f"{info}",
+        )
+        status, body = await cab.post("/api/subscription/bonus")
+        rep.check(
+            "выключенный подарок не начисляют — 503",
+            status == 503 and (body or {}).get("status") == "disabled",
+            f"статус {status}, {body}",
+        )
+
+    with configured(bonus_channel="https://t.me/papin4_do4a", bonus_days=3):
+        status, body = await cab.get("/api/me")
+        info = (body or {}).get("bonus") or {}
+        rep.check(
+            "включённый подарок описан целиком",
+            status == 200
+            and info.get("enabled") is True
+            and info.get("channel") == "@papin4_do4a"
+            and info.get("url") == "https://t.me/papin4_do4a"
+            and info.get("days") == 3
+            and info.get("claimed") is False,
+            f"{info}",
+        )
+
+        # Кабинет без бота проверить подписку не может — и не должен врать,
+        # будто человек не подписан: это отказ сервиса, а не отказ человеку.
+        status, body = await cab.post("/api/subscription/bonus")
+        rep.check(
+            "без бота проверка подписки — 503, а не «вы не подписаны»",
+            status == 503 and (body or {}).get("status") == "unavailable",
+            f"статус {status}, {body}",
+        )
+
+        with stubbed_bot(SubscriberBot("left")):
+            status, body = await cab.post("/api/subscription/bonus")
+            rep.check(
+                "не подписан — 403 с названием канала",
+                status == 403
+                and (body or {}).get("status") == "not_member"
+                and "@papin4_do4a" in ((body or {}).get("message") or ""),
+                f"статус {status}, {body}",
+            )
+
+        _, before = await cab.get("/api/subscription")
+        with stubbed_bot(SubscriberBot("member")) as bot:
+            status, body = await cab.post("/api/subscription/bonus")
+            granted = rep.check(
+                "подписчику начислены 3 дня",
+                status == 200
+                and (body or {}).get("granted") is True
+                and (body or {}).get("days") == 3
+                and (body or {}).get("until"),
+                f"статус {status}, {body}",
+            )
+            rep.check(
+                "подписку спросили именно у канала подарка",
+                bot.calls == [("@papin4_do4a", SMOKE_USER_ID)],
+                f"{bot.calls}",
+            )
+            # Второе нажатие — отдельный код: кабинету надо отличать «уже
+            # получено» от «подпишитесь», иначе он снова откроет канал.
+            status, body = await cab.post("/api/subscription/bonus")
+            rep.check(
+                "второй раз подарок не дают — 409",
+                status == 409 and (body or {}).get("status") == "already",
+                f"статус {status}, {body}",
+            )
+            rep.check(
+                "повторный отказ не тратит запрос к Telegram",
+                len(bot.calls) == 1,
+                f"вызовов {len(bot.calls)}",
+            )
+
+        _, after = await cab.get("/api/subscription")
+        if granted:
+            grew = (after or {}).get("days_left", 0) - (before or {}).get("days_left", 0)
+            rep.check("остаток дней вырос на подарок", grew == 3, f"+{grew} дн.")
+        status, body = await cab.get("/api/me")
+        info = (body or {}).get("bonus") or {}
+        rep.check(
+            "/api/me помнит выданный подарок",
+            info.get("claimed") is True and info.get("claimed_at"),
+            f"{info}",
+        )
+        status, _ = await cab.post("/api/subscription/bonus", auth=False)
+        rep.check("без подписи Telegram — 401", status == 401, f"статус {status}")
+
+    # Метку в БД снимаем: раздел не должен влиять на остальные проверки.
+    async with session_scope() as session:
+        user = await repo.get_user(session, SMOKE_USER_ID)
+        user.channel_bonus_at = None
+
+
 async def check_misc(cab: Cabinet, rep: Report) -> None:
     """Мелочи, которые ломаются молча: неизвестный маршрут и чужой метод."""
     rep.section("Прочее")
@@ -1540,6 +1682,7 @@ async def run_all(rep: Report) -> None:
             await check_chats_and_accounts(cab, rep, account_id)
             await check_account_login(cab, rep)
             await check_subscription(cab, rep, me)
+            await check_bonus(cab, rep)
             await check_pay_disabled(cab, rep)
             await check_pay_page(cab, rep)
             await check_pay_card(cab, rep)
