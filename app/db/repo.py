@@ -929,14 +929,41 @@ async def due_pending_deliveries(
 
 async def drop_stale_pending_deliveries(
     session: AsyncSession, *, max_age_hours: int = PENDING_DELIVERY_MAX_AGE_HOURS
-) -> int:
-    """Убирает записи, которые уже поздно досылать. Возвращает число удалённых."""
+) -> Sequence[PendingDelivery]:
+    """Убирает записи, которые уже поздно досылать. Возвращает удалённые строки.
+
+    Возвращаем сами строки, а не их число: у каждой есть хозяин и задача, и о
+    потерянной отправке ему надо сказать в журнале задачи. Раньше здесь стоял
+    ``DELETE`` со счётчиком, и сутки простоя уносили сообщения молча.
+    """
     threshold = utcnow() - timedelta(hours=max(1, int(max_age_hours)))
     result = await session.execute(
-        delete(PendingDelivery).where(PendingDelivery.created_at < threshold)
+        select(PendingDelivery).where(PendingDelivery.created_at < threshold)
     )
+    rows = list(result.scalars().all())
+    if rows:
+        await session.execute(
+            delete(PendingDelivery).where(
+                PendingDelivery.id.in_([row.id for row in rows])
+            )
+        )
     await session.flush()
-    return int(result.rowcount or 0)
+    return rows
+
+
+async def defer_pending_delivery(session: AsyncSession, delivery_id: int) -> int:
+    """Считает попытку досылки, которая ни к чему не привела. Отдаёт их число.
+
+    Строку при этом оставляем: аккаунт, который сейчас не на связи, обычно
+    возвращается через минуту-другую, и выбрасывать из-за этого чужое сообщение
+    не за что. Число попыток — предохранитель от бессмертной записи.
+    """
+    row = await session.get(PendingDelivery, delivery_id)
+    if row is None:
+        return 0
+    row.attempts = int(row.attempts or 0) + 1
+    await session.flush()
+    return int(row.attempts)
 
 
 async def delete_pending_delivery(session: AsyncSession, delivery_id: int) -> None:

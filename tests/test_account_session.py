@@ -27,7 +27,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.config import settings
 from app.db.database import SessionLocal, session_scope
 from app.db.models import TelegramAccount
 from app.security import encrypt_session
@@ -193,12 +192,6 @@ async def test_a_broken_link_is_not_a_revoked_session(account, monkeypatch):
 
 
 # ───────────────────────── запуск всех: причина цела ──────────────────────────
-
-
-@pytest.fixture
-def mtproto_on(monkeypatch):
-    """Ключи MTProto на месте: без них start_all не доходит до аккаунтов."""
-    monkeypatch.setattr(type(settings), "mtproto_ready", property(lambda self: True))
 
 
 async def test_start_all_keeps_the_named_reason(account_id, dead, mtproto_on):

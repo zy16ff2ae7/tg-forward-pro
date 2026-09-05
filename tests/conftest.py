@@ -25,6 +25,7 @@ import pytest  # noqa: E402
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
+from app.config import settings  # noqa: E402
 from app.db.database import Base, engine, init_db, session_scope  # noqa: E402
 from app.db.models import TelegramAccount, User  # noqa: E402
 from app.errors import http_error_middleware  # noqa: E402
@@ -62,6 +63,18 @@ async def delivery_queue_per_test():
     if delivery_queue._started:
         await delivery_queue.stop(drain=False, timeout=1.0)
     delivery_queue._queue = asyncio.Queue(maxsize=delivery_queue._maxsize)
+
+
+@pytest.fixture
+def mtproto_on(monkeypatch):
+    """Ключи MTProto «на месте»: без них менеджер до аккаунтов не доходит.
+
+    Свойство подменяем у класса, а не у объекта: у настроек ``mtproto_ready``
+    вычисляется из api_id/api_hash, и присвоить его экземпляру нельзя. Фикстура
+    лежит здесь, потому что нужна трём файлам тестов — про сессии, про подъём
+    аккаунтов и про отложенные отправки.
+    """
+    monkeypatch.setattr(type(settings), "mtproto_ready", property(lambda self: True))
 
 
 @pytest.fixture

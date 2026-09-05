@@ -31,6 +31,7 @@ WRITE_CALLS = {
     "bump_login_attempts",
     "claim_payment",
     "create_payment",
+    "defer_pending_delivery",
     "delete_pending_delivery",
     "delete_pending_login",
     "delete_rule",

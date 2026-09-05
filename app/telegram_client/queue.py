@@ -18,6 +18,10 @@
 
 Повторяем только ошибки Telegram (FloodWait и RPCError): сбой базы или опечатку
 в коде повторять бессмысленно, такая задача сразу уходит в журнал ошибок.
+
+Отправка, которую доводить до конца больше не будем, обязана оставить строку в
+журнале задачи: карточка в кабинете читает тот же журнал, и молча выброшенная
+отправка выглядела на ней как «работает».
 """
 from __future__ import annotations
 
@@ -31,6 +35,14 @@ from telethon.errors import FloodWaitError, RPCError
 
 from app.config import settings
 from app.telegram_client.types import DeliveryResult, RuleSnapshot
+
+# Сколько раз восстановление ждёт аккаунт, который ещё не на связи. Проходов по
+# три минуты (``REVIVE_INTERVAL``) — это четверть часа терпения: после
+# перезапуска сервера аккаунт обычно возвращается за секунды, а бросать чужое
+# сообщение из-за того, что сеть поднялась позже службы, не за что. Записи
+# старше суток убирает ``drop_stale_pending_deliveries`` — бессмертных строк тут
+# нет и без этого предохранителя.
+RESTORE_ATTEMPTS_LIMIT = 5
 
 # Обработчик получает «живой» клиент Telethon, сообщение и снимок правила.
 #   вернул DeliveryResult или True — отправлено;
@@ -123,6 +135,11 @@ class DeliveryQueue:
         self._tasks: list[asyncio.Task] = []
         # Задачи, спящие в отложенной отправке (задержка из правила)
         self._pending: set[asyncio.Task] = set()
+        # id строк pending_deliveries, которые уже у нас в руках: стоят в очереди
+        # или ждут своей задержки. Восстановление ходит по базе не один раз (см.
+        # ``_revive_loop``), и без этого набора второй проход поставил бы тот же
+        # пост в очередь ещё раз — получателю пришёл бы дубль.
+        self._inflight: set[int] = set()
         self._started = False
         self._counters = {
             "submitted": 0,
@@ -131,6 +148,8 @@ class DeliveryQueue:
             "failed": 0,
             "skipped": 0,
             "restored": 0,
+            # Оставлено до следующего прохода: аккаунт ещё не на связи.
+            "deferred": 0,
         }
         # Пропуски по причинам: «фильтр» и «нет подписки» — это разные истории,
         # и в диагностике их надо различать.
@@ -211,6 +230,9 @@ class DeliveryQueue:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
+        # Строки в pending_deliveries остаются, а вот «у нас в руках» их больше
+        # нет: следующий запуск обязан увидеть их как незавершённые.
+        self._inflight.clear()
         logger.info("Очередь доставки остановлена: {}", self.stats())
 
     # ───────────────────────────────── Отправка ───────────────────────────────
@@ -232,6 +254,8 @@ class DeliveryQueue:
         осталось меньше, чем сказано в правиле.
         """
         job = _Job(client=client, message=message, rule=rule, delivery_id=delivery_id)
+        if delivery_id is not None:
+            self._inflight.add(int(delivery_id))
         if delay_override is None:
             delay = max(0, int(getattr(rule, "delay_seconds", 0) or 0))
         else:
@@ -280,7 +304,15 @@ class DeliveryQueue:
 
         ok = self.submit(client, message, rule, delivery_id=delivery_id)
         if not ok and delivery_id is not None:
-            # Переполнение — решение осознанное, восстанавливать нечего.
+            # Переполнение — решение осознанное, восстанавливать нечего. Но это
+            # ровно то самое «сообщение не доехало, а карточка бодра»: причину
+            # кладём в журнал задачи, там её видно человеку.
+            await self.journal_loss(
+                rule_id=rule.id,
+                user_id=rule.user_id,
+                message_id=int(getattr(message, "id", 0) or 0),
+                reason="очередь доставки переполнена — сообщение отброшено",
+            )
             await self._forget(delivery_id)
         return ok
 
@@ -295,6 +327,11 @@ class DeliveryQueue:
         — снимок правила по rule_id (None, если правило успели удалить).
         Сообщение перечитывается из источника: держать его копию в БД не нужно
         и не хочется — там могут быть личные переписки пользователей.
+
+        Зовётся не только на старте: аккаунт, не успевший подключиться к первому
+        проходу, поднимается позже сам (``_revive_loop``), и его отправки ждут
+        этого прохода, а не выбрасываются. Уже взятые в работу строки проход
+        пропускает — иначе получатель получил бы один и тот же пост дважды.
         """
         from app.db import repo
         from app.db.database import session_scope
@@ -307,27 +344,72 @@ class DeliveryQueue:
             return 0
 
         restored = 0
+        deferred = 0
         for row in rows:
-            client = client_for(row.account_id)
+            if int(row.id) in self._inflight:
+                continue
+
             rule = rule_for(row.rule_id)
-            if client is None or rule is None:
-                logger.info(
-                    "Отправка #{}: аккаунт #{} не подключён или правило #{} исчезло — "
-                    "запись убираем",
-                    row.id,
-                    row.account_id,
-                    row.rule_id,
+            if rule is None:
+                # Пауза, архив или удаление задачи. Досылать нечего, но если
+                # задача ещё жива — её журнал обязан объяснить пропажу поста.
+                await self._notice_if_task_alive(
+                    row, "задача не в работе — отложенная отправка отменена"
                 )
                 await self._forget(row.id)
                 continue
+
+            client = client_for(row.account_id)
+            if client is None:
+                attempts = await self._defer(row)
+                if attempts < RESTORE_ATTEMPTS_LIMIT:
+                    logger.info(
+                        "Отправка #{}: аккаунт #{} ещё не на связи — попытка {}, ждём",
+                        row.id,
+                        row.account_id,
+                        attempts,
+                    )
+                    deferred += 1
+                    continue
+                logger.warning(
+                    "Отправка #{}: аккаунт #{} не вышел на связь за {} проходов — "
+                    "запись убираем",
+                    row.id,
+                    row.account_id,
+                    RESTORE_ATTEMPTS_LIMIT,
+                )
+                await self.journal_loss(
+                    rule_id=row.rule_id,
+                    user_id=row.user_id,
+                    message_id=row.message_id,
+                    reason="аккаунт так и не вышел на связь — отложенная отправка отменена",
+                )
+                await self._forget(row.id)
+                continue
+
             try:
                 message = await client.get_messages(row.source_chat_id, ids=row.message_id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Отправка #{}: не перечитали сообщение: {}", row.id, exc)
+                await self.journal_loss(
+                    rule_id=row.rule_id,
+                    user_id=row.user_id,
+                    message_id=row.message_id,
+                    reason=(
+                        "не перечитали сообщение в источнике "
+                        f"({type(exc).__name__}) — отложенная отправка отменена"
+                    ),
+                )
                 await self._forget(row.id)
                 continue
             if message is None:
                 logger.info("Отправка #{}: сообщение удалено в источнике", row.id)
+                await self.journal_loss(
+                    rule_id=row.rule_id,
+                    user_id=row.user_id,
+                    message_id=row.message_id,
+                    reason="сообщение удалено в источнике — досылать нечего",
+                )
                 await self._forget(row.id)
                 continue
 
@@ -342,7 +424,12 @@ class DeliveryQueue:
             restored += 1
 
         self._counters["restored"] += restored
-        logger.info("После перезапуска восстановлено отправок: {}", restored)
+        self._counters["deferred"] += deferred
+        logger.info(
+            "После перезапуска восстановлено отправок: {} (ждут аккаунт: {})",
+            restored,
+            deferred,
+        )
         return restored
 
     async def _forget(self, delivery_id: int | None) -> None:
@@ -352,11 +439,75 @@ class DeliveryQueue:
         from app.db import repo
         from app.db.database import session_scope
 
+        self._inflight.discard(int(delivery_id))
         try:
             async with session_scope() as session:
                 await repo.delete_pending_delivery(session, delivery_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Не удалили запись об отправке #{}: {}", delivery_id, exc)
+
+    async def _defer(self, row: Any) -> int:
+        """Считает пустой проход по строке и оставляет её ждать следующего."""
+        from app.db import repo
+        from app.db.database import session_scope
+
+        try:
+            async with session_scope() as session:
+                return await repo.defer_pending_delivery(session, int(row.id))
+        except Exception as exc:  # noqa: BLE001 — не смогли посчитать, значит ждём дальше
+            logger.warning("Не отметили попытку по отправке #{}: {}", row.id, exc)
+            return 0
+
+    async def journal_loss(
+        self, *, rule_id: int, user_id: int, message_id: int, reason: str
+    ) -> None:
+        """Пишет в журнал задачи, что отправки не будет, и почему.
+
+        Тот же журнал читает карточка в кабинете: без этой строки задача с
+        потерянным сообщением выглядит работающей, а человек ждёт поста, который
+        уже не придёт. Ошибку записи глотаем — восстановление важнее журнала.
+        """
+        from app.db import repo
+        from app.db.database import session_scope
+
+        try:
+            async with session_scope() as session:
+                await repo.log_forward(
+                    session,
+                    rule_id=int(rule_id),
+                    user_id=int(user_id),
+                    source_msg_id=int(message_id or 0),
+                    target_msg_id=None,
+                    status="error",
+                    error=reason,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не записали в журнал задачи #{}: {}", rule_id, exc)
+
+    async def _notice_if_task_alive(self, row: Any, reason: str) -> None:
+        """То же, но только для задачи, которая ещё существует.
+
+        Правило могли и удалить — тогда журнал писать некуда: карточки нет, а
+        строки удалённых задач всё равно подчищает уборка (``trim_logs``).
+        """
+        from app.db import repo
+        from app.db.database import SessionLocal
+
+        try:
+            async with SessionLocal() as session:
+                rule = await repo.get_rule(session, int(row.rule_id), int(row.user_id))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не проверили задачу #{}: {}", row.rule_id, exc)
+            return
+        if rule is None:
+            logger.info("Отправка #{}: задача #{} удалена", row.id, row.rule_id)
+            return
+        await self.journal_loss(
+            rule_id=row.rule_id,
+            user_id=row.user_id,
+            message_id=row.message_id,
+            reason=reason,
+        )
 
     def _put(self, job: _Job) -> bool:
         try:

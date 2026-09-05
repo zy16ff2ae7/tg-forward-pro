@@ -509,6 +509,10 @@ class ClientManager:
                 revived = await self._start_pending_accounts()
                 if revived:
                     logger.info("Аккаунты вернулись в работу: {}", revived)
+                    # Их незавершённые отправки ждали именно этого: пока
+                    # аккаунта не было, проход восстановления оставлял строки
+                    # в базе. Теперь есть чем перечитать сообщение — досылаем.
+                    await self._restore_deliveries()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -518,13 +522,24 @@ class ClientManager:
         """Досылает то, что не успел прошлый запуск.
 
         Вызывается после подключения аккаунтов: раньше клиентов ещё нет, и
-        перечитать сообщение из источника нечем.
+        перечитать сообщение из источника нечем. И повторно — когда аккаунт
+        вернулся в работу позже (``_revive_loop``): его отправки к первому
+        проходу были отложены, а не выброшены.
         """
         try:
             async with session_scope() as session:
-                stale = await repo.drop_stale_pending_deliveries(session)
+                stale = list(await repo.drop_stale_pending_deliveries(session))
             if stale:
-                logger.info("Отправок просрочено и убрано: {}", stale)
+                logger.info("Отправок просрочено и убрано: {}", len(stale))
+            for row in stale:
+                # Сутки — это уже не «задержалось», а «не будет». Молча такое
+                # терять нельзя: на карточке задача выглядела работающей.
+                await delivery_queue.journal_loss(
+                    rule_id=row.rule_id,
+                    user_id=row.user_id,
+                    message_id=row.message_id,
+                    reason="отправка просрочена: больше суток без связи — отменена",
+                )
             await delivery_queue.restore_pending(
                 self._connected_client, self._rules_by_id.get
             )

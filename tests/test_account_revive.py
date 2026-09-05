@@ -23,7 +23,6 @@ import asyncio
 
 import pytest
 
-from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal, session_scope
 from app.db.models import TelegramAccount
@@ -51,12 +50,6 @@ async def stop_manager():
     """Менеджер один на весь процесс: поднятое одним тестом гасим за ним же."""
     yield
     await manager.stop_all()
-
-
-@pytest.fixture
-def mtproto_on(monkeypatch):
-    """Ключи MTProto на месте: без них start_all не доходит до аккаунтов."""
-    monkeypatch.setattr(type(settings), "mtproto_ready", property(lambda self: True))
 
 
 @pytest.fixture
