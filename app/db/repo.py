@@ -298,6 +298,10 @@ async def set_account_error(
     """
     account.last_error = error
     account.is_active = error is None
+    if error is None:
+        # Аккаунт вернулся в работу: про следующее выпадение надо будет сказать
+        # снова, иначе человек узнает о нём только из кабинета.
+        account.error_notified_at = None
     await session.flush()
 
 
@@ -345,6 +349,49 @@ async def accounts_to_start(
         )
     result = await session.execute(select(TelegramAccount).where(condition))
     return result.scalars().all()
+
+
+async def accounts_awaiting_relogin_notice(
+    session: AsyncSession,
+) -> Sequence[TelegramAccount]:
+    """Аккаунты, которые выпали насовсем, а владельцу об этом ещё не говорили.
+
+    Выключенный аккаунт с причиной — это приговор сессии (``set_account_error``);
+    беда, которая пройдёт сама, аккаунт из работы не убирает и здесь не всплывёт.
+    """
+    result = await session.execute(
+        select(TelegramAccount)
+        .where(
+            TelegramAccount.is_active.is_(False),
+            TelegramAccount.last_error.is_not(None),
+            TelegramAccount.error_notified_at.is_(None),
+        )
+        .order_by(TelegramAccount.id)
+    )
+    return result.scalars().all()
+
+
+async def mark_error_notified(session: AsyncSession, account: TelegramAccount) -> None:
+    """Помечает, что про это выпадение владельцу уже сказали."""
+    account.error_notified_at = utcnow()
+    await session.flush()
+
+
+async def count_working_rules(session: AsyncSession, account_id: int) -> int:
+    """Сколько задач на аккаунте работало бы: включённые и не в архиве.
+
+    Это и есть цена мёртвой сессии — столько задач молча ничего не делает.
+    """
+    result = await session.execute(
+        select(func.count())
+        .select_from(Rule)
+        .where(
+            Rule.account_id == account_id,
+            Rule.enabled.is_(True),
+            Rule.archived.is_(False),
+        )
+    )
+    return int(result.scalar_one())
 
 
 # ────────────────────────────────── Правила ───────────────────────────────────

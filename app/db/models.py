@@ -73,6 +73,11 @@ class TelegramAccount(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Когда владельцу сказали, что аккаунт выпал. Беда одна, а фоновый цикл
+    # ходит каждые пять минут: без метки человек получал бы одно и то же
+    # сообщение до самого повторного входа. Удачный вход метку снимает — о
+    # следующем таком случае надо сказать снова.
+    error_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="accounts")
     rules: Mapped[list["Rule"]] = relationship(

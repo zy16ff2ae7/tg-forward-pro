@@ -98,6 +98,9 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "pending_logins": {
         "attempts": "INTEGER NOT NULL DEFAULT 0",
     },
+    "telegram_accounts": {
+        "error_notified_at": "DATETIME",
+    },
 }
 
 # Индексы, добавленные позже: create_all создаёт индексы только вместе с новой

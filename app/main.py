@@ -57,6 +57,59 @@ async def notify_expiring(bot: Bot) -> None:
             logger.debug("Не смогли напомнить пользователю {}", user_id)
 
 
+DEAD_ACCOUNT_LEAD = "🔴 <b>{phone}</b> отключился от сервиса."
+
+
+def dead_account_text(phone: str, reason: str, rules: int) -> str:
+    """Сообщение владельцу выпавшего аккаунта: что случилось и чего это стоит.
+
+    Причину берём ту, что записал пул: она уже написана для человека и в разных
+    случаях разная («аккаунт вышел из Telegram» и «сессия не читается»).
+    Придумывать здесь вторую формулировку — способ соврать в одном из них.
+    Что делать, сказано в самой причине и на кнопке, поэтому третий раз про
+    повторный вход не повторяемся.
+    """
+    price = (
+        f"Пересылка на нём стоит: задач — {rules}. Они пойдут сразу после входа, "
+        "код придёт в Telegram."
+        if rules
+        else "Задач на нём пока нет. Код на вход придёт в Telegram."
+    )
+    return f"{DEAD_ACCOUNT_LEAD.format(phone=phone)}\n\n{reason}.\n\n{price}"
+
+
+async def notify_dead_accounts(bot: Bot) -> None:
+    """Говорит владельцу, что аккаунт выпал и задачи на нём стоят.
+
+    Боевой случай: сессия аккаунта +7901… перестала работать в 08:27, а владелец
+    узнал об этом в 16:49 — и только потому, что сам открыл кабинет. Восемь
+    часов задачи на номере молча ничего не пересылали. Причину кабинет
+    показывает и раньше, но в кабинет надо зайти; это сообщение приходит само.
+
+    Метку ставим до отправки, как и в напоминаниях о продлении: беда одна, и
+    цикл, который ходит каждые пять минут, не должен повторять одно и то же.
+    Заблокировавшему бота сказать всё равно нельзя — причина ждёт его в кабинете.
+    """
+    async with SessionLocal() as session:
+        notices: list[tuple[int, str]] = []
+        for account in await repo.accounts_awaiting_relogin_notice(session):
+            rules = await repo.count_working_rules(session, account.id)
+            reason = (account.last_error or "").rstrip(".")
+            notices.append(
+                (account.user_id, dead_account_text(account.phone, reason, rules))
+            )
+            await repo.mark_error_notified(session, account)
+        await session.commit()
+
+    from app.bot.keyboards import relogin_notice
+
+    for user_id, text in notices:
+        try:
+            await bot.send_message(user_id, text, reply_markup=relogin_notice())
+        except Exception:  # noqa: BLE001
+            logger.debug("Не смогли сказать пользователю {} про выпавший аккаунт", user_id)
+
+
 async def trim_logs(_bot: Bot) -> None:
     """Подрезает журнал пересылок и убирает строки удалённых задач.
 
@@ -94,6 +147,7 @@ async def run_background_checks(bot: Bot) -> None:
         ("USDT", crypto.check_pending),
         ("ЮKassa", yookassa.check_pending),
         ("напоминания о продлении", notify_expiring),
+        ("выпавшие аккаунты", notify_dead_accounts),
         ("уборка базы", trim_logs),
     )
     for name, check in checks:
@@ -108,7 +162,7 @@ async def run_background_checks(bot: Bot) -> None:
 
 
 async def background_loop(bot: Bot) -> None:
-    """Фоновые дела: оплата USDT и картой, напоминания о продлении, уборка базы.
+    """Фоновые дела: оплата USDT и картой, напоминания, выпавшие аккаунты, уборка.
 
     Первый проход — сразу, без ожидания: пока сервис перезапускался, перевод
     мог уже прийти, и заставлять человека ждать пять минут не за что.

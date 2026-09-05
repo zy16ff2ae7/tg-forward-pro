@@ -63,6 +63,10 @@ class RecordingBot:
         self.username = username
         self.fail_for = set(fail_for or ())
         self.messages: list[tuple[int, str]] = []
+        # Клавиатуры держим отдельным списком: у сообщения бывает кнопка, и
+        # проверять её приходится (письмо про выпавший аккаунт без кнопки
+        # «Подключить заново» заставляет искать вход по меню).
+        self.markups: list[object] = []
 
     async def get_me(self) -> SimpleNamespace:
         return SimpleNamespace(username=self.username)
@@ -71,6 +75,7 @@ class RecordingBot:
         if chat_id in self.fail_for:
             raise RuntimeError("bot was blocked by the user")
         self.messages.append((chat_id, text))
+        self.markups.append(kwargs.get("reply_markup"))
 
     @property
     def recipients(self) -> list[int]:

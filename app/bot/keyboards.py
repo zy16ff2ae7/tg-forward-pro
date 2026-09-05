@@ -328,6 +328,20 @@ def back_to_main() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def relogin_notice() -> InlineKeyboardMarkup:
+    """Кнопки под сообщением «аккаунт выпал»: вход сразу, а не поиск по меню.
+
+    ``acc:add`` ведёт на шаг номера и сам подхватывает незавершённый вход, если
+    человек его уже начал.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🔑 Подключить заново", callback_data="acc:add")
+    )
+    builder.row(InlineKeyboardButton(text="◀️ В меню", callback_data="menu:main"))
+    return builder.as_markup()
+
+
 def admin_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
