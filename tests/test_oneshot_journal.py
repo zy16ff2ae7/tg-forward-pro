@@ -67,6 +67,7 @@ class OneShotClient:
         *,
         participants: list = (),
         messages: list = (),
+        admins: list = (),
         joins: dict | None = None,
         source_error: BaseException | None = None,
         participants_error: BaseException | None = None,
@@ -74,6 +75,7 @@ class OneShotClient:
     ) -> None:
         self.participants = list(participants)
         self.messages = list(messages)
+        self.admins = list(admins)
         self.joins = dict(joins or {})
         self.source_error = source_error
         self.participants_error = participants_error
@@ -91,11 +93,15 @@ class OneShotClient:
             raise answer
         return SimpleNamespace(updates=[])
 
-    def iter_participants(self, chat_id, limit: int = 0):
+    def iter_participants(self, chat_id, limit: int = 0, filter=None):
+        # Запрос со списком админов (парсер шлёт его первым, когда включён
+        # фильтр «не брать админов») отдаёт только админов — как живой чат.
+        pool = self.admins if filter is not None else self.participants
+
         async def walk():
             if self.participants_error is not None:
                 raise self.participants_error
-            for user in self.participants[: limit or None]:
+            for user in pool[: limit or None]:
                 yield user
 
         return walk()
@@ -110,12 +116,26 @@ class OneShotClient:
         return walk()
 
 
-def person(user_id: int, name: str = "Кто-то") -> SimpleNamespace:
-    """Участник чата — ровно те поля, которые читает парсер."""
-    return SimpleNamespace(
-        id=user_id, first_name=name, last_name="", username=None, phone=None,
-        deleted=False, bot=False,
-    )
+def person(
+    user_id: int,
+    name: str = "Кто-то",
+    username: str | None = None,
+    **extra,
+) -> SimpleNamespace:
+    """Участник чата — ровно те поля, которые читает парсер.
+
+    Юзернейм есть у всех по умолчанию: фильтр «только с юзернеймом» включён
+    из коробки, и безымянный мок означал бы «участник, которого парсер не
+    возьмёт». Остальное (premium, photo, status) докладывается через extra.
+    """
+    fields = {
+        "id": user_id, "first_name": name, "last_name": "",
+        "username": f"user{user_id}" if username is None else username,
+        "phone": None, "deleted": False, "bot": False,
+        "premium": False, "photo": None, "status": None,
+    }
+    fields.update(extra)
+    return SimpleNamespace(**fields)
 
 
 async def make_oneshot(

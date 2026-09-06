@@ -97,7 +97,16 @@ const FIELD_SPEC = {
     note: 'через запятую; пусто — ловим всё подряд',
   },
   reaction: { label: 'Реакция', placeholder: '👍', note: 'любой эмодзи' },
-  limit: { label: 'Сколько участников', control: 'number', placeholder: '200', note: 'не больше 10 000' },
+  limit: { label: 'Сколько сохранить', control: 'number', placeholder: '200', note: 'не больше 10 000' },
+  scan: { label: 'Сколько просмотреть', control: 'number', placeholder: '1000', note: 'фильтры отсеивают — смотреть надо больше' },
+  parser_mode: { label: 'Кого собираем', control: 'parser_mode' },
+  require_username: { label: 'Только с юзернеймом', control: 'check', checked: true },
+  exclude_admins: { label: 'Не брать админов чата', control: 'check', checked: true },
+  only_premium: { label: 'Только с Premium', control: 'check' },
+  only_with_photo: { label: 'Только с аватаркой', control: 'check' },
+  active_only: { label: 'Только живых (заходили в последние 3 суток)', control: 'check' },
+  online_within_hours: { label: 'Был в сети не раньше, часов назад', control: 'number', placeholder: '0', note: '0 — не важно' },
+  api_delay: { label: 'Пауза между запросами (сек)', control: 'number', placeholder: '0', note: 'для больших чатов — 1–2 секунды' },
   mode: { label: 'Режим', control: 'mode' },
   message: {
     label: 'Сообщение',
@@ -386,7 +395,10 @@ const DEMO_STATE = {
         error_at: demoAgo(60 * 44),
         failing: false,
       },
-      edit: { account_id: 1, names: {}, source: 'Конкуренты', limit: 1000 },
+      edit: { account_id: 1, names: {}, source: 'Конкуренты', parser_mode: 'participants',
+        scan: 1500, limit: 1000, require_username: true, exclude_admins: true,
+        only_premium: false, only_with_photo: false, active_only: false,
+        online_within_hours: 0, api_delay: 0 },
       created_at: '2026-08-25T11:00:00' },
     // Рассылка своих сообщений: единственная задача, которая берёт тексты из
     // библиотеки. Без неё в демо не видно ни счёта сообщений на карточке, ни
@@ -488,10 +500,12 @@ const DEMO_COMMANDS = [
     hint: 'Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу. Свой текст здесь не нужен: уходит то, что вышло в источнике.',
     tags: ['чужие посты', 'все чаты разом', 'по факту поста'] },
   { id: 'parser', group: 'audience', kind: 'parser', emoji: '🕵️', title: 'Парсер аудитории', status: 'ready',
-    needs: ['account', 'source'], optional: ['limit'],
+    needs: ['account', 'source'],
+    optional: ['parser_mode', 'scan', 'limit', 'require_username', 'exclude_admins',
+      'only_premium', 'only_with_photo', 'active_only', 'online_within_hours', 'api_delay'],
     description: 'Собирает участников чужого чата в список по вашей команде.',
-    hint: 'Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Запускается сразу, результат — кнопкой «Результаты».',
-    tags: ['список участников', 'запуск вручную'] },
+    hint: 'Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Режим «участники» листает состав чата, «история» — авторов последних сообщений. Запускается сразу, результат — кнопкой «Результаты».',
+    tags: ['список участников', 'фильтры и режимы', 'запуск вручную'] },
   { id: 'autosubscribe', group: 'audience', kind: 'autosubscribe', emoji: '🤝', title: 'Автоподписка', status: 'ready',
     needs: ['account', 'targets'], optional: ['source'],
     description: 'Вступает в каналы из списка и подхватывает ссылки из источника.',
@@ -999,7 +1013,18 @@ function demoTaskEdit(body, command, chats, libraryIds) {
   }
   if (body.target_user) edit.target_user = String(body.target_user);
   if (kind === 'forward') edit.mode = body.mode || 'copy';
-  else if (kind === 'parser') edit.limit = Number(body.limit) || 200;
+  else if (kind === 'parser') {
+    edit.parser_mode = body.parser_mode === 'history' ? 'history' : 'participants';
+    edit.scan = Number(body.scan) || 1000;
+    edit.limit = Number(body.limit) || 200;
+    edit.require_username = body.require_username !== undefined ? Boolean(body.require_username) : true;
+    edit.exclude_admins = body.exclude_admins !== undefined ? Boolean(body.exclude_admins) : true;
+    edit.only_premium = Boolean(body.only_premium);
+    edit.only_with_photo = Boolean(body.only_with_photo);
+    edit.active_only = Boolean(body.active_only);
+    edit.online_within_hours = Number(body.online_within_hours) || 0;
+    edit.api_delay = Number(body.api_delay) || 0;
+  }
   else if (kind === 'baiting') edit.reaction = body.reaction || '👍';
   else if (['checks', 'dialogs', 'mute'].includes(kind)) {
     edit.keywords = (body.keywords || []).join(', ');
@@ -1175,7 +1200,7 @@ function demoApi(path, options = {}) {
       }
       if (!task.enabled || task.archived) demoFail(409, 'Задача не активна');
       const run = task.kind === 'parser'
-        ? { ok: true, collected: 640, limit: 200 }
+        ? { ok: true, collected: 640, scanned: 812, filtered: 96, limit: 200 }
         : {
             ok: true,
             joined: 3,
@@ -1253,7 +1278,7 @@ function demoApi(path, options = {}) {
     demoTaskFill(task, body, command);
     DEMO_STATE.tasks.push(task);
     const run = kind === 'parser'
-      ? { ok: true, collected: 128, limit: Number(body.limit) || 200 }
+      ? { ok: true, collected: 128, scanned: 160, filtered: 20, limit: Number(body.limit) || 200 }
       : kind === 'autosubscribe'
         ? { ok: true, joined: 2, already: 0, total: (body.targets || []).length, problems: [] }
         : null;
@@ -2319,7 +2344,10 @@ function runMessage(run) {
   }
   if (run.collected != null) {
     const cap = run.capped ? ' · хранилище заполнено (10 000)' : '';
-    return `Собрано участников: ${run.collected}${cap}`;
+    const stat = run.scanned
+      ? ` · просмотрено ${run.scanned}${run.filtered ? `, фильтрами отсеяно ${run.filtered}` : ''}`
+      : '';
+    return `Собрано участников: ${run.collected}${stat}${cap}`;
   }
   if (run.joined != null) {
     const parts = [`Вступили в чаты: ${run.joined} из ${run.total}`];
@@ -3306,6 +3334,15 @@ function fieldHtml(key) {
         <button type="button" class="seg" data-send-mode="queue">По очереди</button>
       </div></div>`;
   }
+  if (spec.control === 'parser_mode') {
+    // Парсер: состав чата — это все, включая мёртвые души; авторы сообщений —
+    // только те, кто пишет, то есть живая аудитория.
+    return `<div class="field"><span>${spec.label}</span>
+      <div class="segmented segmented--sm" id="taskParserMode">
+        <button type="button" class="seg is-active" data-parser-mode="participants">Участники</button>
+        <button type="button" class="seg" data-parser-mode="history">Авторы сообщений</button>
+      </div></div>`;
+  }
   if (spec.control === 'textarea') {
     // Рассылка и постинг берут тексты из библиотеки, поэтому у их поля есть
     // кнопка выбора: перепечатывать сохранённое не нужно, а правка записи
@@ -3330,8 +3367,10 @@ function fieldHtml(key) {
     </label>`;
   }
   if (spec.control === 'check') {
+    // checked — галочка по умолчанию (те, что включены из коробки, — с ней):
+    // новая форма показывает то же, что сервер подставит сам.
     return `<label class="field field--check">
-      <input type="checkbox" id="task_${key}">
+      <input type="checkbox" id="task_${key}"${spec.checked ? ' checked' : ''}>
       <span>${spec.label}</span>
       ${spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : ''}
     </label>`;
@@ -3372,6 +3411,7 @@ function fieldValue(key) {
   }
   if (spec.control === 'mode') return state.mode;
   if (spec.control === 'send_mode') return state.sendMode || 'schedule';
+  if (spec.control === 'parser_mode') return state.parserMode || 'participants';
   const node = $(`task_${key}`);
   if (spec.control === 'check') return node ? node.checked : false;
   return node && node.value ? String(node.value).trim() : '';
@@ -3503,6 +3543,7 @@ function openTaskSheet(command, prefill, task) {
   state.editTask = task && task.edit ? task : null;
   state.mode = 'copy';
   state.sendMode = 'schedule';
+  state.parserMode = 'participants';
   // Выбор из библиотеки живёт ровно одну форму: чужой выбор в новой задаче
   // молча отправил бы не те сообщения.
   state.libraryPick = [];
@@ -3599,12 +3640,15 @@ function applyTaskPrefill(prefill) {
   setValue('target_user', prefill.target_user);
   // Настройки задачи — одним проходом: ключ формы и ключ задачи совпадают, а
   // лишние для этой команды поля просто не находятся в разметке.
-  ['keywords', 'reaction', 'limit', 'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats']
+  ['keywords', 'reaction', 'limit', 'scan', 'online_within_hours', 'api_delay',
+    'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats']
     .forEach((key) => setValue(key, prefill[key]));
-  ['typing', 'random_pick', 'link_preview'].forEach((key) => {
-    const node = $(`task_${key}`);
-    if (node) node.checked = Boolean(prefill[key]);
-  });
+  ['typing', 'random_pick', 'link_preview',
+    'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only']
+    .forEach((key) => {
+      const node = $(`task_${key}`);
+      if (node) node.checked = Boolean(prefill[key]);
+    });
   if (prefill.mode === 'copy' || prefill.mode === 'forward') {
     state.mode = prefill.mode;
     document.querySelectorAll('#taskMode .seg').forEach((seg) => {
@@ -3615,6 +3659,12 @@ function applyTaskPrefill(prefill) {
     state.sendMode = prefill.send_mode;
     document.querySelectorAll('#taskSendMode .seg').forEach((seg) => {
       seg.classList.toggle('is-active', seg.dataset.sendMode === prefill.send_mode);
+    });
+  }
+  if (prefill.parser_mode === 'participants' || prefill.parser_mode === 'history') {
+    state.parserMode = prefill.parser_mode;
+    document.querySelectorAll('#taskParserMode .seg').forEach((seg) => {
+      seg.classList.toggle('is-active', seg.dataset.parserMode === prefill.parser_mode);
     });
   }
   applySendModeVisibility();
@@ -3675,6 +3725,15 @@ function bindSheetFields() {
         item.classList.toggle('is-active', item === seg);
       });
       applySendModeVisibility();
+    });
+  });
+  document.querySelectorAll('#taskParserMode .seg').forEach((seg) => {
+    seg.addEventListener('click', () => {
+      buzz('light');
+      state.parserMode = seg.dataset.parserMode;
+      document.querySelectorAll('#taskParserMode .seg').forEach((item) => {
+        item.classList.toggle('is-active', item === seg);
+      });
     });
   });
 }
@@ -4076,6 +4135,7 @@ function collectTaskPayload() {
   text('reaction', values.reaction);
   text('mode', values.mode);
   text('send_mode', values.send_mode);
+  text('parser_mode', values.parser_mode);
   text('message', values.message);
   text('start', values.start);
   text('end', values.end);
@@ -4090,6 +4150,9 @@ function collectTaskPayload() {
     body.targets = splitList(values.targets);
   }
   number('limit', values.limit);
+  number('scan', values.scan);
+  number('online_within_hours', values.online_within_hours);
+  number('api_delay', values.api_delay);
   number('interval', values.interval);
   number('gap', values.gap);
   number('cycle', values.cycle);
@@ -4097,6 +4160,11 @@ function collectTaskPayload() {
   flag('typing', values.typing);
   flag('random_pick', values.random_pick);
   flag('link_preview', values.link_preview);
+  flag('require_username', values.require_username);
+  flag('exclude_admins', values.exclude_admins);
+  flag('only_premium', values.only_premium);
+  flag('only_with_photo', values.only_with_photo);
+  flag('active_only', values.active_only);
   // Явный выбор из библиотеки важнее набранного текста — так же считает сервер.
   if (state.libraryPick.length) body.library_ids = state.libraryPick;
   else if (editing && OWN_TEXT_KINDS.includes(command.kind)) body.library_ids = [];

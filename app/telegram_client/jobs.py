@@ -20,11 +20,13 @@ import random
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Callable, Awaitable, Sequence
 
 from loguru import logger
 from telethon.errors import FloodWaitError, RPCError
+from telethon.tl.types import ChannelParticipantsAdmins
 
 from app.db import repo
 from app.db.database import SessionLocal
@@ -652,36 +654,163 @@ async def _known_user_ids(rule: RuleSnapshot) -> set[int]:
     return known
 
 
+def _user_last_seen(user: Any) -> datetime | None:
+    """Когда пользователь был в сети — по его статусу, в UTC.
+
+    Класс статуса читаем по имени, а не импортом типов Telethon: так тесты
+    обходятся SimpleNamespace, а не конструкторами реальных статусов.
+    «Недавно» Telegram показывает вместо точного времени — считаем его двумя
+    сутками назад: для фильтра «заходил не раньше N часов» это честная оценка.
+    """
+    status = getattr(user, "status", None)
+    name = type(status).__name__ if status is not None else ""
+    now = datetime.now(timezone.utc)
+    if name == "UserStatusOnline":
+        return now
+    if name == "UserStatusOffline":
+        seen = getattr(status, "was_online", None)
+        if isinstance(seen, datetime):
+            return seen if seen.tzinfo else seen.replace(tzinfo=timezone.utc)
+        return None
+    if name == "UserStatusRecently":
+        return now - timedelta(hours=48)
+    if name == "UserStatusLastWeek":
+        return now - timedelta(days=7)
+    if name == "UserStatusLastMonth":
+        return now - timedelta(days=30)
+    return None
+
+
+def _user_passes_filters(user: Any, conf: Any, admin_ids: set[int]) -> bool:
+    """Участник проходит фильтры парсера (удалённые и боты уже отсеяны)."""
+    user_id = int(getattr(user, "id", 0) or 0)
+    if not user_id:
+        return False
+    if getattr(conf, "require_username", True) and not getattr(user, "username", None):
+        return False
+    if getattr(conf, "exclude_admins", True) and user_id in admin_ids:
+        return False
+    if getattr(conf, "only_premium", False) and not getattr(user, "premium", False):
+        return False
+    if getattr(conf, "only_with_photo", False) and getattr(user, "photo", None) is None:
+        return False
+    within = int(getattr(conf, "online_within_hours", 0) or 0)
+    if getattr(conf, "active_only", False) and not within:
+        within = 72  # «живой» — заходил в последние трое суток
+    if within > 0:
+        seen = _user_last_seen(user)
+        if seen is None or datetime.now(timezone.utc) - seen > timedelta(hours=within):
+            return False
+    return True
+
+
+def _parser_payload(user: Any) -> dict:
+    """Участник — в запись хранилища (те же поля, что ждёт выгрузка в файл)."""
+    name = " ".join(
+        part
+        for part in (getattr(user, "first_name", None), getattr(user, "last_name", None))
+        if part
+    )
+    return {
+        "user_id": int(getattr(user, "id", 0) or 0),
+        "username": getattr(user, "username", None),
+        "name": name.strip(),
+        "phone": getattr(user, "phone", None),
+    }
+
+
 async def run_parser(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
-    """Собирает участников чата-источника в ``collected_items``."""
-    limit = int(rule.filters.limit or 0)
-    limit = max(1, min(limit if limit > 0 else 200, MAX_PARSER_LIMIT))
+    """Собирает участников чата-источника в ``collected_items``.
+
+    Два режима: ``participants`` листает состав чата, ``history`` — авторов
+    последних сообщений (живая аудитория вместо мёртвых душ). Результат
+    ограничен ``limit`` (сколько сохранить), просмотр — ``scan_limit``
+    (сколько перебрать: фильтры отсеивают, и смотреть приходится больше).
+    """
+    conf = rule.filters
+    mode = getattr(conf, "parser_mode", "participants")
+    if mode not in ("participants", "history"):
+        mode = "participants"
+    wanted = int(getattr(conf, "limit", 0) or 0)
+    result_limit = max(1, min(wanted if wanted > 0 else 200, MAX_PARSER_LIMIT))
+    scan = int(getattr(conf, "scan_limit", 0) or 0)
+    scan_limit = max(1, min(scan if scan > 0 else 1000, MAX_PARSER_LIMIT))
+    delay = max(0, min(int(getattr(conf, "api_delay", 0) or 0), 60))
     known = await _known_user_ids(rule)
 
+    # Админов узнаём одним запросом — списком, а не проверкой каждого:
+    # дёргать GetParticipant ради каждого участника значит упереться во
+    # FloodWait на первом же большом чате.
+    admin_ids: set[int] = set()
+    if getattr(conf, "exclude_admins", True):
+        try:
+            async for admin in client.iter_participants(
+                rule.source_id, filter=ChannelParticipantsAdmins
+            ):
+                admin_ids.add(int(getattr(admin, "id", 0) or 0))
+        except (RPCError, TypeError):
+            # TypeError — мок без параметра filter: админов не знаем, собираем
+            # всех. Живой Telethon filter понимает всегда.
+            admin_ids = set()
+
     payloads: list[dict] = []
+    scanned = 0
     skipped = 0
+    filtered = 0
     try:
-        async for user in client.iter_participants(rule.source_id, limit=limit):
-            if getattr(user, "deleted", False) or getattr(user, "bot", False):
-                continue
-            user_id = int(getattr(user, "id", 0) or 0)
-            if not user_id or user_id in known:
-                skipped += 1
-                continue
-            known.add(user_id)
-            name = " ".join(
-                part
-                for part in (getattr(user, "first_name", None), getattr(user, "last_name", None))
-                if part
-            )
-            payloads.append(
-                {
-                    "user_id": user_id,
-                    "username": getattr(user, "username", None),
-                    "name": name.strip(),
-                    "phone": getattr(user, "phone", None),
-                }
-            )
+        if mode == "history":
+            seen_authors: set[int] = set()
+            async for message in client.iter_messages(rule.source_id, limit=scan_limit):
+                if len(payloads) >= result_limit:
+                    break
+                sender_id = int(getattr(message, "sender_id", 0) or 0)
+                if not sender_id or sender_id in seen_authors:
+                    continue
+                seen_authors.add(sender_id)
+                # Автор — отдельным запросом: в сообщении есть только его id,
+                # а фильтрам нужны юзернейм, премиум и статус. Пауза — перед
+                # каждым таким запросом.
+                if delay:
+                    await asyncio.sleep(delay)
+                user = await client.get_entity(sender_id)
+                scanned += 1
+                if (
+                    getattr(user, "deleted", False)
+                    or getattr(user, "bot", False)
+                    or getattr(user, "broadcast", False)
+                ):
+                    filtered += 1
+                    continue
+                user_id = int(getattr(user, "id", 0) or 0)
+                if not user_id or user_id in known:
+                    skipped += 1
+                    continue
+                if not _user_passes_filters(user, conf, admin_ids):
+                    filtered += 1
+                    continue
+                known.add(user_id)
+                payloads.append(_parser_payload(user))
+        else:
+            async for user in client.iter_participants(rule.source_id, limit=scan_limit):
+                if len(payloads) >= result_limit:
+                    break
+                scanned += 1
+                if scanned % 200 == 0 and delay:
+                    # Telethon тянет участников пачками: пауза раз в пачку и
+                    # есть «пауза между запросами», а не сон после каждого.
+                    await asyncio.sleep(delay)
+                if getattr(user, "deleted", False) or getattr(user, "bot", False):
+                    filtered += 1
+                    continue
+                user_id = int(getattr(user, "id", 0) or 0)
+                if not user_id or user_id in known:
+                    skipped += 1
+                    continue
+                if not _user_passes_filters(user, conf, admin_ids):
+                    filtered += 1
+                    continue
+                known.add(user_id)
+                payloads.append(_parser_payload(user))
     except FloodWaitError as exc:
         # Собранное до отказа сохраняем: иначе 180 найденных участников
         # пропадали вместе с ошибкой и следующий запуск начинал с нуля.
@@ -692,7 +821,10 @@ async def run_parser(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
             "collected": added,
             "partial": True,
             "capped": capped,
+            "mode": mode,
+            "scanned": scanned,
             "skipped": skipped,
+            "filtered": filtered,
         }
     except RPCError as exc:
         added, capped = await _store(rule, "parser", payloads)
@@ -702,15 +834,22 @@ async def run_parser(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
             "collected": added,
             "partial": True,
             "capped": capped,
+            "mode": mode,
+            "scanned": scanned,
             "skipped": skipped,
+            "filtered": filtered,
         }
 
     added, capped = await _store(rule, "parser", payloads)
     return {
         "ok": True,
+        "mode": mode,
         "collected": added,
+        "scanned": scanned,
         "skipped": skipped,
-        "limit": limit,
+        "filtered": filtered,
+        "limit": result_limit,
+        "scan_limit": scan_limit,
         "capped": capped,
     }
 

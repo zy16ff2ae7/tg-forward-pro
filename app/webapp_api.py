@@ -729,8 +729,33 @@ async def _apply_task_settings(
         return key in payload or not partial
 
     if kind == "parser":
+        # limit — сколько сохранить, scan — сколько перебрать: фильтры
+        # отсеивают, и смотреть приходится больше, чем забираешь.
         if given("limit"):
             filters["limit"] = max(1, min(_as_int(payload.get("limit"), 200), MAX_PARSER_LIMIT))
+        if given("scan"):
+            filters["scan_limit"] = max(
+                1, min(_as_int(payload.get("scan"), 1000), MAX_PARSER_LIMIT)
+            )
+        if given("parser_mode"):
+            mode = str(payload.get("parser_mode") or "").strip().lower()
+            filters["parser_mode"] = mode if mode in ("participants", "history") else "participants"
+        for field, default in (
+            ("require_username", True),
+            ("exclude_admins", True),
+            ("only_premium", False),
+            ("only_with_photo", False),
+            ("active_only", False),
+        ):
+            if given(field):
+                value = payload.get(field)
+                filters[field] = _as_bool(value) if field in payload else default
+        if given("online_within_hours"):
+            filters["online_within_hours"] = max(
+                0, min(_as_int(payload.get("online_within_hours"), 0), 720)
+            )
+        if given("api_delay"):
+            filters["api_delay"] = max(0, min(_as_int(payload.get("api_delay"), 0), 60))
     elif kind == "autosubscribe":
         # Ссылки-приглашения храним как есть: вступать по ним будет сама задача.
         if targets is not None:
@@ -2533,7 +2558,16 @@ def _edit_view(
     if kind == "forward":
         edit["mode"] = rule.mode
     elif kind == "parser":
+        edit["parser_mode"] = conf.parser_mode or "participants"
+        edit["scan"] = int(conf.scan_limit or 1000)
         edit["limit"] = int(conf.limit or 200)
+        edit["require_username"] = bool(conf.require_username)
+        edit["exclude_admins"] = bool(conf.exclude_admins)
+        edit["only_premium"] = bool(conf.only_premium)
+        edit["only_with_photo"] = bool(conf.only_with_photo)
+        edit["active_only"] = bool(conf.active_only)
+        edit["online_within_hours"] = int(conf.online_within_hours or 0)
+        edit["api_delay"] = int(conf.api_delay or 0)
     elif kind == "baiting":
         edit["reaction"] = conf.reaction
     elif kind in ("checks", "dialogs", "mute"):
@@ -2647,9 +2681,20 @@ COMMANDS: list[dict] = [
         "description": "Собирает участников чужого чата в список по вашей команде.",
         "status": "ready",
         "needs": ["account", "source"],
-        "optional": ["limit"],
-        "hint": "Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Запускается сразу, результат — кнопкой «Результаты».",
-        "tags": ["список участников", "запуск вручную"],
+        "optional": [
+            "parser_mode",
+            "scan",
+            "limit",
+            "require_username",
+            "exclude_admins",
+            "only_premium",
+            "only_with_photo",
+            "active_only",
+            "online_within_hours",
+            "api_delay",
+        ],
+        "hint": "Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Режим «участники» листает состав чата, «история» — авторов последних сообщений: так в список попадают живые, а не мёртвые души. «Просмотреть» — сколько перебрать, «собрать» — сколько сохранить: фильтры отсеивают, и смотреть приходится больше. Запускается сразу, результат — кнопкой «Результаты».",
+        "tags": ["список участников", "фильтры и режимы", "запуск вручную"],
     },
     {
         "id": "autosubscribe",

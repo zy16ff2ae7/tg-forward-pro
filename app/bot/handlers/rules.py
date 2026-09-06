@@ -697,6 +697,12 @@ def _run_result_text(rule, result: dict) -> str:
             f"🕵️ Парсер собрал <b>{result.get('collected', 0)}</b> участников.\n\n"
             "Список — кнопкой «📄 Результаты»."
         )
+        scanned = int(result.get("scanned") or 0)
+        filtered = int(result.get("filtered") or 0)
+        if scanned:
+            text += f"\n\nПросмотрено: {scanned}."
+            if filtered:
+                text += f" Фильтры отсекли: {filtered}."
         if result.get("capped"):
             text += "\n\n📦 Хранилище заполнено (10 000) — новые находки не влезут."
         return text

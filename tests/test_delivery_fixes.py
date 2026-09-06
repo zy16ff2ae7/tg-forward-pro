@@ -87,7 +87,7 @@ class PartialClient:
     def __init__(self):
         self.calls = 0
 
-    def iter_participants(self, chat_id, limit: int = 0):
+    def iter_participants(self, chat_id, limit: int = 0, **kwargs):
         async def walk():
             yield person(501, "Первый")
             yield person(502, "Второй")
@@ -123,7 +123,17 @@ async def test_store_caps_results_per_rule(create_user, create_account, monkeypa
         for uid in (201, 202, 203):
             yield person(uid)
 
-    client = SimpleNamespace(iter_participants=lambda chat_id, limit=0: walk())
+    async def nobody():
+        if False:
+            yield None
+
+    # Запрос списка админов (с filter) — пустой: иначе все трое посчитаются
+    # админами и фильтр «не брать админов» отсечёт их раньше лимита.
+    client = SimpleNamespace(
+        iter_participants=lambda chat_id, limit=0, **kwargs: (
+            nobody() if "filter" in kwargs else walk()
+        )
+    )
     result = await jobs.run_parser(client, _snapshot(rule))
     assert result["ok"] is True
     assert result["collected"] == 1
