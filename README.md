@@ -463,7 +463,7 @@ pytest -q tests/test_filters.py
 pytest -q -k subscription      # по маске
 ```
 
-434 теста, база — временный SQLite в `TMPDIR`, наружу не ходим, токен и ключ
+806 тестов, база — временный SQLite в `TMPDIR`, наружу не ходим, токен и ключ
 шифрования поддельные: продакшен-данные не затрагиваются.
 
 | Файл | Что проверяет |
@@ -625,6 +625,30 @@ sqlite3 data/app.db "SELECT id, rule_id, source_msg_id, target_msg_id, status
 
 > ⚠️ Рекомендуется прокси для Telethon, если VDS за пределами РФ/СНГ:
 > `PROXY=socks5://user:pass@host:port` в `.env`.
+
+### Бэкапы базы
+
+В `data/app.db` — зашифрованные сессии аккаунтов и платежи. Деплой ставит
+таймер `tg-forward-backup.timer`: каждую ночь он снимает архив в `backups/`
+(`BACKUP_DIR`, `BACKUP_KEEP` в `.env`) и удаляет старые сверх глубины.
+
+```bash
+python scripts/backup.py list                       # что есть
+python scripts/backup.py backup                     # снять вручную
+systemctl stop tg-forward                           # восстановить:
+python scripts/backup.py restore backups/XXXX.tar.gz.enc --force
+systemctl restart tg-forward
+```
+
+Два правила, без которых бэкапы — самообман:
+
+1. **Задайте `BACKUP_PASSPHRASE`** — иначе архивы открытые, а внутри доступы.
+   Пароль храните ВНЕ сервера (менеджер паролей, бумага): без него шифрованный
+   архив не прочитать, а лежать он будет рядом с базой.
+2. **Храните копию `SECRET_KEY` вне сервера.** Сессии в базе зашифрованы им:
+   потеря ключа = потеря всех подключённых аккаунтов, бэкап не спасёт.
+
+Postgres этим скриптом не накрывается — для него `pg_dump` по крону.
 
 ## Настройка оплаты
 

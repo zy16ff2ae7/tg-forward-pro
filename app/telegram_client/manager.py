@@ -18,6 +18,8 @@ from telethon.errors import (
 from telethon.sessions import StringSession
 from telethon.tl import functions, types
 
+from sqlalchemy import select
+
 from app.config import settings
 from app.db.database import SessionLocal, session_scope
 from app.db.models import TelegramAccount
@@ -500,6 +502,8 @@ class ClientManager:
             self._revive_task = asyncio.create_task(self._revive_loop())
 
         await self._restore_deliveries()
+        # Постеры после рестарта ждут свой интервал, а не шлют всё разом.
+        self._calm_posters_after_restart()
 
     async def _start_pending_accounts(self) -> list[int]:
         """Поднимает тех, кто должен работать, но сейчас не на связи.
@@ -654,6 +658,25 @@ class ClientManager:
             self._refresh_task.cancel()
             self._refresh_task = None
 
+    async def forget_user(self, user_id: int) -> dict[str, int]:
+        """«Удалить мои данные»: строки — из БД, клиенты — из памяти.
+
+        Сессии лежат в строках аккаунтов и уходят вместе с ними; живые
+        подключения останавливаем явно, иначе юзебот продолжит работать
+        без хозяина. Кэш правил обновляем, чтобы задачи не висели в воздухе.
+        """
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(TelegramAccount.id).where(TelegramAccount.user_id == user_id)
+            )
+            account_ids = [int(row[0]) for row in result.all()]
+        async with session_scope() as session:
+            removed = await repo.delete_user_data(session, user_id)
+        for account_id in account_ids:
+            await self.stop_account(account_id)
+        await self.refresh_rules()
+        return removed
+
     def is_online(self, account_id: int) -> bool:
         client = self._clients.get(account_id)
         return bool(client is not None and client.is_connected())
@@ -783,12 +806,18 @@ class ClientManager:
             pair = await self._resolve_by_api(client, ref, numeric)
             if pair is None and numeric is None:
                 # Последняя попытка — часть названия: так чат ищут словами
-                # («афиша»), когда ни ника, ни id под рукой нет.
+                # («афиша»), когда ни ника, ни id под рукой нет. Подстрочный
+                # матч может выбрать не тот чат — пишем в лог, что именно
+                # выбрали, чтобы промах было видно, а не гадать по пустому чату.
                 match = next(
                     (chat for chat in dialogs if ref.lower() in str(chat["title"]).lower()), None
                 )
                 if match is not None:
                     pair = (int(match["id"]), str(match["title"]))
+                    logger.debug(
+                        "Чат «{}» нашли подстрокой: выбрали «{}» ({})",
+                        ref, match["title"], match["id"],
+                    )
             if pair is not None:
                 found[key] = pair
         return found
@@ -914,6 +943,24 @@ class ClientManager:
                 raise
             except Exception as exc:  # noqa: BLE001 — планировщик не должен падать
                 logger.exception("Постер-планировщик упал: {}", exc)
+
+    def _calm_posters_after_restart(self) -> None:
+        """После рестарта постеры ждут свой интервал, а не шлют всё разом.
+
+        Состояние планировщика живёт в памяти: после рестарта у каждого
+        постера ``last = 0`` и первый же тик отправляет круг всем сразу —
+        залп по всем чатам всех задач. Поэтому на старте помечаем круг как
+        «только что был»: каждый постер тихо ждёт свой интервал и дальше идёт
+        по обычному расписанию. Вновь созданные задачи это не затрагивает —
+        их первый круг по-прежнему уходит сразу.
+        """
+        now = time.time()
+        for rule in self._poster_rules:
+            state = self._poster_state.setdefault(
+                rule.id,
+                {"last": 0.0, "idx": 0, "step": 0, "runs": 0, "not_before": 0.0, "queue": []},
+            )
+            state["last"] = now
 
     async def _poster_tick(self) -> None:
         """Один проход: каждому постеру, которому пора, — очередное сообщение.

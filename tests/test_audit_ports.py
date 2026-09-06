@@ -333,3 +333,38 @@ def test_deploy_keeps_dev_tools_off_the_server():
             "--exclude 'scripts/' \\",
             "--exclude 'scripts/*' \\",
         ), "рабочие скрипты (import/export_session) нужны на сервере"
+
+
+# ─────────────── L8: гигиена ответов nginx ─────────────────────────
+
+
+def test_nginx_serves_security_headers():
+    """Заголовки гигиены на месте, а X-Frame-Options нет (мини-апп во фрейме)."""
+    nginx = (_repo_root() / "deploy" / "nginx.conf").read_text()
+    assert "X-Content-Type-Options" in nginx
+    assert "Referrer-Policy" in nginx
+    assert "Permissions-Policy" in nginx
+    assert "add_header X-Frame-Options" not in nginx
+
+
+# ─────────────── L11: постеры тихо переживают рестарт ─────────────────
+
+
+def test_posters_calm_after_restart():
+    """Рестарт не устраивает залп: постеры ждут свой интервал."""
+    import time
+    from types import SimpleNamespace
+
+    saved_rules = manager._poster_rules
+    saved_state = manager._poster_state
+    manager._poster_rules = [SimpleNamespace(id=11), SimpleNamespace(id=22)]
+    manager._poster_state = {}
+    try:
+        manager._calm_posters_after_restart()
+        now = time.time()
+        assert set(manager._poster_state) == {11, 22}
+        for state in manager._poster_state.values():
+            assert now - state["last"] < 5
+    finally:
+        manager._poster_rules = saved_rules
+        manager._poster_state = saved_state

@@ -1585,6 +1585,20 @@ async def delete_library_item(request: web.Request) -> web.Response:
     return _json({"ok": True})
 
 
+@routes.delete("/api/me/data")
+@require_auth
+@rate_limit(3, 3600)
+async def delete_my_data(request: web.Request) -> web.Response:
+    """«Удалить мои данные»: человек забирает всё, что оставлял в сервисе.
+
+    Лимит жёсткий (3 раза в час): кнопка необратимая, а дёргать её скриптом
+    незачем.
+    """
+    user_id = request[USER_ID_KEY]
+    removed = await manager.forget_user(user_id)
+    return _json({"ok": True, "removed": removed})
+
+
 @routes.delete(r"/api/tasks/{task_id:\d+}")
 @require_auth
 async def delete_task(request: web.Request) -> web.Response:

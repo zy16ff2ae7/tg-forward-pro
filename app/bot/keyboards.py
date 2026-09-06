@@ -427,6 +427,15 @@ def grant_months_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def forget_confirm_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🗑 Да, удалить всё", callback_data="forget:yes"),
+        InlineKeyboardButton(text="◀️ Оставить", callback_data="forget:no"),
+    )
+    return builder.as_markup()
+
+
 def broadcast_confirm_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily backup of tg-forward database
+
+[Timer]
+# Ночью, когда пересылок меньше всего. Persistent — наверстать после простоя.
+OnCalendar=*-*-* 04:17:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -79,6 +79,37 @@ async def recent_users(session: AsyncSession, limit: int = 15) -> Sequence[User]
     return result.scalars().all()
 
 
+# Что принадлежит человеку напрямую (голый user_id без внешнего ключа на users):
+# каскад от User их не забирает — чистим руками до удаления самой строки.
+USER_OWNED = (ForwardLog, CollectedItem, SavedMessage, PendingDelivery, PendingLogin)
+
+
+async def delete_user_data(session: AsyncSession, user_id: int) -> dict[str, int]:
+    """Удаляет человека и всё, что он оставил в сервисе. Возвращает счётчики.
+
+    Аккаунты (вместе с сессиями), задачи, платежи и абонемент уходят каскадом
+    от User; строки с голым user_id чистим явно. Денежный след вне сервиса
+    остаётся: звёзды — в BotFather, карта — в ЮKassa, USDT — в блокчейне.
+    """
+    removed: dict[str, int] = {}
+    for model in USER_OWNED:
+        result = await session.execute(delete(model).where(model.user_id == user_id))
+        removed[model.__tablename__] = int(result.rowcount or 0)
+    user = await session.get(User, user_id)
+    if user is None:
+        removed["users"] = 0
+        return removed
+    removed["rules"] = await count_rules(session, user_id)
+    accounts = await session.execute(
+        select(func.count()).select_from(TelegramAccount).where(TelegramAccount.user_id == user_id)
+    )
+    removed["accounts"] = int(accounts.scalar() or 0)
+    await session.delete(user)
+    await session.flush()
+    removed["users"] = 1
+    return removed
+
+
 async def count_rules_all(session: AsyncSession) -> int:
     """Все задачи сервиса — цифра для панели владельца."""
     result = await session.execute(select(func.count()).select_from(Rule))

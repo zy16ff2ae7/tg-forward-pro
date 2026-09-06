@@ -1,0 +1,18 @@
+[Unit]
+Description=Daily backup of tg-forward database
+After=network.target
+
+[Service]
+Type=oneshot
+User=tgforward
+Group=tgforward
+WorkingDirectory=/opt/tg-forward
+EnvironmentFile=/opt/tg-forward/.env
+ExecStart=/opt/tg-forward/venv/bin/python scripts/backup.py backup
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/tg-forward/data /opt/tg-forward/backups

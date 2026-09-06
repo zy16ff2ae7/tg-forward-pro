@@ -17,7 +17,7 @@ echo "==> Пользователь сервиса и каталоги на $TARG
 # Сервис работает НЕ от root (см. User= в юните): отдельный пользователь
 # без шелла, код читает, пишет только в data/ и logs/.
 ssh "$TARGET_HOST" "id -u tgforward >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d $APP_DIR tgforward"
-ssh "$TARGET_HOST" "mkdir -p $APP_DIR/{data,logs}"
+ssh "$TARGET_HOST" "mkdir -p $APP_DIR/{data,logs,backups}"
 
 echo "==> Синхронизирую файлы в $TARGET_HOST:$APP_DIR"
 
@@ -77,15 +77,17 @@ echo "==> Права: код — root, данные и секреты — tgforw
 # logs — отладочные записи с номерами телефонов.
 # .env читает systemd-юнит от имени tgforward: 600 + владелец. БД (data/*.db
 # с WAL) и логи должны быть записываемы сервисом — отдаём каталоги целиком.
-ssh "$TARGET_HOST" "chown -R tgforward:tgforward $APP_DIR/data $APP_DIR/logs \
+ssh "$TARGET_HOST" "chown -R tgforward:tgforward $APP_DIR/data $APP_DIR/logs $APP_DIR/backups \
   && chown tgforward:tgforward $APP_DIR/.env && chmod 600 $APP_DIR/.env \
-  && chmod 700 $APP_DIR/data $APP_DIR/logs \
-  && find $APP_DIR/data $APP_DIR/logs -type f -exec chmod 600 {} + 2>/dev/null || true"
+  && chmod 700 $APP_DIR/data $APP_DIR/logs $APP_DIR/backups \
+  && find $APP_DIR/data $APP_DIR/logs $APP_DIR/backups -type f -exec chmod 600 {} + 2>/dev/null || true"
 
 echo "==> Устанавливаю systemd-юнит"
 ssh "$TARGET_HOST" "cp $APP_DIR/deploy/$SERVICE_NAME.service /etc/systemd/system/ \
+  && cp $APP_DIR/deploy/$SERVICE_NAME-backup.service $APP_DIR/deploy/$SERVICE_NAME-backup.timer /etc/systemd/system/ \
   && systemctl daemon-reload \
   && systemctl enable $SERVICE_NAME \
+  && systemctl enable --now $SERVICE_NAME-backup.timer \
   && systemctl restart $SERVICE_NAME"
 
 echo "==> Готово. Статус:"

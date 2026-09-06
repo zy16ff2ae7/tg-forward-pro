@@ -256,3 +256,40 @@ async def cmd_stats(message: Message) -> None:
         for rule in top:
             lines.append(f"• {task_title(rule)} — {rule.forwarded_count or 0}")
     await message.answer("\n".join(lines), reply_markup=kb.back_to_main())
+
+
+@router.message(Command("forget"))
+async def cmd_forget(message: Message) -> None:
+    """«Удалить мои данные» — сначала предупреждение, удаление по кнопке."""
+    await message.answer(
+        "🗑 <b>Удаление данных</b>\n\n"
+        "Уберу всё, что вы оставляли в сервисе: задачи, подключённые аккаунты "
+        "(сессии сгорят), журнал, результаты парсера, библиотеку и абонемент.\n\n"
+        "Аккаунты Telegram при этом не пострадают — удалятся только их копии "
+        "в сервисе. Действие необратимое.",
+        reply_markup=kb.forget_confirm_kb(),
+    )
+
+
+@router.callback_query(F.data == "forget:no")
+async def forget_cancel(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.message is not None:
+        await smart_edit(callback.message, "Хорошо, ничего не трогаю. 🙂")
+
+
+@router.callback_query(F.data == "forget:yes")
+async def forget_confirm(callback: CallbackQuery) -> None:
+    await callback.answer()
+    assert callback.from_user is not None
+    removed = await manager.forget_user(callback.from_user.id)
+    tasks = removed.get("rules", 0)
+    accounts = removed.get("accounts", 0)
+    if callback.message is not None:
+        await smart_edit(
+            callback.message,
+            "🗑 <b>Готово, всё удалено</b>\n\n"
+            f"Задач: {tasks}, аккаунтов: {accounts}, плюс журнал, результаты "
+            "и библиотека.\n\n"
+            "Если передумаете — /start начнёт всё с чистого листа.",
+        )

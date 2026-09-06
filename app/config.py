@@ -136,6 +136,11 @@ class Settings:
     usdt_wallet: str | None = None
     trongrid_api_key: str | None = None
     usdt_min_confirmations: int = 1
+    # Бэкапы: каталог (относительный — от корня проекта), глубина, пароль
+    # шифрования. Пароль живёт ВНЕ сервера — иначе он сгорит вместе с ним.
+    backup_dir: str = "backups"
+    backup_keep: int = 7
+    backup_passphrase: str | None = None
 
     # Масштабирование пересылки (безопасные лимиты, не обход антиспама Telegram)
     delivery_workers: int = 4
@@ -566,6 +571,9 @@ def load_settings() -> Settings:
         usdt_wallet=_get("USDT_TRC20_WALLET"),
         trongrid_api_key=_get("TRONGRID_API_KEY"),
         usdt_min_confirmations=_get_int("USDT_MIN_CONFIRMATIONS", 1),
+        backup_dir=_get("BACKUP_DIR") or "backups",
+        backup_keep=max(1, _get_int("BACKUP_KEEP", 7)),
+        backup_passphrase=_get("BACKUP_PASSPHRASE") or None,
         delivery_workers=max(1, _get_int("DELIVERY_WORKERS", 4)),
         delivery_queue_maxsize=max(10, _get_int("DELIVERY_QUEUE_MAXSIZE", 2000)),
         send_global_concurrency=max(1, _get_int("SEND_GLOBAL_CONCURRENCY", 8)),
