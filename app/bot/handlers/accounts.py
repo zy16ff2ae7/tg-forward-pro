@@ -62,6 +62,14 @@ def _delivery_hint(delivery: dict | None) -> str:
     return "Код подтверждения придёт в официальном приложении Telegram."
 PASSWORD_PROMPT = "🔐 На аккаунте включён облачный пароль (2FA). Введите его:"
 
+
+async def _delete_secret(message: Message) -> None:
+    """Стирает сообщение с кодом/паролем: секретам не место в истории чата."""
+    try:
+        await message.delete()
+    except Exception:  # noqa: BLE001 — удаление best effort
+        pass
+
 SETUP_TEXT = (
     "⚙️ <b>Подключение аккаунта пока недоступно</b>\n\n"
     "Кабинет, меню, подписка и платежи уже работают. Вход личных аккаунтов по "
@@ -290,6 +298,7 @@ async def resend_code(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(LoginStates.code)
 async def process_code(message: Message, state: FSMContext) -> None:
     assert message.from_user is not None
+    await _delete_secret(message)
     wait_msg = await message.answer("⏳ Проверяю код…")
     try:
         step = await login.submit_code(message.from_user.id, message.text)
@@ -309,6 +318,7 @@ async def process_code(message: Message, state: FSMContext) -> None:
 @router.message(LoginStates.password)
 async def process_password(message: Message, state: FSMContext) -> None:
     assert message.from_user is not None
+    await _delete_secret(message)
     wait_msg = await message.answer("⏳ Проверяю пароль…")
     try:
         step = await login.submit_password(message.from_user.id, message.text or "")

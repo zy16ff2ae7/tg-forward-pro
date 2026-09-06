@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal, session_scope
 from app.db.models import Payment
@@ -175,11 +176,12 @@ async def test_check_pending_credits_once_per_transfer(payment, monkeypatch):
     }
 
     monkeypatch.setattr(crypto, "is_configured", lambda: True)
+    monkeypatch.setattr(settings, "usdt_wallet", "TOurWallet")
 
-    async def fake_matches(expected, since=None):
-        return [transfer] if crypto.to_micro(expected) == crypto.to_micro("10.017") else []
+    async def fake_fetch(session, since_ms=0):
+        return [transfer]
 
-    monkeypatch.setattr(crypto, "find_incoming_matches", fake_matches)
+    monkeypatch.setattr(crypto, "_fetch_transactions", fake_fetch)
 
     bot = FakeBot()
     assert await crypto.check_pending(bot) == 1
@@ -207,11 +209,18 @@ async def test_check_pending_skips_transfer_without_hash(payment, monkeypatch):
     """Без хеша транзакции защиты от повторного зачёта нет — лучше не зачислять."""
     payment_id, _ = payment
     monkeypatch.setattr(crypto, "is_configured", lambda: True)
+    monkeypatch.setattr(settings, "usdt_wallet", "TOurWallet")
 
-    async def fake_matches(expected, since=None):
-        return [{"transaction_id": "", "value": str(crypto.to_micro("10.017"))}]
+    async def fake_fetch(session, since_ms=0):
+        # Перевод наш (контракт и кошелёк сходятся), но без хеша.
+        return [{
+            "transaction_id": "",
+            "value": str(crypto.to_micro("10.017")),
+            "token_info": {"address": crypto.USDT_CONTRACT},
+            "to": "TOurWallet",
+        }]
 
-    monkeypatch.setattr(crypto, "find_incoming_matches", fake_matches)
+    monkeypatch.setattr(crypto, "_fetch_transactions", fake_fetch)
 
     assert await crypto.check_pending(FakeBot()) == 0
     row = await get_payment(payment_id)

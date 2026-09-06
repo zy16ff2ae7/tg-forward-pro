@@ -4,7 +4,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+# Сервис НЕ работает от root: в памяти процесса лежат сессии чужих
+# Telegram-аккаунтов, BOT_TOKEN и SECRET_KEY. Пользователя создаёт deploy.sh.
+User=tgforward
+Group=tgforward
 WorkingDirectory=/opt/tg-forward
 EnvironmentFile=/opt/tg-forward/.env
 ExecStart=/opt/tg-forward/venv/bin/python -m app.main
@@ -16,6 +19,13 @@ TimeoutStopSec=75
 StandardOutput=journal
 StandardError=journal
 LimitNOFILE=65535
+# Закалка: система только для чтения, свой /tmp, без новых привилегий.
+# Писать можно лишь в data/ (БД с WAL) и logs/ (см. ReadWritePaths).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/tg-forward/data /opt/tg-forward/logs
 
 [Install]
 WantedBy=multi-user.target

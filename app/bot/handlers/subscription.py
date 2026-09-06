@@ -25,6 +25,7 @@ from app.payments import crypto, service, yookassa
 from app.plans import (
     DEFAULT_MONTHS,
     STARS_DESCRIPTION,
+    is_valid_period,
     months_from_callback,
     periods_text,
     stars_amount,
@@ -345,6 +346,39 @@ async def pay_stars_period(callback: CallbackQuery) -> None:
 
 @router.pre_checkout_query()
 async def on_pre_checkout(query: PreCheckoutQuery) -> None:
+    """Проверяем счёт до списания: срок из каталога, сумма наша, плательщик тот.
+
+    Без этого пользователь мог бы оплатить чужую (пересланную) ссылку — деньги
+    ушли бы, а подписка включилась бы не ему.
+    """
+    payload = query.invoice_payload or ""
+    months: int | None = None
+    owner_id: int | None = None
+    try:
+        _, user_id_raw, months_raw = payload.split(":")
+        owner_id, months = int(user_id_raw), int(months_raw)
+    except ValueError:
+        months = None
+
+    if (
+        months is None
+        or not is_valid_period(months)
+        or owner_id != query.from_user.id
+        or query.currency != "XTR"
+        or query.total_amount != stars_amount(months)
+    ):
+        logger.warning(
+            "Stars pre_checkout отклонён: payload={!r} amount={} {} от {}",
+            payload,
+            query.total_amount,
+            query.currency,
+            query.from_user.id,
+        )
+        await query.answer(
+            ok=False,
+            error_message="Этот счёт выписан не вам или устарел. Создайте новый из бота.",
+        )
+        return
     await query.answer(ok=True)
 
 
@@ -358,7 +392,41 @@ async def on_stars_paid(message: Message) -> None:
     except ValueError:
         user_id, months = message.from_user.id, MONTHS
 
+    # Финальная сверка уже после списания: pre_checkout мог пройти до смены
+    # тарифа, а апдейт — приехать дважды. Молча активировать «что-то» нельзя.
+    if (
+        user_id != message.from_user.id
+        or payment.currency != "XTR"
+        or not is_valid_period(months)
+        or payment.total_amount != stars_amount(months)
+    ):
+        logger.error(
+            "Stars-платёж не сошёлся: payload={!r} amount={} {} payer={}",
+            payment.invoice_payload,
+            payment.total_amount,
+            payment.currency,
+            message.from_user.id,
+        )
+        await message.answer(
+            "⚠️ Оплата прошла, но счёт не совпал с тарифом — подписка не включилась "
+            "автоматически. Напишите администратору, разберёмся вручную.",
+            reply_markup=kb.back_to_main(),
+        )
+        return
+
     async with SessionLocal() as session:
+        # Повторная доставка того же апдейта (ретраи Telegram) не должна
+        # продлевать подписку второй раз за один платёж.
+        duplicate = await repo.get_payment_by_external_id(
+            session, "stars", payment.telegram_payment_charge_id
+        )
+        if duplicate is not None:
+            logger.warning(
+                "Stars: повторный апдейт {} — уже зачислен, пропускаем",
+                payment.telegram_payment_charge_id,
+            )
+            await session.commit()
+            return
         await repo.create_payment(
             session,
             user_id=user_id,
@@ -441,7 +509,12 @@ async def check_yookassa(callback: CallbackQuery) -> None:
     async with SessionLocal() as session:
         payments = await repo.pending_payments(session, "yookassa")
         payment = next((p for p in payments if p.id == payment_id), None)
-        if payment is None or not payment.external_id:
+        # Чужой счёт проверять нельзя: id последовательный и легко перебирается.
+        if payment is None or payment.user_id != callback.from_user.id:
+            found = False
+        else:
+            found = bool(payment.external_id)
+        if not found:
             if callback.message is not None:
                 await smart_edit(
                     callback.message,
@@ -449,6 +522,7 @@ async def check_yookassa(callback: CallbackQuery) -> None:
                     reply_markup=kb.payment_menu(callback.from_user.id),
                 )
             return
+        assert payment is not None and payment.external_id
 
         if not await yookassa.is_paid(payment.external_id):
             if callback.message is not None:

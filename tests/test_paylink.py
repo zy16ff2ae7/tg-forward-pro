@@ -575,10 +575,10 @@ async def test_fresh_invoice_survives_the_cleanup(card_payment):
 async def test_expired_usdt_invoices_free_the_limit(client, external_pay, payer, monkeypatch):
     """Иначе лимит висящих счетов запирает человека без нового счёта навсегда."""
 
-    async def no_transfers(expected_amount, since=None):
+    async def no_transfers(session, since_ms=0):
         return []
 
-    monkeypatch.setattr(crypto, "find_incoming_matches", no_transfers)
+    monkeypatch.setattr(crypto, "_fetch_transactions", no_transfers)
     for _ in range(service.MAX_PENDING_PER_METHOD):
         await client.post(
             "/api/pay/start", json={"t": paylink.make_token(TEST_USER_ID), "method": "usdt"}

@@ -524,6 +524,18 @@ class DeliveryQueue:
         return True
 
     def _spawn_delayed(self, job: _Job, delay: int) -> None:
+        # Отложенные отправки тоже ограничиваем: иначе флуд в источник с правилом
+        # delay=3600 создаст тысячи спящих задач и съест память. Граница та же,
+        # что у очереди, — всплеск сверх неё отбрасывается с записью в журнал.
+        if len(self._pending) >= self._maxsize:
+            self._counters["dropped"] += 1
+            logger.error(
+                "Отложенных отправок уже {}: сообщение по правилу #{} отброшено",
+                self._maxsize,
+                job.rule.id,
+            )
+            return
+
         async def waiter() -> None:
             await asyncio.sleep(delay)
             self._put(job)

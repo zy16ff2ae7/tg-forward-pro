@@ -204,19 +204,17 @@ async def run_job(client: Any, message: Any, rule: RuleSnapshot) -> None:
         await record_error(rule, message, f"Неизвестный тип задачи: {rule.kind}")
         return
 
-    if rule.delay_seconds > 0:
-        await asyncio.sleep(rule.delay_seconds)
-
+    # Задержку rule.delay_seconds здесь НЕ спим: очередь доставки уже отработала
+    # её в submit() до постановки в работу. Второй сон не только удваивал бы
+    # паузу, но и держал бы воркер и слот отправки всё это время.
     try:
         await handler(client, message, rule)
-    except FloodWaitError as exc:
-        wait = int(getattr(exc, "seconds", 5)) + 1
-        logger.warning("Задача #{} ({}): FloodWait {} сек — ждём", rule.id, rule.kind, wait)
-        await asyncio.sleep(wait)
-        try:
-            await handler(client, message, rule)
-        except RPCError as retry_exc:
-            await record_error(rule, message, f"FloodWait повторно: {retry_exc}")
+    except FloodWaitError:
+        # FloodWait отдаём наверх очереди: она подождёт ровно столько, сколько
+        # просит Telegram, ВНЕ слота отправки и повторит. Спать здесь — значит
+        # блокировать воркер и остальные правила (см. queue.DeliveryQueue._run).
+        # Порядок важен: FloodWaitError — подкласс RPCError, ловим его первым.
+        raise
     except RPCError as exc:
         await record_error(rule, message, f"{type(exc).__name__}: {exc}")
     except Exception as exc:  # noqa: BLE001 — одна задача не должна ронять аккаунт

@@ -9,9 +9,16 @@ if [[ ! -f .env ]]; then
   # umask до создания файла: иначе .env на секунду появится с правами 644,
   # а в нём уже будет сгенерированный SECRET_KEY.
   (umask 077 && cp .env.example .env)
-  python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" > .secret.tmp
-  SECRET="$(cat .secret.tmp)"; rm -f .secret.tmp
-  sed -i '' "s|^SECRET_KEY=.*|SECRET_KEY=$SECRET|" .env
+  # Fernet-ключ = 32 случайных байта в urlsafe-base64: генерируется
+  # стандартной библиотекой, системный cryptography для этого не нужен
+  # (на чистой машине его ещё нет — venv создаётся позже).
+  SECRET="$(python3 -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())")"
+  # sed -i различается: на macOS нужен пустой суффикс -i '', на Linux — нет.
+  if [[ "$(uname)" == "Darwin" ]]; then
+    sed -i '' "s|^SECRET_KEY=.*|SECRET_KEY=$SECRET|" .env
+  else
+    sed -i "s|^SECRET_KEY=.*|SECRET_KEY=$SECRET|" .env
+  fi
   chmod 600 .env
   echo "SECRET_KEY сгенерирован и записан в .env (права 600)"
   exit 1

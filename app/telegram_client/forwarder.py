@@ -1,6 +1,8 @@
 """Непосредственно пересылка: фильтры → отправка без метки «Переслано от»."""
 from __future__ import annotations
 
+import os
+import tempfile
 from typing import Any
 
 from loguru import logger
@@ -60,12 +62,6 @@ async def send_copy(
         logger.info("Медиа слишком большое ({} байт) — отправляем форвардом", size)
         return await client.forward_messages(target_id, message)
 
-    try:
-        payload = await client.download_media(message, file=bytes)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Не скачали медиа ({}), уходим в форвард: {}", type(exc).__name__, exc)
-        return await client.forward_messages(target_id, message)
-
     file_name = None
     document = getattr(media, "document", None)
     if document is not None:
@@ -75,14 +71,31 @@ async def send_copy(
                 file_name = name
                 break
 
-    return await client.send_file(
-        target_id,
-        payload,
-        caption=text or None,
-        file_name=file_name,
-        parse_mode=None,
-        supports_streaming=True,
-    )
+    # Качаем во временный файл, а не в память: при 8 параллельных отправках
+    # file=bytes давал бы пик в сотни мегабайт RAM под флудом.
+    fd, tmp_path = tempfile.mkstemp(prefix="tgfwd-")
+    os.close(fd)
+    try:
+        try:
+            await client.download_media(message, file=tmp_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не скачали медиа ({}), уходим в форвард: {}", type(exc).__name__, exc)
+            return await client.forward_messages(target_id, message)
+
+        # Ошибки отправки НЕ ловим: повторы — дело очереди доставки.
+        return await client.send_file(
+            target_id,
+            tmp_path,
+            caption=text or None,
+            file_name=file_name,
+            parse_mode=None,
+            supports_streaming=True,
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 async def _send_once(client: Any, rule: RuleSnapshot, message: Any, text: str) -> Any:

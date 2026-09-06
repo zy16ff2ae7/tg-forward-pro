@@ -759,6 +759,19 @@ async def create_payment(
     return payment
 
 
+async def get_payment_by_external_id(
+    session: AsyncSession, provider: str, external_id: str
+) -> Payment | None:
+    """Платёж по id на стороне провайдера. Нужен для идемпотентности:
+    повторная доставка того же события оплаты не должна продлевать дважды."""
+    result = await session.execute(
+        select(Payment).where(
+            Payment.provider == provider, Payment.external_id == external_id
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 async def payment_with_tx(session: AsyncSession, tx_id: str) -> Payment | None:
     """Платёж, уже закрытый этой транзакцией блокчейна (защита от двойного зачёта)."""
     result = await session.execute(select(Payment).where(Payment.tx_id == tx_id))

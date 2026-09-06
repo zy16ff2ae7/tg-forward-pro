@@ -49,8 +49,13 @@ def to_micro(amount: float | str) -> int:
 
 
 def unique_amount(base_amount: float, payment_id: int) -> float:
-    """Уникальная сумма к оплате: к базовой цене прибавляем номер платежа/1000."""
-    return round(base_amount + payment_id / 1000.0, 3)
+    """Уникальная сумма к оплате: к базовой цене прибавляем номер платежа/1000.
+
+    Номер берём по модулю 1000: иначе сквозной счётчик всех платежей уведёт
+    цену в бесконечность (тариф 12 USDT после ~12 тыс. платежей стал бы 24).
+    Коллизии стартовых меток разруливает reserve_memo сдвигом вверх.
+    """
+    return round(base_amount + (payment_id % 1000) / 1000.0, 3)
 
 
 async def reserve_memo(session, base_amount: float, payment_id: int) -> str:
@@ -123,6 +128,26 @@ def _is_our_usdt(tx: dict) -> bool:
     return bool(wallet) and (tx.get("to") or "") == wallet
 
 
+def _match_amount(transactions: list[dict], expected_amount: float | str) -> list[dict]:
+    """Переводы из готового списка ровно на ``expected_amount`` (свежие — первыми).
+
+    Отдельно от запроса к TronGrid, чтобы проверка пачки платежей ходила в
+    сеть один раз, а не по разу на каждый висящий счёт.
+    """
+    expected_micro = to_micro(expected_amount)
+    matches: list[dict] = []
+    for tx in transactions:
+        if not _is_our_usdt(tx):
+            continue
+        try:
+            value_micro = int(tx.get("value", 0))
+        except (TypeError, ValueError):
+            continue
+        if value_micro == expected_micro:
+            matches.append(tx)
+    return matches
+
+
 async def find_incoming_matches(
     expected_amount: float | str, since: datetime | None = None
 ) -> list[dict]:
@@ -143,18 +168,7 @@ async def find_incoming_matches(
         logger.warning("TronGrid недоступен: {}", exc)
         return []
 
-    expected_micro = to_micro(expected_amount)
-    matches: list[dict] = []
-    for tx in transactions:
-        if not _is_our_usdt(tx):
-            continue
-        try:
-            value_micro = int(tx.get("value", 0))
-        except (TypeError, ValueError):
-            continue
-        if value_micro == expected_micro:
-            matches.append(tx)
-    return matches
+    return _match_amount(transactions, expected_amount)
 
 
 async def find_incoming(
@@ -184,6 +198,20 @@ async def check_pending(bot) -> int:
     async with SessionLocal() as session:
         payments = list(await repo.pending_payments(session, "usdt"))
 
+    if not payments:
+        return 0
+
+    # Один запрос к TronGrid на всех: переводы одни и те же, а висящих счетов
+    # может быть много — иначе упрёмся в троттлинг API. Граница «с» — самая
+    # ранняя из счетов, чтобы не отрезать чужой перевод.
+    since_all = min((p.created_at for p in payments if p.created_at), default=None)
+    try:
+        async with aiohttp.ClientSession() as http:
+            transactions = await _fetch_transactions(http, _since_ms(since_all))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("TronGrid недоступен: {}", exc)
+        return 0
+
     activated = 0
     for payment in payments:
         if not payment.memo:
@@ -194,7 +222,7 @@ async def check_pending(bot) -> int:
             logger.warning("Платёж #{}: метка «{}» не похожа на сумму", payment.id, payment.memo)
             continue
 
-        matches = await find_incoming_matches(payment.memo, since=payment.created_at)
+        matches = _match_amount(transactions, payment.memo)
         candidates = [
             tx_id
             for tx_id in (str(tx.get("transaction_id") or "").strip() for tx in matches)

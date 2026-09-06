@@ -13,8 +13,13 @@ fi
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-echo "==> Синхронизирую файлы в $TARGET_HOST:$APP_DIR"
+echo "==> Пользователь сервиса и каталоги на $TARGET_HOST"
+# Сервис работает НЕ от root (см. User= в юните): отдельный пользователь
+# без шелла, код читает, пишет только в data/ и logs/.
+ssh "$TARGET_HOST" "id -u tgforward >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d $APP_DIR tgforward"
 ssh "$TARGET_HOST" "mkdir -p $APP_DIR/{data,logs}"
+
+echo "==> Синхронизирую файлы в $TARGET_HOST:$APP_DIR"
 
 # data и logs исключены целиком, а не по маске *.db. SQLite работает в режиме WAL,
 # рядом с базой лежат app.db-wal и app.db-shm: маска их не покрывала, и деплой
@@ -59,11 +64,14 @@ if [[ "$ENV_CREATED" == "yes" ]]; then
   exit 1
 fi
 
-echo "==> Закрываю права на секреты"
+echo "==> Права: код — root, данные и секреты — tgforward"
 # rsync копирует права с локальной машины, где .env мог остаться 644.
 # .env — токен бота и ключ Fernet, data — БД с зашифрованными сессиями,
 # logs — отладочные записи с номерами телефонов.
-ssh "$TARGET_HOST" "chmod 600 $APP_DIR/.env \
+# .env читает systemd-юнит от имени tgforward: 600 + владелец. БД (data/*.db
+# с WAL) и логи должны быть записываемы сервисом — отдаём каталоги целиком.
+ssh "$TARGET_HOST" "chown -R tgforward:tgforward $APP_DIR/data $APP_DIR/logs \
+  && chown tgforward:tgforward $APP_DIR/.env && chmod 600 $APP_DIR/.env \
   && chmod 700 $APP_DIR/data $APP_DIR/logs \
   && find $APP_DIR/data $APP_DIR/logs -type f -exec chmod 600 {} + 2>/dev/null || true"
 

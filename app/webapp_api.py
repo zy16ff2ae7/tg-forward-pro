@@ -105,12 +105,12 @@ def validate_init_data(init_data: str) -> dict[str, Any] | None:
 
 
 def _init_data_from_request(request: web.Request) -> str:
-    """initData приходит либо в заголовке, либо в query-параметре."""
-    return (
-        request.headers.get("X-Telegram-Init-Data")
-        or request.query.get("initData")
-        or ""
-    )
+    """initData принимаем только из заголовка X-Telegram-Init-Data.
+
+    Query-вариант (?initData=...) оседал бы в access-логах nginx, истории
+    браузера и Referer, а подпись валидна сутки — это готовый угон сессии.
+    """
+    return request.headers.get("X-Telegram-Init-Data") or ""
 
 
 def _json(data: Any, status: int = 200) -> web.Response:
@@ -864,6 +864,9 @@ async def create_task(request: web.Request) -> web.Response:
     source_id, source_title = found_source or (0, "")
     target_id, target_title = found_target or (0, "")
 
+    if kind == "forward" and source_id and source_id == target_id:
+        return _json({"error": "Источник и приёмник совпадают — пересылать некуда"}, status=400)
+
     mode = payload.get("mode") or "copy"
     if mode not in ("copy", "forward"):
         mode = "copy"
@@ -935,7 +938,7 @@ async def create_task(request: web.Request) -> web.Response:
     return await _task_json(saved, extra={"run": run_result}, status=201)
 
 
-@routes.patch("/api/tasks/{task_id}")
+@routes.patch(r"/api/tasks/{task_id:\d+}")
 @require_auth
 async def update_task(request: web.Request) -> web.Response:
     """Меняет настройки готовой задачи.
@@ -1118,7 +1121,7 @@ async def update_task(request: web.Request) -> web.Response:
     return await _task_json(saved, collected=collected)
 
 
-@routes.post("/api/tasks/{task_id}/toggle")
+@routes.post(r"/api/tasks/{task_id:\d+}/toggle")
 @require_auth
 async def toggle_task(request: web.Request) -> web.Response:
     """Ставит задачу на паузу или снимает с паузы."""
@@ -1160,7 +1163,7 @@ def _mailing_finished(rule) -> bool:
     return cycle >= repeats
 
 
-@routes.post("/api/tasks/{task_id}/mode")
+@routes.post(r"/api/tasks/{task_id:\d+}/mode")
 @require_auth
 async def switch_mode(request: web.Request) -> web.Response:
     """Переключает режим: copy (без метки) / forward (обычный форвард).
@@ -1186,7 +1189,7 @@ async def switch_mode(request: web.Request) -> web.Response:
     return await _task_json(rule)
 
 
-@routes.post("/api/tasks/{task_id}/archive")
+@routes.post(r"/api/tasks/{task_id:\d+}/archive")
 @require_auth
 async def archive_task(request: web.Request) -> web.Response:
     """Убирает задачу в архив (?undo=1 — вернуть обратно)."""
@@ -1205,7 +1208,7 @@ async def archive_task(request: web.Request) -> web.Response:
     return await _task_json(rule)
 
 
-@routes.post("/api/tasks/{task_id}/run")
+@routes.post(r"/api/tasks/{task_id:\d+}/run")
 @require_auth
 async def run_task(request: web.Request) -> web.Response:
     """Запускает разовую задачу: парсер аудитории или автоподписку."""
@@ -1230,7 +1233,7 @@ async def run_task(request: web.Request) -> web.Response:
     return _json({"run": result})
 
 
-@routes.get("/api/tasks/{task_id}/results")
+@routes.get(r"/api/tasks/{task_id:\d+}/results")
 @require_auth
 async def task_results(request: web.Request) -> web.Response:
     """Что насобирала задача: участники парсера или пойманные чеки.
@@ -1271,7 +1274,7 @@ async def task_results(request: web.Request) -> web.Response:
     )
 
 
-@routes.post("/api/tasks/{task_id}/export")
+@routes.post(r"/api/tasks/{task_id:\d+}/export")
 @require_auth
 async def export_task_results(request: web.Request) -> web.Response:
     """Присылает собранное файлом в чат с ботом.
@@ -1450,7 +1453,7 @@ async def add_library_item(request: web.Request) -> web.Response:
     return _json({"item": view}, status=201)
 
 
-@routes.patch("/api/library/{item_id}")
+@routes.patch(r"/api/library/{item_id:\d+}")
 @require_auth
 async def update_library_item(request: web.Request) -> web.Response:
     """Правит сохранённое сообщение на месте: текст и название.
@@ -1510,7 +1513,7 @@ async def update_library_item(request: web.Request) -> web.Response:
     return _json({"item": view})
 
 
-@routes.delete("/api/library/{item_id}")
+@routes.delete(r"/api/library/{item_id:\d+}")
 @require_auth
 async def delete_library_item(request: web.Request) -> web.Response:
     """Убирает сообщение из библиотеки. Задачи при этом не падают: рассылка
@@ -1530,7 +1533,7 @@ async def delete_library_item(request: web.Request) -> web.Response:
     return _json({"ok": True})
 
 
-@routes.delete("/api/tasks/{task_id}")
+@routes.delete(r"/api/tasks/{task_id:\d+}")
 @require_auth
 async def delete_task(request: web.Request) -> web.Response:
     user_id = request[USER_ID_KEY]
@@ -1710,7 +1713,7 @@ async def login_cancel(request: web.Request) -> web.Response:
     return _json({"ok": True, "dropped": dropped})
 
 
-@routes.post("/api/accounts/{account_id}/retry")
+@routes.post(r"/api/accounts/{account_id:\d+}/retry")
 @require_auth
 async def retry_account(request: web.Request) -> web.Response:
     """Ещё одна попытка поднять аккаунт: кнопка «Попробовать снова» в кабинете."""
@@ -1719,7 +1722,7 @@ async def retry_account(request: web.Request) -> web.Response:
     return _json({"ok": True, **result})
 
 
-@routes.delete("/api/accounts/{account_id}")
+@routes.delete(r"/api/accounts/{account_id:\d+}")
 @require_auth
 async def delete_account(request: web.Request) -> web.Response:
     """Отключает аккаунт: гасит клиент и удаляет сохранённую сессию."""
@@ -2107,17 +2110,24 @@ async def claim_bonus(request: web.Request) -> web.Response:
 
 _bot: Any = None
 
+# Username бота почти не меняется — не дёргаем Bot API на каждый /api/accounts.
+_bot_username_cache: str | None = None
 
 
 async def _bot_username() -> str | None:
     """Username бота — нужен для кнопки «Открыть в боте»."""
+    global _bot_username_cache
+    if _bot_username_cache:
+        return _bot_username_cache
     if _bot is None:
         return None
     try:
         me = await _bot.get_me()
-        return me.username
     except Exception:  # noqa: BLE001
         return None
+    if me.username:
+        _bot_username_cache = me.username
+    return me.username
 
 
 def _task_view(

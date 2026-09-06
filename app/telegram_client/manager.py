@@ -221,6 +221,9 @@ class ClientManager:
         self._dialogs_cache: dict[int, tuple[float, list[dict[str, Any]]]] = {}
         self._lock = asyncio.Lock()
         self._refresh_task: asyncio.Task | None = None
+        # Мьютексы разовых запусков (парсер/автоподписка): один запуск
+        # на пользователя — иначе спам кнопкой Run сажает общий API_ID на FloodWait.
+        self._oneshot_locks: dict[int, asyncio.Lock] = {}
 
     # ───────────────────────────── Вход по номеру ─────────────────────────────
 
@@ -471,6 +474,9 @@ class ClientManager:
     async def start_all(self) -> None:
         """Поднимает все активные аккаунты из БД."""
         await delivery_queue.start()
+        # Поднимаем здесь, а не только в on_startup: после admin:restart
+        # (stop_all → start_all) цикл обновления кэша иначе умирал навсегда.
+        self.start_periodic_refresh()
 
         if not settings.mtproto_ready:
             logger.warning(
@@ -926,6 +932,9 @@ class ClientManager:
         for rule in rules:
             if not rule.enabled or rule.archived:
                 continue
+            # Постер — платная фича, как и пересылка: без абонемента не шлём.
+            if not await subscription_active(rule.user_id):
+                continue
             client = self._clients.get(rule.account_id)
             if client is None or not client.is_connected():
                 continue
@@ -1263,8 +1272,15 @@ class ClientManager:
                 "error": "Аккаунт не в сети. Перезапустите его в боте и повторите запуск.",
             }
         else:
+            lock = self._oneshot_locks.setdefault(rule.user_id, asyncio.Lock())
+            if lock.locked():
+                return {
+                    "ok": False,
+                    "error": "Предыдущий запуск ещё идёт — дождитесь его завершения.",
+                }
             try:
-                result = await run_oneshot(client, snapshot)
+                async with lock:
+                    result = await run_oneshot(client, snapshot)
             except Exception as exc:  # noqa: BLE001 — результат нужен в API, а не в лог
                 logger.exception("Задача #{} не выполнилась", rule.id)
                 result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -1277,7 +1293,13 @@ class ClientManager:
         return result
 
     def start_periodic_refresh(self, interval: int = 60) -> None:
-        """Фоновое обновление кэша правил, чтобы правки из бота подхватывались сами."""
+        """Фоновое обновление кэша правил, чтобы правки из бота подхватывались сами.
+
+        Идемпотентный: повторный вызов (например, после admin:restart) второй
+        цикл не плодит, а мёртвый — поднимает.
+        """
+        if self._refresh_task is not None and not self._refresh_task.done():
+            return
 
         async def loop() -> None:
             while True:

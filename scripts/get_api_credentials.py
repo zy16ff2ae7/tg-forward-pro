@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import http.cookiejar
+import os
 import re
 import sys
 import urllib.error
@@ -118,10 +119,19 @@ def login(sess: Session) -> bool:
     return True
 
 
+def _write_dump(html: str) -> None:
+    """Дамп страницы /apps. В нём лежит api_hash — файл только для себя (600)."""
+    DUMP.write_text(html, encoding="utf-8")
+    try:
+        os.chmod(DUMP, 0o600)
+    except OSError:
+        pass
+
+
 def read_apps(sess: Session) -> tuple[str, str]:
     """Читает страницу /apps и вытаскивает уже существующие api_id / api_hash."""
     status, html = sess.call("/apps", referer="/")
-    DUMP.write_text(html, encoding="utf-8")
+    _write_dump(html)
     print(f"\n--- GET /apps: HTTP {status}, сохранено в {DUMP}")
 
     if status != 200 or "<html" not in html.lower():
@@ -184,7 +194,7 @@ def create_app(sess: Session) -> tuple[str, str]:
     m_href = re.search(r'/apps\?[^"\']*?(\d{5,9})', text)
     if m_href:
         status, html = sess.call(f"/apps?app_id={m_href.group(1)}", referer="/apps")
-        DUMP.write_text(html, encoding="utf-8")
+        _write_dump(html)
         return read_apps(sess)
 
     print("Не удалось распознать ответ — посмотрите дамп:", DUMP)

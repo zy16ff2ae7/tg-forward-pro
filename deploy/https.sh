@@ -51,6 +51,33 @@ ok()   { printf '  ✓ %s\n' "$*"; }
 warn() { printf '  ⚠ %s\n' "$*"; }
 fail() { printf '  ✗ %s\n' "$*" >&2; }
 
+# ── helpers ───────────────────────────────────────────────────────────────────
+_map_file() {
+  grep -rls "map \$ssl_preread_server_name" "$STREAM_DIR" 2>/dev/null | head -n1 \
+    || echo "$STREAM_DIR/*.conf"
+}
+
+_fix_stream_sni() {
+  # сайт: 443 -> SITE_PORT
+  local bak; bak="$(mktemp -p /root tgf_site.XXXXXX.bak)"
+  cp "$SITE" "$bak"
+  sed -i -E "s/^(\s*)listen[[:space:]]+443[[:space:]]+ssl;/\1listen ${SITE_PORT} ssl;/" "$SITE"
+  ok "сайт: listen 443 ssl -> $SITE_PORT (бэкап $bak)"
+
+  # карта SNI: строка перед default
+  local mf; mf="$(_map_file)"
+  if [[ -z "$mf" || ! -f "$mf" ]]; then
+    fail "не нашёл файл карты SNI в $STREAM_DIR — добавьте строку вручную"
+    return 1
+  fi
+  local sbak; sbak="$(mktemp -p /root tgf_stream.XXXXXX.bak)"
+  cp "$mf" "$sbak"
+  sed -i -E "s|^(\s*)default(\s+127\.0\.0\.1:[0-9]+;)?|\1${DOMAIN}  127.0.0.1:${SITE_PORT};\n\1default\2|" "$mf"
+  ok "SNI: $DOMAIN -> 127.0.0.1:$SITE_PORT (бэкап $sbak) в $mf"
+  nginx -t
+  systemctl reload nginx
+}
+
 say "HTTPS для $DOMAIN"
 
 # ── 1. Публичный IP этого сервера ────────────────────────────────────────────
@@ -151,29 +178,3 @@ echo "    WEBAPP_URL=https://$DOMAIN"
 echo "и перезапустить сервис: systemctl restart tg-forward"
 echo "после этого в логе появится «Кнопка мини-аппа установлена: https://$DOMAIN»."
 
-# ── helpers ───────────────────────────────────────────────────────────────────
-_map_file() {
-  grep -rls "map \$ssl_preread_server_name" "$STREAM_DIR" 2>/dev/null | head -n1 \
-    || echo "$STREAM_DIR/*.conf"
-}
-
-_fix_stream_sni() {
-  # сайт: 443 -> SITE_PORT
-  local bak; bak="$(mktemp -p /root tgf_site.XXXXXX.bak)"
-  cp "$SITE" "$bak"
-  sed -i -E "s/^(\s*)listen[[:space:]]+443[[:space:]]+ssl;/\1listen ${SITE_PORT} ssl;/" "$SITE"
-  ok "сайт: listen 443 ssl -> $SITE_PORT (бэкап $bak)"
-
-  # карта SNI: строка перед default
-  local mf; mf="$(_map_file)"
-  if [[ -z "$mf" || ! -f "$mf" ]]; then
-    fail "не нашёл файл карты SNI в $STREAM_DIR — добавьте строку вручную"
-    return 1
-  fi
-  local sbak; sbak="$(mktemp -p /root tgf_stream.XXXXXX.bak)"
-  cp "$mf" "$sbak"
-  sed -i -E "s|^(\s*)default(\s+127\.0\.0\.1:[0-9]+;)?|\1${DOMAIN}  127.0.0.1:${SITE_PORT};\n\1default\2|" "$mf"
-  ok "SNI: $DOMAIN -> 127.0.0.1:$SITE_PORT (бэкап $sbak) в $mf"
-  nginx -t
-  systemctl reload nginx
-}
