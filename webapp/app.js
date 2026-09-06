@@ -144,27 +144,31 @@ const KIND_ICO = {
 
 const icoClass = (kind) => KIND_ICO[kind] || 'ico--pink';
 
-/* Эмодзи по типу задачи — тем же набором, что и в каталоге команд. Держим
+/* Иконка по типу задачи — тем же набором, что и в каталоге команд. SVG из
+   спрайта в index.html: чёткие на любом экране, в отличие от эмодзи. Держим
    отдельным словарём, а не берём из /api/commands: карточки задач рисуются
    раньше, чем каталог успевает приехать. */
-const KIND_EMOJI = {
-  forward: '🔁',
-  broadcast: '📣',
-  poster: '📤',
-  mailing: '📨',
-  parser: '🕵️',
-  autosubscribe: '🤝',
-  checks: '🧾',
-  dialogs: '💬',
-  baiting: '🎣',
-  mute: '🔇',
+const KIND_ICON = {
+  forward: 'i-repeat',
+  broadcast: 'i-mega',
+  poster: 'i-upload',
+  mailing: 'i-mail',
+  parser: 'i-radar',
+  autosubscribe: 'i-user-plus',
+  checks: 'i-receipt',
+  dialogs: 'i-chat',
+  baiting: 'i-filter',
+  mute: 'i-mute',
 };
 
-const kindEmoji = (kind) => KIND_EMOJI[kind] || '⚙️';
+const kindIcon = (kind) => KIND_ICON[kind] || 'i-sliders';
+
+/* SVG-иконка из спрайта в index.html. */
+const icon = (id) => `<svg class="ic" aria-hidden="true"><use href="#${id}"/></svg>`;
 
 /* Задачи, которые шлют СВОИ сообщения: их тексты лежат в библиотеке, а не в
    настройках задачи. Тот же набор, что OWN_TEXT_KINDS на сервере. От него
-   зависит кнопка «📚 из библиотеки» в форме и сброс выбора при правке. */
+   зависит кнопка «из библиотеки» в форме и сброс выбора при правке. */
 const OWN_TEXT_KINDS = ['poster', 'mailing'];
 
 /* Плитки «быстрый старт» на Главной: восемь слотов, последний — весь каталог.
@@ -180,7 +184,7 @@ const TILES = [
   { id: 'parser', name: 'Парсер' },
   { id: 'autosubscribe', name: 'Подписка' },
   { id: 'checks', name: 'Чеки' },
-  { id: null, name: 'Все', emoji: '☰', ico: 'ico--violet', tab: 'commands' },
+  { id: null, name: 'Все', icon: 'i-dots', ico: 'ico--violet', tab: 'commands' },
 ];
 
 /* Умный поиск по командам работает локально: фраза → слова → команды.
@@ -205,19 +209,19 @@ const SMART_WORDS = {
 const SMART_FALLBACK = ['copy_channel', 'broadcast', 'poster'];
 
 const SETTINGS = [
-  { emoji: '👥', title: 'Рефералы', desc: 'Ссылка, зеркала и выплаты', start: 'referrals' },
-  { emoji: '🌐', title: 'Язык', desc: 'Русский', start: 'language' },
-  { emoji: '📖', title: 'Гайды', desc: 'Инструкции по основным сценариям', start: 'guides' },
-  { emoji: '🛟', title: 'Ресурсы', desc: 'Чат, канал и поддержка', start: 'resources' },
+  { icon: 'i-users', title: 'Рефералы', desc: 'Ссылка, зеркала и выплаты', start: 'referrals' },
+  { icon: 'i-globe', title: 'Язык', desc: 'Русский', start: 'language' },
+  { icon: 'i-book', title: 'Гайды', desc: 'Инструкции по основным сценариям', start: 'guides' },
+  { icon: 'i-life', title: 'Ресурсы', desc: 'Чат, канал и поддержка', start: 'resources' },
 ];
 
 /* Экран «Ещё»: то, что убрали из навигации ради короны в центре. Разделы
    кабинета открываются здесь же (data-tab), остальное — в боте (SETTINGS). */
 const MORE_ITEMS = [
-  { emoji: '👤', title: 'Аккаунты и подписка', desc: 'Номера, копилка дней, оплата', tab: 'accounts' },
-  { emoji: '💬', title: 'Чаты', desc: 'Выбрать чаты и запустить задачу по ним', tab: 'chats' },
-  { emoji: '📚', title: 'Библиотека сообщений', desc: 'Тексты для рассылки и постинга', tab: 'library' },
-  { emoji: '📦', title: 'Архив задач', desc: 'Завершённые и остановленные', tab: 'tasks', status: 'done' },
+  { icon: 'i-card', title: 'Аккаунты и подписка', desc: 'Номера, копилка дней, оплата', tab: 'accounts' },
+  { icon: 'i-chat', title: 'Чаты', desc: 'Выбрать чаты и запустить задачу по ним', tab: 'chats' },
+  { icon: 'i-book', title: 'Библиотека сообщений', desc: 'Тексты для рассылки и постинга', tab: 'library' },
+  { icon: 'i-box', title: 'Архив задач', desc: 'Завершённые и остановленные', tab: 'tasks', status: 'done' },
 ];
 
 /* ───────────────────────────── Утилиты ───────────────────────────────── */
@@ -1488,7 +1492,7 @@ function renderTiles() {
     if (tile.tab) return tile;
     const command = state.commands.find((item) => item.id === tile.id);
     if (!command) return null;
-    return { ...tile, emoji: command.emoji, ico: icoClass(command.kind), title: command.title };
+    return { ...tile, icon: kindIcon(command.kind), ico: icoClass(command.kind), title: command.title };
   }).filter(Boolean);
 
   holder.innerHTML = items
@@ -1496,7 +1500,7 @@ function renderTiles() {
       (tile) => `
       <button class="tile" ${tile.tab ? `data-goto="${tile.tab}"` : `data-command="${tile.id}"`}
               title="${esc(tile.title || tile.name)}">
-        <span class="tile__ico ${tile.ico}" aria-hidden="true">${tile.emoji}</span>
+        <span class="tile__ico ${tile.ico}" aria-hidden="true">${icon(tile.icon)}</span>
         <span class="tile__name">${esc(tile.name)}</span>
       </button>`
     )
@@ -1512,7 +1516,7 @@ function renderHomeTasks() {
   if (!active.length) {
     const paused = (state.tasksByStatus.paused || []).length;
     holder.innerHTML = emptyHtml(
-      '🌙',
+      'i-moon',
       'Пока ничего не работает',
       paused
         ? `${paused} задач(и) на паузе — снимите с паузы или создайте новую.`
@@ -1525,8 +1529,39 @@ function renderHomeTasks() {
 }
 
 function renderHome() {
+  renderHomeStats();
   renderTiles();
   renderHomeTasks();
+}
+
+/* Полоса цифр под героем: задачи, пересланное, дни подписки. Данные уже есть
+   в state.me — отдельного запроса не нужно. */
+function renderHomeStats() {
+  const holder = $('homeStats');
+  const me = state.me;
+  if (!holder || !me) return;
+  const stats = me.stats || {};
+  const sub = me.subscription || {};
+  const num = (value) => Number(value || 0).toLocaleString('ru-RU');
+  const cells = [
+    { icon: 'i-layers', value: num(stats.rules), label: 'задач' },
+    { icon: 'i-send', value: num(stats.forwarded), label: 'переслано' },
+  ];
+  if (sub.active) {
+    cells.push({ icon: 'i-star', value: `${num(sub.days_left)} дн.`, label: 'подписка' });
+  } else {
+    cells.push({ icon: 'i-lock', value: '—', label: 'нет подписки' });
+  }
+  holder.innerHTML = cells
+    .map(
+      (cell) => `
+      <div class="stat">
+        ${icon(cell.icon)}
+        <div class="stat__value">${esc(String(cell.value))}</div>
+        <div class="stat__label">${esc(cell.label)}</div>
+      </div>`
+    )
+    .join('');
 }
 
 /* ────────────────── Умный поиск по командам (локальный) ───────────────── */
@@ -1592,7 +1627,7 @@ function renderPromptHits() {
   if (!state.promptHits.length) {
     holder.innerHTML = `
       <button class="prompt-hit" data-goto="commands">
-        <span class="tile__ico ico--violet" aria-hidden="true">🔍</span>
+        <span class="tile__ico ico--violet" aria-hidden="true">${icon('i-search')}</span>
         <span>
           <span class="prompt-hit__title">Не подобрала команду</span><br>
           <span class="prompt-hit__why">Откройте каталог — там все девять</span>
@@ -1604,7 +1639,7 @@ function renderPromptHits() {
     .map(
       ({ command, why }) => `
       <button class="prompt-hit" data-command="${command.id}">
-        <span class="tile__ico ${icoClass(command.kind)}" aria-hidden="true">${command.emoji}</span>
+        <span class="tile__ico ${icoClass(command.kind)}" aria-hidden="true">${icon(kindIcon(command.kind))}</span>
         <span>
           <span class="prompt-hit__title">${esc(command.title)}</span><br>
           <span class="prompt-hit__why">${esc(why)}</span>
@@ -1721,7 +1756,7 @@ function commandCardHtml(command) {
     .join('');
   return `
     <button class="${tag}" data-command="${command.id}">
-      <div class="cmd__ico ${icoClass(command.kind)}" aria-hidden="true">${command.emoji}</div>
+      <div class="cmd__ico ${icoClass(command.kind)}" aria-hidden="true">${icon(kindIcon(command.kind))}</div>
       <div class="cmd__main">
         <div class="cmd__title">${esc(command.title)}</div>
         <div class="cmd__desc">${esc(command.description)}</div>
@@ -1774,7 +1809,7 @@ function renderCommands() {
 
   if (!list.length) {
     $('commandList').innerHTML = emptyHtml(
-      '🔍',
+      'i-search',
       'Ничего не найдено',
       state.commandGroup ? 'Попробуйте другой запрос или снимите фильтр' : 'Попробуйте другой запрос'
     );
@@ -1982,7 +2017,7 @@ function taskAlertHtml(task) {
   if (!task.archived && task.enabled && subscriptionStopped()) {
     return `
       <div class="task__alert">
-        <span>⛔ Абонемент закончился — задача стоит. Продлите на вкладке «Оплата»,
+        <span>${icon('i-lock')} Абонемент закончился — задача стоит. Продлите на вкладке «Оплата»,
         и она пойдёт сама: настройки на месте.</span>
       </div>`;
   }
@@ -1991,7 +2026,7 @@ function taskAlertHtml(task) {
   const when = timeAgo(health.error_at);
   return `
     <div class="task__alert${health.failing ? '' : ' task__alert--past'}">
-      <span>⚠️ ${esc(health.error)}</span>
+      <span>${icon('i-warn')} ${esc(health.error)}</span>
       ${when ? `<i>${esc(when)}</i>` : ''}
     </div>`;
 }
@@ -2063,11 +2098,11 @@ function taskProgressHtml(task) {
    на «Главной» — двух разных реализаций тут быть не должно. */
 function taskPauseButton(task) {
   if (task.oneshot) {
-    return `<button class="btn" data-action="run" data-id="${task.id}">▶️ Запустить</button>`;
+    return `<button class="btn" data-action="run" data-id="${task.id}">${icon('i-play')} Запустить</button>`;
   }
   return (
     `<button class="btn" data-action="toggle" data-id="${task.id}">` +
-    (task.enabled ? '⏸ Пауза' : '▶️ Запустить') +
+    (task.enabled ? `${icon('i-pause')} Пауза` : `${icon('i-play')} Запустить`) +
     '</button>'
   );
 }
@@ -2078,32 +2113,32 @@ function taskActionsHtml(task) {
   const kind = task.kind || 'forward';
   const acts = [];
   if (task.archived) {
-    acts.push(`<button class="btn" data-action="unarchive" data-id="${task.id}">↩︎ Из архива</button>`);
+    acts.push(`<button class="btn" data-action="unarchive" data-id="${task.id}">${icon('i-refresh')} Из архива</button>`);
   } else {
     acts.push(taskPauseButton(task));
     // «Настроить» — вместо «удалить и создать заново»: у пересозданной задачи
     // обнулялись счётчики, а у рассылки терялось место в круге.
     if (task.edit) {
-      acts.push(`<button class="btn" data-action="edit" data-id="${task.id}">⚙️ Настроить</button>`);
+      acts.push(`<button class="btn" data-action="edit" data-id="${task.id}">${icon('i-sliders')} Настроить</button>`);
     }
     if (kind === 'forward') {
-      acts.push(`<button class="btn" data-action="mode" data-id="${task.id}">🔁 Режим</button>`);
+      acts.push(`<button class="btn" data-action="mode" data-id="${task.id}">${icon('i-repeat')} Режим</button>`);
     }
     // Кнопка результатов — только у тех, кто действительно складывает находки
     // (парсер и ловец чеков). У автоподписки она тоже была, потому что задача
     // разовая, и всегда отвечала «Пока пусто»: вступление в чаты видно в
     // журнале карточки, а собранного у неё нет.
     if (RESULTS_TITLES[kind]) {
-      acts.push(`<button class="btn" data-action="results" data-id="${task.id}">📄 Результаты</button>`);
+      acts.push(`<button class="btn" data-action="results" data-id="${task.id}">${icon('i-file')} Результаты</button>`);
     }
-    acts.push(`<button class="btn" data-action="archive" data-id="${task.id}">📦 Архив</button>`);
+    acts.push(`<button class="btn" data-action="archive" data-id="${task.id}">${icon('i-box')} Архив</button>`);
   }
   // Корзина стоит отдельным столбцом, а не в общем ряду: иначе при переносе
   // она уезжала на пустую строку одна, и карточка выглядела оборванной.
   return `
     <div class="task__actions">
       <div class="task__acts">${acts.join('')}</div>
-      <button class="btn btn--danger" data-action="delete" data-id="${task.id}">🗑</button>
+      <button class="btn btn--danger" data-action="delete" data-id="${task.id}" aria-label="Удалить">${icon('i-trash')}</button>
     </div>`;
 }
 
@@ -2123,7 +2158,7 @@ function taskCardHtml(task, options) {
   return `
     <div class="task${task.archived ? ' task--archived' : ''}">
       <div class="task__top">
-        <span class="task__ico ${icoClass(kind)}" aria-hidden="true">${task.emoji || kindEmoji(kind)}</span>
+        <span class="task__ico ${icoClass(kind)}" aria-hidden="true">${icon(kindIcon(kind))}</span>
         <div class="task__head">
           <div class="task__title">${esc(task.title)}</div>
           <div class="task__meta">${esc(taskMetaLines(task).join(' · '))}</div>
@@ -2163,11 +2198,11 @@ function renderTasks(tasks) {
   // дружелюбное пустое состояние.
   if (!tasks || !tasks.length) {
     let texts = {
-      active: ['✅', 'Нет задач', 'Здесь появятся активные рассылки и триггеры. Запустите первую — она будет работать, даже когда вы офлайн.'],
-      paused: ['⏸', 'Нет задач на паузе', 'Остановленные задачи можно вернуть в работу одним нажатием.'],
-      done: ['📦', 'Завершённых задач нет', 'Архив появится здесь после первых запусков.'],
+      active: ['i-layers', 'Нет задач', 'Здесь появятся активные рассылки и триггеры. Запустите первую — она будет работать, даже когда вы офлайн.'],
+      paused: ['i-pause', 'Нет задач на паузе', 'Остановленные задачи можно вернуть в работу одним нажатием.'],
+      done: ['i-box', 'Завершённых задач нет', 'Архив появится здесь после первых запусков.'],
     }[state.taskStatus];
-    if (query) texts = ['🔍', 'Ничего не найдено', 'Попробуйте другое слово или сбросьте поиск.'];
+    if (query) texts = ['i-search', 'Ничего не найдено', 'Попробуйте другое слово или сбросьте поиск.'];
     // Кот дремлет там, где всё спит: активные пусты и поиск не при чём.
     const pic = !query && state.taskStatus === 'active' ? 'assets/cat.jpg' : null;
     holder.innerHTML = emptyHtml(texts[0], texts[1], texts[2], pic);
@@ -2249,9 +2284,14 @@ function runMessage(run) {
   if (run.already) done.push(`уже были в ${run.already}`);
   if (!run.ok) {
     const reason = run.error || 'Запуск не удался';
-    return done.length ? `${reason} — ${done.join(', ')}` : reason;
+    // Частичный сбор парсера не потерян — говорим, сколько уцелело.
+    const kept = run.collected ? `Собрано и сохранено: ${run.collected}. ` : '';
+    return done.length ? `${reason} — ${done.join(', ')}` : kept + reason;
   }
-  if (run.collected != null) return `Собрано участников: ${run.collected}`;
+  if (run.collected != null) {
+    const cap = run.capped ? ' · хранилище заполнено (10 000)' : '';
+    return `Собрано участников: ${run.collected}${cap}`;
+  }
   if (run.joined != null) {
     const parts = [`Вступили в чаты: ${run.joined} из ${run.total}`];
     if (run.already) parts.push(`уже были в ${run.already}`);
@@ -2309,7 +2349,7 @@ async function openResults(id) {
     $('resultsTitle').textContent = RESULTS_TITLES[data.kind] || 'Результаты';
     if (!data.items.length) {
       body.innerHTML = emptyHtml(
-        '📭',
+        'i-inbox',
         'Пока пусто',
         'Задача ещё ничего не насобирала. Запустите её и вернитесь сюда.'
       );
@@ -2442,9 +2482,9 @@ function updateChatBar() {
    по-разному (в канал нужно право публиковать, из группы можно собрать людей),
    и по одному эмодзи это не читается. */
 function chatKind(chat) {
-  if (chat.is_channel) return { emoji: '📢', label: 'канал' };
-  if (chat.is_group) return { emoji: '👥', label: 'группа' };
-  return { emoji: '💬', label: 'диалог' };
+  if (chat.is_channel) return { icon: 'i-mega', label: 'канал' };
+  if (chat.is_group) return { icon: 'i-users', label: 'группа' };
+  return { icon: 'i-user', label: 'диалог' };
 }
 
 async function loadChats() {
@@ -2452,13 +2492,13 @@ async function loadChats() {
   const account = state.accounts[0];
 
   if (!state.features.account_login_enabled) {
-    holder.innerHTML = emptyHtml('⚙️', 'Нужен MTProto-вход', 'Список чатов появится после заполнения API_ID/API_HASH и подключения аккаунта по телефону.');
+    holder.innerHTML = emptyHtml('i-sliders', 'Нужен MTProto-вход', 'Список чатов появится после заполнения API_ID/API_HASH и подключения аккаунта по телефону.');
     updateChatBar();
     return;
   }
 
   if (!account) {
-    holder.innerHTML = emptyHtml('👤', 'Нет аккаунта', 'Подключите аккаунт во вкладке «Аккаунты».');
+    holder.innerHTML = emptyHtml('i-user', 'Нет аккаунта', 'Подключите аккаунт во вкладке «Аккаунты».');
     updateChatBar();
     return;
   }
@@ -2471,12 +2511,12 @@ async function loadChats() {
     state.chats = data.chats || [];
     rememberChatNames(state.chats);
     if (!data.online) {
-      holder.innerHTML = emptyHtml('📴', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте.');
+      holder.innerHTML = emptyHtml('i-off', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте.');
       updateChatBar();
       return;
     }
     if (!state.chats.length) {
-      holder.innerHTML = emptyHtml('💬', 'Ничего не найдено', 'Измените запрос или тег.');
+      holder.innerHTML = emptyHtml('i-search', 'Ничего не найдено', 'Измените запрос или тег.');
       updateChatBar();
       return;
     }
@@ -2488,7 +2528,7 @@ async function loadChats() {
       const kind = chatKind(chat);
       return `
         <button class="chat${selected ? ' is-selected' : ''}" data-chat-id="${chat.id}" type="button">
-          <div class="chat__emoji">${kind.emoji}</div>
+          <div class="chat__ico">${icon(kind.icon)}</div>
           <div class="chat__body">
             <div class="chat__title">${esc(chat.title)}</div>
             <div class="chat__sub"><code>${chat.id}</code>${chat.username ? ' · @' + esc(chat.username) : ''}</div>
@@ -2598,7 +2638,7 @@ function libraryUseLine(item) {
   const users = libraryUsers(item);
   if (!users.length) return '';
   const word = users.length === 1 ? 'задача' : 'задачи';
-  return `<div class="lib__use" title="${esc(users.join(', '))}">📨 отправляют: ${users.length} ${word}</div>`;
+  return `<div class="lib__use" title="${esc(users.join(', '))}">${icon('i-mail')} отправляют: ${users.length} ${word}</div>`;
 }
 
 function renderLibrary() {
@@ -2611,7 +2651,7 @@ function renderLibrary() {
   }
   if (!state.library.length) {
     holder.innerHTML = emptyHtml(
-      '📚',
+      'i-book',
       'Библиотека пуста',
       'Добавьте первый текст — он появится в выборе сообщений у рассылки.'
     );
@@ -2629,9 +2669,9 @@ function renderLibrary() {
       </div>
       <div class="lib__acts">
         <button class="lib__del" data-action="edit-library" data-id="${item.id}"
-                aria-label="Исправить сообщение" title="Исправить на месте">✏️</button>
+                aria-label="Исправить сообщение" title="Исправить на месте">${icon('i-edit')}</button>
         <button class="lib__del" data-action="delete-library" data-id="${item.id}"
-                aria-label="Удалить сообщение" title="Удалить из библиотеки">🗑</button>
+                aria-label="Удалить сообщение" title="Удалить из библиотеки">${icon('i-trash')}</button>
       </div>
     </div>`;
   }).join('');
@@ -2731,7 +2771,7 @@ function applyLibraryMode() {
         : 'запись меняется на месте: текст поменяется во всех задачах, где она выбрана')
       : 'пустая строка делит сообщения, простой перенос — нет';
   }
-  if (add) add.textContent = edit ? '💾 Сохранить правку' : '＋ Сохранить в библиотеку';
+  if (add) add.innerHTML = edit ? `${icon('i-check')} Сохранить правку` : `${icon('i-plus')} Сохранить в библиотеку`;
   if (cancel) cancel.hidden = !edit;
   renderLibraryDraft();
 }
@@ -2832,7 +2872,7 @@ async function loadAccounts() {
     if (addBtn) {
       addBtn.textContent = state.features.account_login_enabled
         ? '＋ Добавить аккаунт'
-        : '⚙️ Нужен MTProto-вход';
+        : 'Нужен MTProto-вход';
     }
 
     renderAccountList();
@@ -2846,7 +2886,7 @@ function renderAccountList() {
   const holder = $('accountList');
   if (!state.features.account_login_enabled) {
     holder.innerHTML = emptyHtml(
-      '⚙️',
+      'i-sliders',
       'Подключение на настройке',
       'Кабинет, меню, подписки и платежи работают. Вход аккаунтов по телефону включится после подключения MTProto-шлюза сервиса.'
     );
@@ -2856,12 +2896,12 @@ function renderAccountList() {
   const pending = state.pendingLogin;
   const pendingHtml = pending && pending.exists
     ? `<button class="card card--add card--resume" data-action="resume-login">
-         ▶️ Продолжить вход ${esc(pending.phone || '')} · ${pending.step === 'password' ? 'ждём пароль 2FA' : 'ждём код'}
+         ${icon('i-play')} Продолжить вход ${esc(pending.phone || '')} · ${pending.step === 'password' ? 'ждём пароль 2FA' : 'ждём код'}
        </button>`
     : '';
 
   if (!state.accounts.length) {
-    holder.innerHTML = pendingHtml + emptyHtml('👤', 'Аккаунтов нет', 'Добавьте первый аккаунт — он будет читать источники.');
+    holder.innerHTML = pendingHtml + emptyHtml('i-user', 'Аккаунтов нет', 'Добавьте первый аккаунт — он будет читать источники.');
     return;
   }
 
@@ -2895,10 +2935,10 @@ function accountHtml(account) {
             <div class="account__id">ID ${account.id}</div>
           </div>
           <div class="account__state ${account.online ? 'account__state--on' : 'account__state--off'}">
-            ${account.online ? '🟢 на связи' : '🔴 офлайн'}
+            ${account.online ? 'на связи' : 'офлайн'}
           </div>
           <button class="account__del" data-action="delete-account" data-id="${account.id}"
-                  aria-label="Отключить аккаунт ${esc(account.phone)}" title="Отключить аккаунт">🗑</button>
+                  aria-label="Отключить аккаунт ${esc(account.phone)}" title="Отключить аккаунт">${icon('i-trash')}</button>
         </div>
         ${trouble}
       </div>`;
@@ -3245,7 +3285,7 @@ function fieldHtml(key) {
       ${counter}
       ${spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : ''}
       ${fromLibrary ? `<div class="field__aside">
-        <button type="button" class="btn btn--pick" data-pick-library="1">📚 из библиотеки</button>
+        <button type="button" class="btn btn--pick" data-pick-library="1">${icon('i-book')} из библиотеки</button>
       </div>
       <div class="picks" id="libraryPicks"></div>` : ''}
     </label>`;
@@ -3272,7 +3312,7 @@ function fieldHtml(key) {
       <div class="field__row">
         ${input}
         <button type="button" class="btn btn--pick" data-pick="${key}"
-                data-multi="${spec.pick === 'many' ? '1' : ''}">💬 выбрать</button>
+                data-multi="${spec.pick === 'many' ? '1' : ''}">${icon('i-chat')} выбрать</button>
       </div>
       ${counter}
       ${note}
@@ -3427,9 +3467,9 @@ function openTaskSheet(command, prefill, task) {
   state.libraryPick = [];
 
   const editing = Boolean(state.editTask);
-  $('taskSheetTitle').textContent = editing
-    ? '⚙️ Настройка задачи'
-    : `${state.activeCommand.emoji || ''} ${state.activeCommand.title}`.trim();
+  $('taskSheetTitle').innerHTML = editing
+    ? `${icon('i-sliders')} Настройка задачи`
+    : `${icon(kindIcon(state.activeCommand.kind))} ${esc(state.activeCommand.title)}`;
   $('taskSheet').setAttribute('aria-label', editing ? 'Настройка задачи' : 'Новая задача');
   $('taskSheetLead').textContent = editing
     ? `«${task.title}» · ${state.activeCommand.title}. Меняется только то, что поправите: ` +
@@ -3445,7 +3485,7 @@ function openTaskSheet(command, prefill, task) {
       windowMigrationHint(task)
     : state.activeCommand.hint
       || 'Аккаунт должен быть подписан на источник и иметь право писать в приёмник.';
-  $('taskSubmit').textContent = editing ? '💾 Сохранить' : 'Запустить задачу';
+  $('taskSubmit').innerHTML = editing ? `${icon('i-check')} Сохранить` : `${icon('i-bolt')} Запустить задачу`;
   $('taskError').textContent = '';
 
   fillTaskAccounts();
@@ -3462,7 +3502,7 @@ function findTask(id) {
     .find((task) => task.id === Number(id)) || null;
 }
 
-/* «⚙️ Настроить» — открыть задачу в форме с её же значениями.
+/* «Настроить» — открыть задачу в форме с её же значениями.
    Раньше поменять интервал или текст можно было только пересозданием задачи:
    вместе с ней терялись счётчики, номер и место в круге рассылки. */
 function openTaskEdit(id) {
@@ -3551,8 +3591,8 @@ function bindSheetFields() {
 
 /* ─────────────── Выбор мышкой: чаты и сообщения для поля ─────────────── */
 
-/* Кнопка «💬 выбрать» у полей источника, приёмника и получателей и кнопка
-   «📚 из библиотеки» у поля сообщения. До этого чат в форме можно было только
+/* Кнопка «выбрать» у полей источника, приёмника и получателей и кнопка
+   «из библиотеки» у поля сообщения. До этого чат в форме можно было только
    вписать руками — @username или числовой id, — и задача падала на любой
    опечатке. Шторка одна на оба случая: список с отметками и поиск у них
    одинаковые, а два почти одинаковых экрана расходятся при первой же правке.
@@ -3670,7 +3710,7 @@ async function loadPickerChats() {
   const holder = $('pickerList');
   const account = pickerAccount();
   if (!account) {
-    holder.innerHTML = emptyHtml('👤', 'Нет аккаунта', 'Подключите аккаунт во вкладке «Аккаунты».');
+    holder.innerHTML = emptyHtml('i-user', 'Нет аккаунта', 'Подключите аккаунт во вкладке «Аккаунты».');
     return;
   }
   const query = encodeURIComponent($('pickerSearch').value || '');
@@ -3681,7 +3721,7 @@ async function loadPickerChats() {
     state.picker.chats = data.chats || [];
     rememberChatNames(state.picker.chats);
     if (!data.online) {
-      holder.innerHTML = emptyHtml('📴', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте — список чатов читает он.');
+      holder.innerHTML = emptyHtml('i-off', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте — список чатов читает он.');
       return;
     }
     renderPickerList();
@@ -3713,7 +3753,7 @@ function renderPickerList() {
   const holder = $('pickerList');
   const chats = state.picker.chats;
   if (!chats.length) {
-    holder.innerHTML = emptyHtml('💬', 'Ничего не найдено', 'Измените запрос — или впишите @username прямо в поле.');
+    holder.innerHTML = emptyHtml('i-search', 'Ничего не найдено', 'Измените запрос — или впишите @username прямо в поле.');
     return;
   }
   holder.innerHTML = chats.map((chat) => {
@@ -3722,7 +3762,7 @@ function renderPickerList() {
     const on = state.picker.chosen.includes(ref);
     return `
       <button type="button" class="chat${on ? ' is-selected' : ''}" data-pick-ref="${esc(ref)}">
-        <div class="chat__emoji">${kind.emoji}</div>
+        <div class="chat__ico">${icon(kind.icon)}</div>
         <div class="chat__body">
           <div class="chat__title">${esc(chatTitle(chat))}</div>
           <div class="chat__sub"><code>${esc(ref)}</code></div>
@@ -3748,8 +3788,8 @@ function renderPickerLibrary() {
   );
   if (!items.length) {
     holder.innerHTML = state.library.length
-      ? emptyHtml('📚', 'Ничего не найдено', 'Измените запрос.')
-      : emptyHtml('📚', 'Библиотека пуста', 'Наберите текст в поле «Сообщение» — он уйдёт в рассылку и сохранится сам.');
+      ? emptyHtml('i-book', 'Ничего не найдено', 'Измените запрос.')
+      : emptyHtml('i-book', 'Библиотека пуста', 'Наберите текст в поле «Сообщение» — он уйдёт в рассылку и сохранится сам.');
     return;
   }
   holder.innerHTML = items.map((item) => {
@@ -3870,7 +3910,7 @@ function renderLibraryPicks() {
     const item = state.library.find((row) => Number(row.id) === Number(id));
     const title = item ? (item.title || libraryPreview(item, 40)) : `сообщение #${id}`;
     return `<span class="pick"><span class="pick__t">${esc(title)}</span><button type="button" class="pick__x"
-      data-library-drop="${id}" aria-label="Убрать сообщение">✕</button></span>`;
+      data-library-drop="${id}" aria-label="Убрать сообщение">${icon('i-x')}</button></span>`;
   }).join('');
   holder.innerHTML =
     '<i class="field__note">готовые посты — уйдут вместе с текстом из поля</i>' + chips;
@@ -4031,7 +4071,7 @@ function renderPiggyBank(banked, daysLeft) {
   }
   if (freeze) {
     freeze.disabled = !daysLeft || daysLeft <= 1;
-    freeze.textContent = daysLeft > 1 ? `❄️ Заморозить ${daysLeft - 1} дн.` : '❄️ Заморозить дни';
+    freeze.textContent = daysLeft > 1 ? `Заморозить ${daysLeft - 1} дн.` : 'Заморозить дни';
   }
 }
 
@@ -4077,7 +4117,7 @@ function renderTopUpButton() {
   const button = $('topUpBtn');
   if (!button) return;
   const stars = (state.me && state.me.tariffs && state.me.tariffs.stars) || 0;
-  button.textContent = stars ? `⭐ Оплатить ${stars} звёзд` : '⭐ Оплатить звёздами';
+  button.innerHTML = stars ? `${icon('i-star')} Оплатить ${stars} звёзд` : `${icon('i-star')} Оплатить звёздами`;
 }
 
 /* ───────────────── Оплата вне Telegram: карта и крипта ───────────────── */
@@ -4096,7 +4136,7 @@ function renderWebPayButton() {
   button.hidden = !methods.length;
   if (!methods.length) return;
   const names = methods.map((method) => WEB_PAY_LABELS[method] || method).join(' или ');
-  button.textContent = `🌐 Оплатить ${names} на сайте`;
+  button.innerHTML = `${icon('i-globe')} Оплатить ${esc(names)} на сайте`;
 }
 
 async function payOnWeb(button) {
@@ -4217,7 +4257,7 @@ function settingRowHtml(item) {
     : `data-start="${item.start}"`;
   return `
     <button class="setting" ${attr}>
-      <div class="setting__emoji" aria-hidden="true">${item.emoji}</div>
+      <div class="setting__ico" aria-hidden="true">${icon(item.icon)}</div>
       <div class="setting__body">
         <div class="setting__title">${esc(item.title)}</div>
         <div class="setting__desc">${esc(item.desc)}</div>
@@ -4248,10 +4288,10 @@ function renderMore() {
 
 /* ────────────────────────────── Пустое состояние ─────────────────────── */
 
-function emptyHtml(emoji, title, text, pic = null) {
+function emptyHtml(iconId, title, text, pic = null) {
   const head = pic
     ? `<img class="empty__pic" src="${pic}" alt="" loading="lazy">`
-    : `<div class="empty__big">${emoji}</div>`;
+    : `<div class="empty__ico">${icon(iconId)}</div>`;
   return `
     <div class="empty">
       ${head}

@@ -687,12 +687,19 @@ async def run_rule_now(callback: CallbackQuery) -> None:
 def _run_result_text(rule, result: dict) -> str:
     """Разворачивает сводку запуска в понятное сообщение."""
     if not result.get("ok"):
-        return f"❌ Не получилось: {result.get('error') or 'неизвестная ошибка'}"
+        text = f"❌ Не получилось: {result.get('error') or 'неизвестная ошибка'}"
+        # Частичный сбор не потерян — собранное уже лежит в результатах.
+        if result.get("collected"):
+            text += f"\n\n💾 Успели собрать <b>{result['collected']}</b> — они сохранены."
+        return text
     if rule.kind == "parser":
-        return (
+        text = (
             f"🕵️ Парсер собрал <b>{result.get('collected', 0)}</b> участников.\n\n"
             "Список — кнопкой «📄 Результаты»."
         )
+        if result.get("capped"):
+            text += "\n\n📦 Хранилище заполнено (10 000) — новые находки не влезут."
+        return text
     return (
         f"🤝 Автоподписка: вступили в <b>{result.get('joined', 0)}</b> "
         f"из {result.get('total', 0)} каналов."
