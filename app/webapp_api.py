@@ -36,6 +36,7 @@ from app.plans import (
     stars_amount,
     usdt_amount,
 )
+from app.task_health import chat_names, error_text
 from app.telegram_client.jobs import (
     MAX_PARSER_LIMIT,
     ONE_SHOT_KINDS,
@@ -1670,9 +1671,16 @@ async def _login_body(request: web.Request) -> dict:
 @routes.post("/api/accounts/login/start")
 @require_auth
 async def login_start(request: web.Request) -> web.Response:
-    """Шаг 1: {"phone": "+79001234567"} → Telegram присылает код."""
+    """Шаг 1: {"phone": "+79001234567"} → Telegram присылает код.
+
+    {"phone": ..., "resend": true} — «код не пришёл»: повтор тем же способом,
+    каким Telegram шлёт дальше (приложение → SMS → звонок). Код из прошлого
+    сообщения после повтора мёртв.
+    """
     body = await _login_body(request)
-    step = await accounts_login.start(request[USER_ID_KEY], body.get("phone"))
+    step = await accounts_login.start(
+        request[USER_ID_KEY], body.get("phone"), resend=bool(body.get("resend"))
+    )
     return _json(step.as_dict())
 
 
@@ -2209,14 +2217,9 @@ def _task_view(
         if conf.repeats > 0 and recipients:
             total = recipients * int(conf.repeats)
     view["progress"] = {"done": done, "total": total}
-    # Названия чатов задачи: в колонках правила есть имя только первого чата,
-    # остальные — числа, поэтому имена запоминаются в настройках при создании и
-    # правке. Старые задачи их не знают — там честно останется id.
-    names = dict((rule.filters or {}).get("chat_titles") or {})
-    if rule.source_id and rule.source_title:
-        names.setdefault(str(rule.source_id), rule.source_title)
-    if rule.target_id and rule.target_title:
-        names.setdefault(str(rule.target_id), rule.target_title)
+    # Названия чатов задачи — из общего ``app.task_health``: карточка в боте
+    # называет чаты в причине сбоя теми же словами, что и кабинет.
+    names = chat_names(rule)
     # Сколько чатов у задачи — одним полем на все задачи «в несколько чатов»:
     # у пересылки счёт раньше шёл по filters и терял первый чат из target_id.
     if kind in MULTI_CHAT_KINDS:
@@ -2228,14 +2231,6 @@ def _task_view(
     view["health"] = _health_view(health, names)
     view["edit"] = _edit_view(rule, kind, conf, chats, names, texts or {})
     return view
-
-
-# id чата в тексте сбоя: «-1001234567890» человеку ничего не говорит, а название
-# у задачи уже запомнено. Пять цифр и больше — чтобы не трогать номера ошибок.
-_CHAT_ID_RE = re.compile(r"-?\d{5,}")
-# Причина сбоя на карточке: длиннее в узкий экран не влезает, а полный текст
-# остаётся в журнале.
-ERROR_TEXT_LIMIT = 160
 
 
 def _utc_iso(moment: datetime | None) -> str | None:
@@ -2254,15 +2249,11 @@ def _health_view(health: dict | None, names: dict[str, str]) -> dict:
     """Здоровье задачи для карточки: когда сработала и на чём сломалась.
 
     Ключ есть всегда, даже когда журнал пуст: кабинету не приходится угадывать,
-    «нет сбоев» это или «сервер не прислал».
+    «нет сбоев» это или «сервер не прислал». Причину сбоя причёсывает общий
+    ``app.task_health``: теми же словами её показывает карточка задачи в боте.
     """
     health = health or {}
-    error = str(health.get("error") or "")
-    if error:
-        # Названия чатов вместо их id: они уже запомнены в настройках задачи.
-        error = _CHAT_ID_RE.sub(lambda m: names.get(m.group(0)) or m.group(0), error)
-        if len(error) > ERROR_TEXT_LIMIT:
-            error = f"{error[:ERROR_TEXT_LIMIT].rstrip()}…"
+    error = error_text(health.get("error"), names)
     return {
         "ok_at": _utc_iso(health.get("ok_at")),
         "error": error or None,

@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from html import escape
 
 from app.config import settings
-from app.timeutil import tz_suffix, utcnow
+from app.timeutil import time_ago, tz_suffix, utcnow
 
 
 def welcome(name: str) -> str:
@@ -129,7 +130,14 @@ def bonus_card(claimed: bool) -> str:
     )
 
 
-def rule_card(rule, *, collected: int = 0) -> str:
+def rule_card(
+    rule,
+    *,
+    collected: int = 0,
+    health: dict | None = None,
+    online: bool = True,
+    subscription_active: bool = True,
+) -> str:
     """Карточка задачи. Состав строк зависит от типа задачи.
 
     ``collected`` — сколько задача уже нашла (строки в ``collected_items``).
@@ -137,7 +145,15 @@ def rule_card(rule, *, collected: int = 0) -> str:
     остаётся нулём навсегда — он считает отправленные сообщения, а парсер
     ничего не отправляет, и карточка годами говорила «сработало раз: 0» после
     собранных тысяч.
+
+    ``health`` (запись из ``repo.task_health``), ``online`` и
+    ``subscription_active`` отвечают на главный вопрос: работает ли задача
+    **прямо сейчас**. Без них «Состояние: работает ✅» стояло и у задачи, которая
+    сутки падает с ошибкой, и у задачи с отключённым аккаунтом, и у задачи без
+    абонемента: причину было видно только в кабинете. Значения по умолчанию —
+    «всё хорошо», чтобы карточку можно было собрать и без походов в базу.
     """
+    from app.task_health import chat_names, error_text
     from app.telegram_client.filters import FilterConfig
     from app.telegram_client.jobs import (
         COLLECTING_KINDS,
@@ -149,10 +165,31 @@ def rule_card(rule, *, collected: int = 0) -> str:
 
     kind = rule.kind or "forward"
     filters = rule.filters or {}
+    health = health or {}
+    # Разовые задачи запускает кнопка, а её абонемент не сторожит (``run_oneshot``
+    # проверки не делает) — писать им «нет абонемента» было бы неправдой.
+    one_shot = kind in ONE_SHOT_KINDS
+    # Тот же порядок причин, что у значка задачи в кабинете (``taskBadge``):
+    # сначала то, что человек выключил сам, потом то, что сломалось. Кончившийся
+    # абонемент важнее связи с аккаунтом: работа выключена целиком, и связь тут
+    # уже ничего не меняет.
     if rule.archived:
         state = "в архиве 📦"
+    elif not rule.enabled:
+        state = "на паузе ⏸"
+    elif not subscription_active and not one_shot:
+        state = "нет абонемента ⛔"
+    elif not online:
+        state = "нет связи 🔌"
+    elif health.get("failing"):
+        state = "сбой ⚠️"
+    elif one_shot:
+        state = "по кнопке 🖐"
     else:
-        state = "работает ✅" if rule.enabled else "на паузе ⏸"
+        state = "работает ✅"
+    # Сказало ли состояние, что задачу запускает кнопка: если да, отдельная
+    # строка «Запуск: по кнопке» ниже была бы дубляжом.
+    state_says_button = state.startswith("по кнопке")
 
     lines = [
         f"📡 <b>Задача #{rule.id}</b> · {KIND_LABELS.get(kind, kind)}",
@@ -160,6 +197,28 @@ def rule_card(rule, *, collected: int = 0) -> str:
         f"<b>{task_title(rule)}</b>",
         f"Состояние: {state}",
     ]
+    # Из значка не видно, что делать, — поэтому под ним строка с причиной. Архив
+    # и пауза стоят по своей причине: там объяснять нечего.
+    if not rule.archived and rule.enabled:
+        if not subscription_active and not one_shot:
+            lines.append(
+                "⛔ Абонемент закончился — задача стоит. Продлите его в «💳 Подписка», "
+                "и она пойдёт сама: настройки на месте."
+            )
+        elif not online:
+            lines.append(
+                "🔌 Аккаунт не в сети — задача ждёт связи. Перезапустите его "
+                "в «👤 Аккаунты»."
+            )
+    # Причина сбоя — сразу под состоянием: без неё «сбой ⚠️» ничего не
+    # объясняет, а в журнал службы человек не полезет. Починенный сбой тоже
+    # называем: «в три чата не ушло» надо знать, даже когда остальные сто
+    # получили, — но словами поспокойнее.
+    reason = error_text(health.get("error"), chat_names(rule))
+    if reason:
+        when = time_ago(health.get("error_at"))
+        head = "⚠️" if health.get("failing") else "Прошлый сбой:"
+        lines.append(f"{head} {escape(reason, quote=False)}{f' · {when}' if when else ''}")
 
     if kind in ("forward", "broadcast", "checks"):
         lines.append(f"Источник: <b>{rule.source_title or rule.source_id}</b>")
@@ -208,7 +267,10 @@ def rule_card(rule, *, collected: int = 0) -> str:
         lines.append(f"Пауза между чатами: {conf.gap_seconds} сек")
         lines.append(f"Кругов: {conf.repeats}" if conf.repeats else "Кругов: без конца")
     elif kind == "parser":
-        lines.append("Запуск: по кнопке")
+        # «Запуск: по кнопке» повторяло бы состояние — строка нужна только там,
+        # где состояние занято другой причиной (пауза, сбой, нет связи, архив).
+        if not state_says_button:
+            lines.append("Запуск: по кнопке")
     elif kind == "autosubscribe":
         # Автоподписка живёт двумя путями сразу: кнопкой по списку каналов и по
         # ссылкам, которые находит в источнике. Второй путь и есть тот случай,
@@ -217,19 +279,32 @@ def rule_card(rule, *, collected: int = 0) -> str:
             lines.append("Запуск: по кнопке и по ссылкам из источника")
             if rule.delay_seconds:
                 lines.append(f"Задержка: {rule.delay_seconds} сек")
-        else:
+        elif not state_says_button:
             lines.append("Запуск: по кнопке")
     else:
         lines.append(f"Задержка: {rule.delay_seconds} сек")
 
     # Сделанное. У собирающих задач это найденные записи (их же показывает
     # кнопка «Результаты»), у автоподписки — вступления, у остальных — отправки.
-    if kind in COLLECTING_KINDS:
-        lines.append(f"{'Поймано' if kind == 'checks' else 'Собрано'}: {collected}")
-    elif kind in ONE_SHOT_KINDS:
-        lines.append(f"Вступили в чаты: {rule.forwarded_count}")
+    # Рядом — когда задача сработала последний раз: по одному счётчику не
+    # понять, идёт работа прямо сейчас или встала неделю назад.
+    done = collected if kind in COLLECTING_KINDS else int(rule.forwarded_count or 0)
+    ago = time_ago(health.get("ok_at"))
+    if ago:
+        tail = f" · {ago}"
+    elif not done:
+        # Журнал пуст и счётчик нулевой — задача действительно ещё не работала.
+        # При непустом счётчике молчим: старые задачи журнала не знают, и
+        # «ещё ни разу» поверх тысячи отправок было бы ложью.
+        tail = " · ещё ни разу"
     else:
-        lines.append(f"Сработало раз: {rule.forwarded_count}")
+        tail = ""
+    if kind in COLLECTING_KINDS:
+        lines.append(f"{'Поймано' if kind == 'checks' else 'Собрано'}: {collected}{tail}")
+    elif kind in ONE_SHOT_KINDS:
+        lines.append(f"Вступили в чаты: {rule.forwarded_count}{tail}")
+    else:
+        lines.append(f"Сработало раз: {rule.forwarded_count}{tail}")
 
     blacklist = filters.get("blacklist") or []
     whitelist = filters.get("whitelist") or []

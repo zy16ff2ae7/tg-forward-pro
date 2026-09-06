@@ -2334,6 +2334,16 @@ async def check_code_pause(cab: Cabinet, rep: Report) -> None:
         status == 200 and (body or {}).get("stage") == "code",
         f"статус {status}, {body}",
     )
+    status, body = await cab.post(
+        "/api/accounts/login/start", json={"phone": LOGIN_PHONE, "resend": True}
+    )
+    rep.check(
+        "«Прислать ещё раз» — повтор без минутной паузы, вход на том же шаге",
+        status == 200
+        and (body or {}).get("stage") == "code"
+        and (body or {}).get("delivery", {}).get("via") == "sms",
+        f"статус {status}, {body}",
+    )
     rep.note("Пауза перед новым кодом — 60 сек и живёт в БД по номеру: её не обходит ни отмена, ни перезапуск")
 
 
@@ -2457,8 +2467,19 @@ async def check_account_login(cab: Cabinet, rep: Report) -> None:
 
     attempts = {"code": 0}
 
-    async def send_code(_phone: str) -> tuple[str, str]:
-        return "smoke-temp-session", "smoke-code-hash"
+    async def send_code(_phone: str) -> tuple[str, str, dict]:
+        return (
+            "smoke-temp-session",
+            "smoke-code-hash",
+            {"via": "app", "next": "sms", "timeout": 60},
+        )
+
+    async def resend_code(phone: str, session_string: str, phone_code_hash: str) -> tuple[str, str, dict]:
+        return (
+            "smoke-temp-session",
+            "smoke-code-hash-resend",
+            {"via": "sms", "next": "call", "timeout": 60},
+        )
 
     async def sign_in_code(**_kwargs: Any) -> str:
         attempts["code"] += 1
@@ -2484,6 +2505,7 @@ async def check_account_login(cab: Cabinet, rep: Report) -> None:
 
     with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
         send_code=send_code,
+        resend_code=resend_code,
         sign_in_code=sign_in_code,
         sign_in_password=sign_in_password,
         check_session=check_session,

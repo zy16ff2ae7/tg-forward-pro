@@ -16,6 +16,7 @@ from telethon.errors import (
     SessionPasswordNeededError,
 )
 from telethon.sessions import StringSession
+from telethon.tl import functions, types
 
 from app.config import settings
 from app.db.database import SessionLocal, session_scope
@@ -81,6 +82,36 @@ MAILING_ERROR_PAUSE = 30.0
 # задачи, где надо найти каждый отмеченный чат. Без кэша выбор двухсот чатов
 # мышкой означал бы двести обходов подряд — это верный FloodWait.
 DIALOGS_CACHE_TTL = 60.0
+
+
+# Куда Telegram положил код из ответа SendCode/ResendCode — короткими именами
+# для журнала и подсказок человеку. Полный список типов см. в
+# telethon.tl.types.auth: неизвестное будущее сводим к "other", а не роняем вход.
+_DELIVERY_VIA = {
+    "SentCodeTypeApp": "app",
+    "SentCodeTypeSms": "sms",
+    "SentCodeTypeCall": "call",
+    "SentCodeTypeFlashCall": "flashcall",
+    "SentCodeTypeFirebaseSms": "firebase",
+    "SentCodeTypeMissedCall": "missed",
+}
+
+
+def _delivery_info(result) -> dict:
+    """Тип доставки кода из ответа Telegram — журналу и человеку.
+
+    ``via`` — куда ушёл этот код, ``next`` — каким способом придёт повтор,
+    ``timeout`` — через сколько секунд повтор станет доступен (None — неизвестно).
+    """
+    via = _DELIVERY_VIA.get(type(getattr(result, "type", None)).__name__, "other")
+    nxt = getattr(result, "next_type", None)
+    next_via = _DELIVERY_VIA.get(type(nxt).__name__) if nxt is not None else None
+    timeout = getattr(result, "timeout", None)
+    return {
+        "via": via,
+        "next": next_via,
+        "timeout": int(timeout) if timeout is not None else None,
+    }
 
 
 def _proxy_dict(proxy_url: str | None) -> dict | None:
@@ -211,13 +242,59 @@ class ClientManager:
             request_retries=5,
         )
 
-    async def send_code(self, phone: str) -> tuple[str, str]:
-        """Отправляет код подтверждения. Возвращает (сессия, phone_code_hash)."""
+    async def send_code(self, phone: str) -> tuple[str, str, dict]:
+        """Отправляет код подтверждения.
+
+        Возвращает (сессия, phone_code_hash, доставка), где доставка — словарь
+        ``{"via", "next", "timeout"}``: куда Telegram положил код сейчас
+        (``app`` — в приложение, ``sms`` — по SMS, ``call`` — звонком),
+        каким способом придёт следующий повтор и через сколько секунд он
+        станет доступен. Тип доставки пишется и в журнал: иначе «код не
+        пришёл» гадается вслепую.
+        """
         client = self._new_client()
         await client.connect()
         try:
             result = await client.send_code_request(phone)
-            return client.session.save(), result.phone_code_hash
+            delivery = _delivery_info(result)
+            logger.info(
+                "Код на {}: отправлен {} (следующий: {}, через {} сек)",
+                phone,
+                delivery["via"],
+                delivery["next"],
+                delivery["timeout"],
+            )
+            return client.session.save(), result.phone_code_hash, delivery
+        finally:
+            await client.disconnect()
+
+    async def resend_code(
+        self, phone: str, session_string: str, phone_code_hash: str
+    ) -> tuple[str, str, dict]:
+        """Просит Telegram прислать код ещё раз — следующим способом доставки.
+
+        В отличие от нового ``send_code`` это ``auth.ResendCode``: сервер
+        продолжает ту же попытку входа и обычно переключается с приложения
+        на SMS/звонок, а не начинает всё заново. Новый ``phone_code_hash``
+        заменяет старый — код из прошлого сообщения после повтора мёртв.
+        ``PhoneCodeExpiredError`` наружу не глотаем: попытка целиком протухла
+        и вызывающий должен начать вход заново.
+        """
+        client = self._new_client(session_string)
+        await client.connect()
+        try:
+            result = await client(
+                functions.auth.ResendCodeRequest(phone, phone_code_hash)
+            )
+            delivery = _delivery_info(result)
+            logger.info(
+                "Код на {}: повтор отправлен {} (следующий: {}, через {} сек)",
+                phone,
+                delivery["via"],
+                delivery["next"],
+                delivery["timeout"],
+            )
+            return client.session.save(), result.phone_code_hash, delivery
         finally:
             await client.disconnect()
 

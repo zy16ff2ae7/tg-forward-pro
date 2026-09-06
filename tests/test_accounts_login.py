@@ -49,6 +49,7 @@ class FakeGateway:
 
     def __init__(self) -> None:
         self.sent: list[str] = []
+        self.resent: list[dict] = []
         self.codes: list[dict] = []
         self.passwords: list[str] = []
         self.checked: list[str] = []
@@ -56,6 +57,7 @@ class FakeGateway:
         self.stopped: list[int] = []
         self.refreshed = 0
         self.send_error: Exception | None = None
+        self.resend_error: Exception | None = None
         self.code_error: Exception | None = None
         self.password_error: Exception | None = None
         self.check_result: tuple[bool, str | None, str | None] = (True, "Тест Тестов", None)
@@ -63,12 +65,22 @@ class FakeGateway:
         self.retried: list[int] = []
         # Что ответит повтор по кнопке «Попробовать снова»: вышел на связь или нет.
         self.retry_result: tuple[bool, str | None] = (True, None)
+        # Куда «Telegram» положил код: журнал тянет это из ответа шлюза.
+        self.delivery: dict = {"via": "app", "next": "sms", "timeout": 60}
 
-    async def send_code(self, phone: str) -> tuple[str, str]:
+    async def send_code(self, phone: str) -> tuple[str, str, dict]:
         if self.send_error is not None:
             raise self.send_error
         self.sent.append(phone)
-        return SESSION, "hash-" + phone[-4:]
+        return SESSION, "hash-" + phone[-4:], dict(self.delivery)
+
+    async def resend_code(
+        self, phone: str, session_string: str, phone_code_hash: str
+    ) -> tuple[str, str, dict]:
+        if self.resend_error is not None:
+            raise self.resend_error
+        self.resent.append({"phone": phone, "hash": phone_code_hash})
+        return SESSION, "resend-" + phone[-4:], dict(self.delivery)
 
     async def sign_in_code(
         self, phone: str, code: str, session_string: str, phone_code_hash: str
@@ -121,6 +133,7 @@ def gateway(monkeypatch) -> FakeGateway:
 
     for name in (
         "send_code",
+        "resend_code",
         "sign_in_code",
         "sign_in_password",
         "check_session",
@@ -253,6 +266,96 @@ async def test_start_on_another_phone_replaces_pending(gateway, user):
     row = await _pending(user)
     assert row.phone == OTHER_PHONE
     assert gateway.sent == [PHONE, OTHER_PHONE]
+
+
+async def test_start_reports_delivery(gateway, user):
+    """Шаг кода говорит, куда Telegram положил код: иначе «не пришло» гадается."""
+    gateway.delivery = {"via": "sms", "next": "call", "timeout": 120}
+
+    step = await accounts_login.start(user, PHONE)
+
+    assert step.delivery == {"via": "sms", "next": "call", "timeout": 120}
+    assert step.as_dict()["delivery"] == step.delivery
+
+
+# ─────────────────── повтор кода («Прислать ещё раз») ────────────────────────
+
+
+async def test_resend_uses_resend_not_new_send(gateway, user):
+    """Повтор продолжает ту же попытку: в Telegram — ResendCode, а не новый код."""
+    await accounts_login.start(user, PHONE)
+
+    step = await accounts_login.start(user, PHONE, resend=True)
+
+    assert step.stage == "code"
+    assert gateway.sent == [PHONE]  # нового запроса кода не было
+    assert [item["phone"] for item in gateway.resent] == [PHONE]
+    assert gateway.resent[0]["hash"] == "hash-4567"  # хэш первой попытки
+    row = await _pending(user)
+    assert row.phone_code_hash == "resend-4567"  # дальше входим по новому хэшу
+    assert row.attempts == 0  # код новый — счётчик опечаток сброшен
+
+
+async def test_resend_without_pending_is_plain_start(gateway, user):
+    """Повторять нечего — вырождается в обычный новый запрос."""
+    step = await accounts_login.start(user, PHONE, resend=True)
+
+    assert step.stage == "code"
+    assert gateway.sent == [PHONE]
+    assert gateway.resent == []
+
+
+async def test_resend_on_another_phone_is_plain_start(gateway, user):
+    await accounts_login.start(user, PHONE)
+
+    step = await accounts_login.start(user, OTHER_PHONE, resend=True)
+
+    assert step.phone == OTHER_PHONE
+    assert gateway.sent == [PHONE, OTHER_PHONE]
+    assert gateway.resent == []
+
+
+async def test_resend_reports_flood_wait_and_stays_on_code(gateway, user):
+    """Повтор ещё недоступен — называем срок, вход не рушим."""
+    await accounts_login.start(user, PHONE)
+    gateway.resend_error = FloodWaitError(request=None)
+    gateway.resend_error.seconds = 120
+
+    with pytest.raises(ConflictError) as info:
+        await accounts_login.start(user, PHONE, resend=True)
+
+    assert "2 мин" in info.value.message
+    assert info.value.details["stage"] == "code"  # кабинет и бот остаются на коде
+    row = await _pending(user)
+    assert row is not None and row.stage == "waiting_code"
+
+
+async def test_resend_after_expiry_restarts_login(gateway, user):
+    """Попытка целиком протухла — повторять нечего, нужен новый код."""
+    await accounts_login.start(user, PHONE)
+    gateway.resend_error = PhoneCodeExpiredError(request=None)
+
+    with pytest.raises(ConflictError) as info:
+        await accounts_login.start(user, PHONE, resend=True)
+
+    assert "устарел" in info.value.message
+    assert await _pending(user) is None
+
+
+async def test_resend_unavailable_explains_no_sms(gateway, user):
+    """Telegram не даёт другого способа доставки — говорим, где код, вход жив."""
+    from telethon.errors import SendCodeUnavailableError
+
+    await accounts_login.start(user, PHONE)
+    gateway.resend_error = SendCodeUnavailableError(request=None)
+
+    with pytest.raises(ConflictError) as info:
+        await accounts_login.start(user, PHONE, resend=True)
+
+    assert "только в приложение" in info.value.message
+    assert info.value.details["stage"] == "code"
+    row = await _pending(user)
+    assert row is not None and row.stage == "waiting_code"
 
 
 @pytest.mark.parametrize(
@@ -694,6 +797,23 @@ async def test_cabinet_walks_the_whole_login(client, auth_headers, gateway, user
     assert payload["pending_login"]["exists"] is False
 
 
+async def test_login_resend_endpoint_repeats_code(client, auth_headers, gateway, user):
+    """Кабинет: «Прислать ещё раз» идёт повтором, пауза в минуту его не держит."""
+    started = await client.post(START, json={"phone": PHONE}, headers=auth_headers)
+    assert started.status == 200
+    assert (await started.json())["delivery"]["via"] == "app"
+
+    response = await client.post(
+        START, json={"phone": PHONE, "resend": True}, headers=auth_headers
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["stage"] == "code"
+    assert gateway.sent == [PHONE]
+    assert len(gateway.resent) == 1
+
+
 async def test_wrong_code_is_400_and_keeps_the_step(client, auth_headers, gateway, user):
     await client.post(START, json={"phone": PHONE}, headers=auth_headers)
     gateway.code_error = PhoneCodeInvalidError(request=None)
@@ -875,3 +995,92 @@ async def test_gateway_returns_session_when_code_is_enough(monkeypatch) -> None:
 
     assert saved == SIGNED
     assert client.connected and client.disconnected
+
+
+# ── Контракт доставки кода ───────────────────────────────────────────────────
+# «Код не пришёл» чинится только знанием, куда Telegram его положил. Тип
+# доставки тянем из ответа SendCode/ResendCode здесь — фальшивый клиент ниже
+# отвечает тем типом, что попросил тест.
+
+
+def _code_type(name: str):
+    """Класс с именем типа Telegram: _delivery_info смотрит только на него."""
+    return type(name, (), {})()
+
+
+class FakeSentCode:
+    def __init__(self, via: str = "SentCodeTypeApp", next_via=None, timeout=60) -> None:
+        self.type = _code_type(via)
+        self.next_type = _code_type(next_via) if next_via else None
+        self.timeout = timeout
+        self.phone_code_hash = "hash-" + via
+
+
+class FakeCodeClient(FakeTelethonClient):
+    """Отвечает на запрос и повтор кода тем типом доставки, что дали."""
+
+    def __init__(self, sent: FakeSentCode, resent: FakeSentCode | None = None) -> None:
+        super().__init__()
+        self.sent_result = sent
+        self.resent_result = resent or sent
+        self.requests: list = []
+
+    async def send_code_request(self, phone: str) -> FakeSentCode:
+        return self.sent_result
+
+    async def __call__(self, request) -> FakeSentCode:
+        self.requests.append(request)
+        return self.resent_result
+
+
+def test_delivery_info_names_telegram_types():
+    from app.telegram_client.manager import _delivery_info
+
+    info = _delivery_info(FakeSentCode("SentCodeTypeApp", "SentCodeTypeSms", 60))
+
+    assert info == {"via": "app", "next": "sms", "timeout": 60}
+
+
+def test_delivery_info_survives_unknown_types():
+    """Будущий тип Telegram — "other", а не рухнувший вход."""
+    from app.telegram_client.manager import _delivery_info
+
+    info = _delivery_info(FakeSentCode("SentCodeTypeCarrierPigeon"))
+
+    assert info["via"] == "other"
+    assert info["next"] is None
+
+
+async def test_gateway_send_code_returns_delivery(monkeypatch) -> None:
+    client = FakeCodeClient(FakeSentCode("SentCodeTypeSms", "SentCodeTypeCall", 120))
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="": client)
+
+    session, code_hash, delivery = await manager.send_code(PHONE)
+
+    assert session == SIGNED
+    assert code_hash == "hash-SentCodeTypeSms"
+    assert delivery == {"via": "sms", "next": "call", "timeout": 120}
+    assert client.disconnected
+
+
+async def test_gateway_resend_uses_resend_request(monkeypatch) -> None:
+    """Повтор — это auth.ResendCode с хэшем первой попытки, а не новый SendCode."""
+    from telethon.tl import functions
+
+    client = FakeCodeClient(
+        FakeSentCode("SentCodeTypeApp"),
+        FakeSentCode("SentCodeTypeSms", "SentCodeTypeCall", 60),
+    )
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="": client)
+
+    _, code_hash, delivery = await manager.resend_code(
+        phone=PHONE, session_string=SESSION, phone_code_hash="old-hash"
+    )
+
+    assert len(client.requests) == 1
+    request = client.requests[0]
+    assert isinstance(request, functions.auth.ResendCodeRequest)
+    assert (request.phone_number, request.phone_code_hash) == (PHONE, "old-hash")
+    assert code_hash == "hash-SentCodeTypeSms"
+    assert delivery["via"] == "sms"
+    assert client.disconnected

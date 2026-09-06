@@ -34,6 +34,7 @@ from telethon.errors import (
     PhoneCodeInvalidError,
     PhoneNumberBannedError,
     PhoneNumberInvalidError,
+    SendCodeUnavailableError,
     SessionPasswordNeededError,
 )
 
@@ -73,6 +74,8 @@ class LoginStep:
 
     ``stage``: ``code`` — ждём код из Telegram, ``password`` — облачный пароль
     2FA, ``done`` — аккаунт подключён (тогда заполнены ``account_id`` и ``name``).
+    ``delivery`` — куда Telegram положил код (``via``: ``app``/``sms``/``call``…,
+    ``next`` — способ повтора, ``timeout`` — через сколько секунд повтор доступен).
     """
 
     stage: str
@@ -80,6 +83,7 @@ class LoginStep:
     account_id: int | None = None
     name: str | None = None
     attempts_left: int | None = None
+    delivery: dict | None = None
 
     @property
     def done(self) -> bool:
@@ -93,6 +97,8 @@ class LoginStep:
             data["name"] = self.name
         if self.attempts_left is not None:
             data["attempts_left"] = self.attempts_left
+        if self.delivery is not None:
+            data["delivery"] = self.delivery
         return data
 
 
@@ -207,11 +213,19 @@ def _too_early(phone: str, wait: int, pending: object | None) -> ConflictError:
     )
 
 
-async def start(user_id: int, phone_raw: str) -> LoginStep:
+async def start(user_id: int, phone_raw: str, *, resend: bool = False) -> LoginStep:
     """Шаг 1: просит Telegram выслать код на номер.
 
     Уже начатый вход на тот же номер не начинаем заново: код действует, и
     второй запрос только приблизит флуд-лимит на номере.
+
+    ``resend=True`` — «код не пришёл, прислать ещё раз»: продолжает ту же
+    попытку через ``auth.ResendCode``, и Telegram обычно переключается на
+    следующий способ доставки (приложение → SMS → звонок). Код из прошлого
+    сообщения после повтора мёртв — вводить надо новый. Пауза в минуту здесь
+    не проверяется: когда повтор доступен, решает сам Telegram (иначе ответит
+    флудом с точным сроком). Без незавершённого входа на этот номер повтор
+    вырождается в обычный новый запрос.
     """
     require_enabled()
     phone = normalize_phone(phone_raw)
@@ -219,12 +233,14 @@ async def start(user_id: int, phone_raw: str) -> LoginStep:
     async with SessionLocal() as session:
         row = await repo.get_pending_login(session, user_id)
         pending_here = row is not None and row.phone == phone
+        if resend and pending_here and row.stage == STAGE_CODE:
+            return await _resend(user_id, phone)
         wait = await _pause_left(session, phone, row if pending_here else None)
         if wait:
             raise _too_early(phone, wait, row if pending_here else None)
 
     try:
-        session_string, phone_code_hash = await manager.send_code(phone)
+        session_string, phone_code_hash, delivery = await manager.send_code(phone)
     except PhoneNumberInvalidError:
         raise ValidationError("Telegram не знает такой номер. Проверьте и введите заново.") from None
     except PhoneNumberBannedError:
@@ -281,7 +297,75 @@ async def start(user_id: int, phone_raw: str) -> LoginStep:
         await session.commit()
 
     logger.info("Вход #{}: код отправлен на {}", user_id, phone)
-    return LoginStep(stage="code", phone=phone, attempts_left=MAX_CODE_ATTEMPTS)
+    return LoginStep(
+        stage="code", phone=phone, attempts_left=MAX_CODE_ATTEMPTS, delivery=delivery
+    )
+
+
+async def _resend(user_id: int, phone: str) -> LoginStep:
+    """Повтор кода по кнопке «Прислать ещё раз» — через auth.ResendCode.
+
+    Попытка та же, способ доставки следующий, счётчик опечаток сбрасывается:
+    код новый, и старые ошибки к нему отношения не имеют. Отказ сервера
+    (например, повтор ещё недоступен) остаётся на шаге кода — вход не рушим,
+    человеку называем точный срок.
+    """
+    _, session_string, code_hash, _ = await _load_pending(user_id, STAGE_CODE)
+
+    try:
+        session_string, phone_code_hash, delivery = await manager.resend_code(
+            phone=phone, session_string=session_string, phone_code_hash=code_hash
+        )
+    except PhoneCodeExpiredError:
+        # Попытка целиком протухла — повторять нечего, начинаем вход заново.
+        await cancel(user_id)
+        raise ConflictError(
+            "Код устарел. Запросите новый — Telegram пришлёт его на тот же номер."
+        ) from None
+    except SendCodeUnavailableError:
+        # Telegram не даёт другого способа доставки на этот номер (только
+        # приложение, без SMS и звонка): повторять нечего, код уже в чате
+        # «Telegram». Вход не рушим — остаёмся на шаге кода.
+        raise ConflictError(
+            "Повтор недоступен: Telegram шлёт код на этот номер только в "
+            "приложение, без SMS и звонка. Ищите сообщение от «Telegram» — "
+            "код уже там; новый запрос тоже придёт туда.",
+            details={"stage": "code", "phone": phone,
+                      "attempts_left": MAX_CODE_ATTEMPTS},
+        ) from None
+    except FloodWaitError as exc:
+        wait = int(getattr(exc, "seconds", 0) or 0)
+        human = f"{wait // 60} мин" if wait >= 60 else f"{wait} сек"
+        raise ConflictError(
+            f"Telegram просит подождать {human} перед повтором кода на этот номер.",
+            details={"stage": "code", "phone": phone, "wait": wait,
+                      "attempts_left": MAX_CODE_ATTEMPTS},
+        ) from None
+    except Exception as exc:  # noqa: BLE001 — текст ошибки нужен человеку
+        logger.exception("Не удалось повторить код на {}", phone)
+        raise ConflictError(
+            f"Не удалось повторить код: {type(exc).__name__}",
+            details={"stage": "code", "phone": phone,
+                      "attempts_left": MAX_CODE_ATTEMPTS},
+        ) from exc
+
+    async with SessionLocal() as session:
+        await repo.note_code_sent(session, phone)
+        await repo.save_pending_login(
+            session,
+            user_id=user_id,
+            phone=phone,
+            session_encrypted=encrypt_session(session_string),
+            phone_code_hash=phone_code_hash,
+            stage=STAGE_CODE,
+            attempts=0,
+        )
+        await session.commit()
+
+    logger.info("Вход #{}: код повторно отправлен на {}", user_id, phone)
+    return LoginStep(
+        stage="code", phone=phone, attempts_left=MAX_CODE_ATTEMPTS, delivery=delivery
+    )
 
 
 async def _load_pending(user_id: int, expected_stage: str | None = None):

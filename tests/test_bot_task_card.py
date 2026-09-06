@@ -145,14 +145,22 @@ def test_mailing_without_repeats_walks_forever():
 
 
 def test_parser_and_autosubscribe_say_how_they_start():
-    """Разовые задачи запускаются кнопкой — и карточка это называет."""
+    """Разовые задачи запускаются кнопкой — и карточка это называет.
+
+    Называет ровно один раз: пока состояние задачи и есть «по кнопке», отдельная
+    строка «Запуск: по кнопке» была бы дубляжом — она возвращается, когда
+    состояние заняла другая причина (пауза, сбой, нет связи).
+    """
     parser = card("parser", collected=0, filters={"limit": 200})
+    paused = card("parser", collected=0, enabled=False, filters={"limit": 200})
     by_button = card("autosubscribe", delay_seconds=45, source_id=None)
     by_links = card("autosubscribe", delay_seconds=45, source_id=-1001)
     silent = card("autosubscribe", delay_seconds=0, source_id=-1001)
 
-    assert "Запуск: по кнопке" in parser and "Задержка" not in parser
-    assert by_button.count("Запуск: по кнопке") == 1 and "ссылкам" not in by_button
+    assert "Состояние: по кнопке 🖐" in parser
+    assert parser.count("по кнопке") == 1 and "Задержка" not in parser
+    assert "Запуск: по кнопке" in paused and "Состояние: на паузе ⏸" in paused
+    assert by_button.count("по кнопке") == 1 and "ссылкам" not in by_button
     assert "Задержка" not in by_button  # без источника задержке нечего ждать
     assert "Запуск: по кнопке и по ссылкам из источника" in by_links
     assert "Задержка: 45 сек" in by_links

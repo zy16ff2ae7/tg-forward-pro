@@ -992,24 +992,33 @@ function demoLogin(clean, options) {
     const full = phone.startsWith('+') ? phone : `+${phone}`;
     const sentAt = DEMO_LOGIN.sent[full] || 0;
     const wait = Math.ceil((DEMO_RESEND_PAUSE_MS - (Date.now() - sentAt)) / 1000);
-    if (sentAt && wait > 0) {
-      if (pending && pending.phone === full) {
+    // Повтор («Прислать ещё раз») — новый код тем же способом, пауза не держит:
+    // когда повтор доступен, решает сервер, а в демо — всегда.
+    if (!(body.resend && pending && pending.phone === full && sentAt)) {
+      if (sentAt && wait > 0) {
+        if (pending && pending.phone === full) {
+          demoFail(
+            409,
+            `Код на ${full} уже отправлен. Введите его или подождите ${wait} сек, чтобы запросить новый.`,
+            { stage: pending.stage, phone: full, wait, attempts_left: DEMO_MAX_ATTEMPTS - pending.attempts }
+          );
+        }
         demoFail(
           409,
-          `Код на ${full} уже отправлен. Введите его или подождите ${wait} сек, чтобы запросить новый.`,
-          { stage: pending.stage, phone: full, wait, attempts_left: DEMO_MAX_ATTEMPTS - pending.attempts }
+          `Код на ${full} отправляли меньше минуты назад. Подождите ${wait} сек: частые запросы ` +
+            'Telegram считает флудом и может закрыть вход на этот номер на несколько часов.',
+          { stage: 'phone', phone: full, wait }
         );
       }
-      demoFail(
-        409,
-        `Код на ${full} отправляли меньше минуты назад. Подождите ${wait} сек: частые запросы ` +
-          'Telegram считает флудом и может закрыть вход на этот номер на несколько часов.',
-        { stage: 'phone', phone: full, wait }
-      );
     }
     DEMO_LOGIN.sent[full] = Date.now();
     DEMO_LOGIN.pending = { phone: full, stage: 'code', attempts: 0 };
-    return { stage: 'code', phone: DEMO_LOGIN.pending.phone, attempts_left: DEMO_MAX_ATTEMPTS };
+    return {
+      stage: 'code',
+      phone: DEMO_LOGIN.pending.phone,
+      attempts_left: DEMO_MAX_ATTEMPTS,
+      delivery: { via: 'app', next: 'sms', timeout: 60 },
+    };
   }
 
   if (!pending) demoFail(409, 'Незавершённого входа нет. Начните заново: «Подключить аккаунт».');
@@ -2842,7 +2851,17 @@ const LOGIN_PATHS = { phone: 'start', code: 'code', password: 'password' };
 const LOGIN_FIELDS = { phone: 'phone', code: 'code', password: 'password' };
 
 function loginReset() {
-  state.login = { stage: 'phone', phone: '', attemptsLeft: null };
+  state.login = { stage: 'phone', phone: '', attemptsLeft: null, delivery: null };
+}
+
+/* Куда Telegram положил код — словами. Ключи — delivery.via с сервера. */
+function deliveryHint(delivery) {
+  const via = delivery && delivery.via;
+  if (via === 'app') return 'Код отправлен в чат «Telegram» в приложении, а не по SMS.';
+  if (via === 'sms' || via === 'firebase') return 'Код отправлен по SMS на этот номер.';
+  if (via === 'call') return 'Сейчас позвонит Telegram и продиктует код.';
+  if (via === 'flashcall' || via === 'missed') return 'Сейчас придёт дозвон-сброс от Telegram.';
+  return 'Код пришёл в чат «Telegram» в приложении, а не по SMS.';
 }
 
 function openLoginSheet(phone) {
@@ -2856,6 +2875,7 @@ function openLoginSheet(phone) {
       stage: pending.step || 'code',
       phone: pending.phone || '',
       attemptsLeft: pending.attempts_left != null ? pending.attempts_left : null,
+      delivery: null,
     };
   } else {
     loginReset();
@@ -2870,10 +2890,13 @@ function openLoginSheet(phone) {
 }
 
 function renderLoginStage(message) {
-  const { stage, phone, attemptsLeft } = state.login;
+  const { stage, phone, attemptsLeft, delivery } = state.login;
   const spec = LOGIN_STEPS[stage] || LOGIN_STEPS.phone;
   const lead = stage !== 'phone' && phone ? `Номер ${phone}. ${spec.lead}` : spec.lead;
-  const notes = [spec.note];
+  const notes = [stage === 'code' && delivery ? deliveryHint(delivery) : spec.note];
+  if (stage === 'code' && delivery) {
+    notes.push('Не пришёл? Кнопка «Прислать ещё раз» попросит следующим способом (SMS, звонок) — код из прошлого сообщения после неё мёртв.');
+  }
   if (stage === 'code' && attemptsLeft != null) notes.push(`Осталось попыток: ${attemptsLeft}.`);
   if (DEMO) notes.push(`Демо: код ${DEMO_CODE}, пароль ${DEMO_PASSWORD}.`);
 
@@ -2884,6 +2907,7 @@ function renderLoginStage(message) {
   $('loginNote').textContent = notes.filter(Boolean).join(' ');
   $('loginError').textContent = message || '';
   $('loginRestart').hidden = stage === 'phone';
+  $('loginResend').hidden = stage !== 'code';
 
   const input = $('loginInput');
   input.type = spec.type;
@@ -2936,9 +2960,13 @@ async function applyLoginStep(step) {
     stage: step.stage,
     phone: step.phone || state.login.phone,
     attemptsLeft: step.attempts_left != null ? step.attempts_left : null,
+    delivery: step.delivery || null,
   };
   renderLoginStage();
-  if (step.stage === 'code' && wasStage === 'phone') toast('Код отправлен в Telegram');
+  if (step.stage === 'code' && wasStage === 'phone') toast(deliveryHint(step.delivery));
+  if (step.stage === 'code' && wasStage === 'code') {
+    toast('Новый код отправлен. Код из прошлого сообщения больше не действует.');
+  }
   $('loginInput').focus();
 }
 
@@ -2971,6 +2999,7 @@ async function loginFailed(error) {
       stage: step.stage,
       phone: step.phone || state.login.phone,
       attemptsLeft: step.attempts_left != null ? step.attempts_left : state.login.attemptsLeft,
+      delivery: state.login.delivery,
     };
     renderLoginStage(error.message);
     $('loginInput').focus();
@@ -2980,6 +3009,26 @@ async function loginFailed(error) {
   loginReset();
   renderLoginStage(error.message);
   await loadAccounts();
+}
+
+/* «Прислать ещё раз» — код не пришёл: повтор следующим способом доставки. */
+async function resendLogin() {
+  const phone = state.login.phone || (state.pendingLogin && state.pendingLogin.phone) || '';
+  if (!phone) {
+    renderLoginStage('Сначала введите номер телефона.');
+    return;
+  }
+  try {
+    const step = await withLoading($('loginResend'), () =>
+      api('/api/accounts/login/start', {
+        method: 'POST',
+        body: JSON.stringify({ phone, resend: true }),
+      })
+    );
+    await applyLoginStep(step);
+  } catch (error) {
+    await loginFailed(error);
+  }
 }
 
 /* «Другой номер» — забыть незавершённый вход и начать с первого шага. */
@@ -4374,6 +4423,7 @@ function bindEvents() {
     }
   });
   $('loginRestart').addEventListener('click', restartLogin);
+  $('loginResend').addEventListener('click', resendLogin);
   $('loginInBot').addEventListener('click', () => openBot('add_account'));
   $('topUpBtn').addEventListener('click', (event) => {
     // currentTarget, а не target: внутри кнопки может лежать <span>, и тогда

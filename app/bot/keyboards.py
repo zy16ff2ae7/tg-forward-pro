@@ -335,6 +335,20 @@ def cancel_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def login_code_kb() -> InlineKeyboardMarkup:
+    """Шаг кода: повтор другим способом доставки + отмена.
+
+    Повтор — это auth.ResendCode (приложение → SMS → звонок), а не новый вход:
+    код из прошлого сообщения после него мёртв, вводить надо новый.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📩 Код не пришёл — прислать ещё раз", callback_data="acc:resend")
+    )
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="nav:cancel"))
+    return builder.as_markup()
+
+
 def back_to_main() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="◀️ В меню", callback_data="menu:main"))

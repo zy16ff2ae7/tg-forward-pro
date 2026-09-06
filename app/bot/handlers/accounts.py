@@ -39,6 +39,27 @@ CODE_PROMPT = (
     "Введите код подряд без пробелов: код вида <code>1 2 3 4 5</code> — "
     "это <code>12345</code>."
 )
+
+# Куда Telegram положил код — человеческими словами. Ключи — это ``delivery.via``
+# из app/accounts_login.py; неизвестное будущее не врёт, а молчит.
+DELIVERY_HINTS = {
+    "app": "смотрите чат «Telegram» в приложении",
+    "sms": "смотрите SMS на этом номере",
+    "call": "сейчас позвонит Telegram и продиктует код",
+    "flashcall": "сейчас придёт дозвон-сброс от Telegram",
+    "firebase": "смотрите SMS на этом номере",
+    "missed": "сейчас придёт пропущенный звонок от Telegram",
+}
+
+
+def _delivery_hint(delivery: dict | None) -> str:
+    """Где искать код — одна строка для сообщений бота и кабинета."""
+    if not delivery:
+        return "Код подтверждения придёт в официальном приложении Telegram."
+    hint = DELIVERY_HINTS.get(str(delivery.get("via") or ""))
+    if hint:
+        return f"Код отправлен: {hint}."
+    return "Код подтверждения придёт в официальном приложении Telegram."
 PASSWORD_PROMPT = "🔐 На аккаунте включён облачный пароль (2FA). Введите его:"
 
 SETUP_TEXT = (
@@ -118,7 +139,7 @@ async def _open_login(user_id: int, state: FSMContext) -> tuple[str, object]:
         f"▶️ Продолжаем вход для <b>{pending.phone}</b>.\n\n"
         "Введите код из Telegram подряд без пробелов.\n"
         f"Осталось попыток: {pending.attempts_left}.",
-        kb.cancel_kb(),
+        kb.login_code_kb(),
     )
 
 
@@ -210,9 +231,60 @@ async def process_phone(message: Message, state: FSMContext) -> None:
 
     await state.set_state(LoginStates.code)
     await wait_msg.edit_text(
-        f"✅ Код отправлен на <b>{step.phone}</b>.\n\n{CODE_PROMPT}",
-        reply_markup=kb.cancel_kb(),
+        f"✅ Код отправлен на <b>{step.phone}</b>.\n\n"
+        f"{_delivery_hint(step.delivery)}\n\n{CODE_PROMPT}",
+        reply_markup=kb.login_code_kb(),
     )
+
+
+@router.callback_query(F.data == "acc:resend")
+async def resend_code(callback: CallbackQuery, state: FSMContext) -> None:
+    """«Код не пришёл» — повтор тем же способом, каким Telegram шлёт дальше.
+
+    Обычно это переключение «приложение → SMS → звонок». Код из прошлого
+    сообщения после повтора мёртв — вводить надо новый.
+    """
+    assert callback.from_user is not None
+    pending = await login.pending(callback.from_user.id)
+    if pending is None or pending.stage != "code":
+        await callback.answer("Незавершённого входа нет — введите номер заново.")
+        await state.set_state(LoginStates.phone)
+        if callback.message is not None:
+            await smart_edit(
+                callback.message, PHONE_PROMPT, reply_markup=kb.cancel_kb()
+            )
+        return
+    await callback.answer("Запрашиваю повтор…")
+    try:
+        step = await login.start(callback.from_user.id, pending.phone, resend=True)
+    except AppError as exc:
+        # Повтор не убивает вход: остаёмся на шаге кода при любом отказе,
+        # у которого известно место (а у повтора оно известно всегда).
+        if isinstance(exc, ValidationError) or str(exc.details.get("stage") or ""):
+            await state.set_state(LoginStates.code)
+            markup: object = kb.login_code_kb()
+            tail = CODE_PROMPT
+        else:
+            await state.clear()
+            markup = kb.back_to_main()
+            tail = ""
+        if callback.message is not None:
+            await smart_edit(
+                callback.message,
+                f"❌ {exc.message}" + (f"\n\n{tail}" if tail else ""),
+                reply_markup=markup,
+            )
+        return
+    await state.set_state(LoginStates.code)
+    if callback.message is not None:
+        await smart_edit(
+            callback.message,
+            f"✅ Новый код отправлен на <b>{step.phone}</b>.\n\n"
+            f"{_delivery_hint(step.delivery)}\n"
+            "Код из прошлого сообщения больше не действует — вводите новый.\n\n"
+            f"{CODE_PROMPT}",
+            reply_markup=kb.login_code_kb(),
+        )
 
 
 @router.message(LoginStates.code)

@@ -41,9 +41,30 @@ async def _rule_view(rule) -> tuple[str, InlineKeyboardMarkup]:
     показывать «сработало раз: 0» у парсера, собравшего тысячи (счётчик отправок
     он не трогает), меню — чтобы «⬇️ Файлом» появлялась там, где файл получится
     непустым.
+
+    Кроме числа карточке нужно то, что раньше знал только кабинет: чем
+    закончилось последнее срабатывание, жив ли абонемент и на связи ли аккаунт.
+    Без этого бот писал «Состояние: работает ✅» задаче, которая сутки падает.
+    Один сеанс на все три вопроса: карточка открывается на каждое нажатие, и
+    лишние подключения к базе тут заметны.
     """
-    collected = await _collected_count(rule)
-    return texts.rule_card(rule, collected=collected), kb.rule_menu(rule, collected=collected)
+    kind = rule.kind or "forward"
+    async with SessionLocal() as session:
+        collected = (
+            await repo.count_collected_items(session, rule.id)
+            if kind in COLLECTING_KINDS
+            else 0
+        )
+        health = (await repo.task_health(session, [rule.id])).get(rule.id)
+        subscription_active = await repo.has_active_subscription(session, rule.user_id)
+    card = texts.rule_card(
+        rule,
+        collected=collected,
+        health=health,
+        online=manager.is_online(rule.account_id),
+        subscription_active=subscription_active,
+    )
+    return card, kb.rule_menu(rule, collected=collected)
 
 
 @router.message(Command("rules"))
