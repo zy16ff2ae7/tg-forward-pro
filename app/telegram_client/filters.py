@@ -77,6 +77,10 @@ class FilterConfig:
     online_within_hours: int = 0  # заходили не раньше N часов назад (0 — не важно)
     scan_limit: int = 1000  # сколько просмотреть (участников или сообщений)
     api_delay: int = 0  # пауза между запросами к Telegram, сек
+    # ── Уведомления из диалогов (kind="dialogs") ──
+    ignore_bots: bool = True  # не уведомлять о сообщениях ботов
+    ignore_archived: bool = True  # не уведомлять из архивных чатов
+    ignore_muted: bool = True  # не уведомлять из заглушённых чатов
     # ── Настройки авто-постера (планировщик собственных сообщений) ──
     messages: list[str] = field(default_factory=list)  # тексты сообщений (по одному в строке)
     interval_seconds: int = 120  # интервал между отправками
@@ -132,6 +136,9 @@ class FilterConfig:
             "online_within_hours": self.online_within_hours,
             "scan_limit": self.scan_limit,
             "api_delay": self.api_delay,
+            "ignore_bots": self.ignore_bots,
+            "ignore_archived": self.ignore_archived,
+            "ignore_muted": self.ignore_muted,
             "messages": self.messages,
             "interval_seconds": self.interval_seconds,
             "window_start": self.window_start,

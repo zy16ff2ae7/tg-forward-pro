@@ -763,9 +763,18 @@ async def _apply_task_settings(
     elif kind == "baiting":
         if given("reaction"):
             filters["reaction"] = str(payload.get("reaction") or "").strip() or "👍"
-    elif kind in ("checks", "dialogs", "mute"):
+    elif kind in ("checks", "mute"):
         if given("keywords"):
             filters["keywords"] = _as_list(payload.get("keywords"))
+    elif kind == "dialogs":
+        if given("keywords"):
+            filters["keywords"] = _as_list(payload.get("keywords"))
+        # Галочки включены из коробки: боты, архив и мут редко нужны в
+        # уведомлениях. При создании отсутствующее поле — True, при правке —
+        # «оставь как было».
+        for field in ("ignore_bots", "ignore_archived", "ignore_muted"):
+            if given(field):
+                filters[field] = _as_bool(payload.get(field)) if field in payload else True
     elif kind == "poster":
         # Свои тексты постинга живут там же, где у рассылки, — в библиотеке
         # (см. _own_texts и OWN_TEXT_KINDS). Раньше постинг держал копии текстов
@@ -2570,8 +2579,13 @@ def _edit_view(
         edit["api_delay"] = int(conf.api_delay or 0)
     elif kind == "baiting":
         edit["reaction"] = conf.reaction
-    elif kind in ("checks", "dialogs", "mute"):
+    elif kind in ("checks", "mute"):
         edit["keywords"] = ", ".join(conf.keywords or [])
+    elif kind == "dialogs":
+        edit["keywords"] = ", ".join(conf.keywords or [])
+        edit["ignore_bots"] = bool(conf.ignore_bots)
+        edit["ignore_archived"] = bool(conf.ignore_archived)
+        edit["ignore_muted"] = bool(conf.ignore_muted)
     elif kind == "poster":
         # Текст постинга лежит в библиотеке — тем же полем и тем же правилом
         # «пустая строка делит сообщения», что у рассылки.
@@ -2730,8 +2744,8 @@ COMMANDS: list[dict] = [
         "description": "Присылает входящие личные сообщения в выбранный чат.",
         "status": "ready",
         "needs": ["account", "target"],
-        "optional": ["keywords"],
-        "hint": "Источник не нужен: задача слушает все личные диалоги аккаунта.",
+        "optional": ["keywords", "ignore_bots", "ignore_archived", "ignore_muted"],
+        "hint": "Источник не нужен: задача слушает все личные диалоги аккаунта. Ботов, архивные и заглушённые чаты пропускает — галочки снимаются.",
         "tags": ["личные сообщения", "источник не нужен"],
     },
     {

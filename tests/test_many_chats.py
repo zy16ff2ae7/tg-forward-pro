@@ -13,7 +13,8 @@
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from telethon.errors import FloodWaitError
@@ -38,11 +39,22 @@ FAKE_API_HASH = "1234abcd" * 4
 class FakeDialog:
     """Диалог Telethon: менеджеру от него нужны id и entity."""
 
-    def __init__(self, chat_id: int, title: str, username: str = "") -> None:
+    def __init__(
+        self, chat_id: int, title: str, username: str = "",
+        *, bot: bool = False, archived: bool = False, muted: bool = False,
+    ) -> None:
         self.id = chat_id
+        self.archived = archived
         self.entity = type(
-            "Entity", (), {"title": title, "username": username, "broadcast": False, "megagroup": True}
+            "Entity", (),
+            {"title": title, "username": username, "broadcast": False,
+             "megagroup": True, "bot": bot},
         )()
+        mute_until = (
+            datetime.now(timezone.utc) + timedelta(days=365) if muted else None
+        )
+        notify = SimpleNamespace(mute_until=mute_until)
+        self.dialog = SimpleNamespace(notify_settings=notify)
 
 
 class DialogsClient:
@@ -145,6 +157,21 @@ async def test_cut_list_never_lands_in_the_cache(mtproto_on):
 
     assert len(short) == 5
     assert len(full) == 30
+
+
+async def test_dialogs_carry_bot_archive_and_mute_flags(mtproto_on):
+    """Кэш диалогов несёт флаги: уведомления читают их, а не Telegram."""
+    manager._clients[1] = DialogsClient([
+        FakeDialog(-1001, "бот", "bot", bot=True),
+        FakeDialog(-1002, "архив", archived=True),
+        FakeDialog(-1003, "мут", muted=True),
+        FakeDialog(-1004, "обычный"),
+    ])
+    rows = {row["id"]: row for row in await manager.list_dialogs(1)}
+    assert rows[-1001]["is_bot"] is True
+    assert rows[-1002]["archived"] is True
+    assert rows[-1003]["muted"] is True
+    assert rows[-1004]["is_bot"] is rows[-1004]["archived"] is rows[-1004]["muted"] is False
 
 
 # ─────────────────────────────── круг постинга ────────────────────────────────

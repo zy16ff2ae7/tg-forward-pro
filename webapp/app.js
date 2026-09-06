@@ -107,6 +107,9 @@ const FIELD_SPEC = {
   active_only: { label: 'Только живых (заходили в последние 3 суток)', control: 'check' },
   online_within_hours: { label: 'Был в сети не раньше, часов назад', control: 'number', placeholder: '0', note: '0 — не важно' },
   api_delay: { label: 'Пауза между запросами (сек)', control: 'number', placeholder: '0', note: 'для больших чатов — 1–2 секунды' },
+  ignore_bots: { label: 'Пропускать ботов', control: 'check', checked: true },
+  ignore_archived: { label: 'Пропускать архивные чаты', control: 'check', checked: true },
+  ignore_muted: { label: 'Пропускать заглушённые чаты', control: 'check', checked: true },
   mode: { label: 'Режим', control: 'mode' },
   message: {
     label: 'Сообщение',
@@ -516,9 +519,9 @@ const DEMO_COMMANDS = [
     description: 'Ловит чеки и подарочные ссылки в чатах и складывает в одно место.',
     tags: ['чеки и подарки', 'в один чат'] },
   { id: 'dialogs', group: 'inbox', kind: 'dialogs', emoji: '💬', title: 'Уведомления из диалогов', status: 'ready',
-    needs: ['account', 'target'], optional: ['keywords'],
+    needs: ['account', 'target'], optional: ['keywords', 'ignore_bots', 'ignore_archived', 'ignore_muted'],
     description: 'Присылает входящие личные сообщения в выбранный чат.',
-    hint: 'Источник не нужен: задача слушает все личные диалоги аккаунта.',
+    hint: 'Источник не нужен: задача слушает все личные диалоги аккаунта. Ботов, архивные и заглушённые чаты пропускает — галочки снимаются.',
     tags: ['личные сообщения', 'источник не нужен'] },
   { id: 'baiting', group: 'moderation', kind: 'baiting', emoji: '🎣', title: 'Байтинг', status: 'ready',
     needs: ['account', 'source', 'target_user'], optional: ['reaction'],
@@ -1028,6 +1031,11 @@ function demoTaskEdit(body, command, chats, libraryIds) {
   else if (kind === 'baiting') edit.reaction = body.reaction || '👍';
   else if (['checks', 'dialogs', 'mute'].includes(kind)) {
     edit.keywords = (body.keywords || []).join(', ');
+    if (kind === 'dialogs') {
+      edit.ignore_bots = body.ignore_bots !== undefined ? Boolean(body.ignore_bots) : true;
+      edit.ignore_archived = body.ignore_archived !== undefined ? Boolean(body.ignore_archived) : true;
+      edit.ignore_muted = body.ignore_muted !== undefined ? Boolean(body.ignore_muted) : true;
+    }
   } else if (kind === 'poster' || kind === 'mailing') {
     // Единый слот: форма правки одна на обе механики — отдаём оба набора
     // полей, как _edit_view на сервере. Иначе переключение режима в правке
@@ -3644,7 +3652,8 @@ function applyTaskPrefill(prefill) {
     'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats']
     .forEach((key) => setValue(key, prefill[key]));
   ['typing', 'random_pick', 'link_preview',
-    'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only']
+    'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only',
+    'ignore_bots', 'ignore_archived', 'ignore_muted']
     .forEach((key) => {
       const node = $(`task_${key}`);
       if (node) node.checked = Boolean(prefill[key]);
@@ -4165,6 +4174,9 @@ function collectTaskPayload() {
   flag('only_premium', values.only_premium);
   flag('only_with_photo', values.only_with_photo);
   flag('active_only', values.active_only);
+  flag('ignore_bots', values.ignore_bots);
+  flag('ignore_archived', values.ignore_archived);
+  flag('ignore_muted', values.ignore_muted);
   // Явный выбор из библиотеки важнее набранного текста — так же считает сервер.
   if (state.libraryPick.length) body.library_ids = state.libraryPick;
   else if (editing && OWN_TEXT_KINDS.includes(command.kind)) body.library_ids = [];

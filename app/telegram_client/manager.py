@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 from urllib.parse import urlparse
 
@@ -188,6 +189,23 @@ def _in_window(now_sec: int, start: int, end: int) -> bool:
     if start <= end:
         return start <= now_sec <= end
     return now_sec >= start or now_sec <= end
+
+
+def _dialog_muted(dialog: Any) -> bool:
+    """Чат заглушён: уведомления выключены до даты в будущем.
+
+    ``mute_until`` у Telethon — datetime; вечный мут — дата в 2038-м. Пустое
+    значение и прошлое — «не заглушён». Читаем утиной типизацией: моки диалогов
+    в тестах — SimpleNamespace без настоящих PeerNotifySettings.
+    """
+    notify = getattr(getattr(dialog, "dialog", None), "notify_settings", None)
+    mute_until = getattr(notify, "mute_until", None)
+    if not mute_until:
+        return False
+    if isinstance(mute_until, datetime):
+        aware = mute_until if mute_until.tzinfo else mute_until.replace(tzinfo=timezone.utc)
+        return aware > datetime.now(timezone.utc)
+    return True
 
 
 class ClientManager:
@@ -728,6 +746,11 @@ class ClientManager:
                     "username": getattr(entity, "username", None) or "",
                     "is_channel": bool(getattr(entity, "broadcast", False)),
                     "is_group": bool(getattr(entity, "megagroup", False)),
+                    # Флаги для уведомлений из диалогов: задача читает их из
+                    # этого же кэша, а не ходит в Telegram ради каждого письма.
+                    "is_bot": bool(getattr(entity, "bot", False)),
+                    "archived": bool(getattr(dialog, "archived", False)),
+                    "muted": _dialog_muted(dialog),
                 }
             )
         # В кэш идёт только полный обход: обрезанным списком потом ответили бы на

@@ -542,12 +542,43 @@ async def _mute(client: Any, message: Any, rule: RuleSnapshot) -> None:
     await record_ok(rule, message)
 
 
+async def _dialog_flags(account_id: int, chat_id: int) -> dict[str, Any]:
+    """Флаги чата (архив, мут) — из кэша диалогов, не из Telegram.
+
+    Импорт менеджера отложенный: manager импортирует этот модуль, и импорт
+    наверху закольцевался бы. Пустой кэш — «чат обычный»: уведомлениям лучше
+    прийти лишний раз, чем потеряться из-за недоступного списка.
+    """
+    from app.telegram_client.manager import manager
+
+    try:
+        dialogs = await manager.list_dialogs(account_id)
+    except Exception:
+        return {}
+    for chat in dialogs:
+        if int(chat.get("id", 0) or 0) == chat_id:
+            return chat
+    return {}
+
+
 async def _dialogs(client: Any, message: Any, rule: RuleSnapshot) -> None:
     """Присылает входящие личные сообщения в выбранный чат."""
     if not getattr(message, "is_private", False):
         return
     if getattr(message, "out", False):  # свои исходящие не пересылаем
         return
+    conf = rule.filters
+    if getattr(conf, "ignore_bots", True):
+        sender = getattr(message, "sender", None)
+        if getattr(sender, "bot", False):
+            return
+    chat_id = int(getattr(message, "chat_id", 0) or 0)
+    if chat_id and (getattr(conf, "ignore_archived", True) or getattr(conf, "ignore_muted", True)):
+        flags = await _dialog_flags(rule.account_id, chat_id)
+        if getattr(conf, "ignore_archived", True) and flags.get("archived"):
+            return
+        if getattr(conf, "ignore_muted", True) and flags.get("muted"):
+            return
 
     raw_text = message_text(message)
     if not raw_text and getattr(message, "media", None) is None:
