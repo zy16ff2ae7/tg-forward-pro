@@ -36,6 +36,7 @@ async def admin_stats(callback: CallbackQuery) -> None:
         users = await repo.count_users(session)
         forwarded = await repo.total_forwarded(session)
         active_subs = await repo.count_active_subscriptions(session)
+        day = await repo.forward_stats(session, None, 1)
 
     online = len(list(manager.online_ids()))
     text = (
@@ -43,7 +44,8 @@ async def admin_stats(callback: CallbackQuery) -> None:
         f"Пользователей: <b>{users}</b>\n"
         f"Активных абонементов: <b>{active_subs}</b>\n"
         f"Аккаунтов в сети: <b>{online}</b>\n"
-        f"Переслано сообщений: <b>{forwarded}</b>\n"
+        f"Переслано всего: <b>{forwarded}</b>\n"
+        f"Переслано за 24 ч: <b>{day['total']}</b>\n"
     )
     if callback.message is not None:
         await smart_edit(callback.message, text, reply_markup=kb.admin_menu())

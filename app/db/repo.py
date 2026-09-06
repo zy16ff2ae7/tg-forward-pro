@@ -553,6 +553,31 @@ async def delete_rule(session: AsyncSession, rule: Rule) -> None:
     await session.flush()
 
 
+async def duplicate_rule(session: AsyncSession, rule: Rule) -> Rule:
+    """Копия правила: те же источник/приёмник/фильтры, счётчики с нуля.
+
+    Копия создаётся на паузе: два одинаковых активных правила слали бы
+    каждый пост дважды, а включать копию пользователь должен осознанно.
+    """
+    clone = Rule(
+        user_id=rule.user_id,
+        account_id=rule.account_id,
+        source_id=rule.source_id,
+        source_title=rule.source_title,
+        target_id=rule.target_id,
+        target_title=rule.target_title,
+        enabled=False,
+        mode=rule.mode,
+        kind=rule.kind or "forward",
+        archived=False,
+        delay_seconds=rule.delay_seconds,
+        filters=dict(rule.filters or {}),
+    )
+    session.add(clone)
+    await session.flush()
+    return clone
+
+
 async def rules_for_source(
     session: AsyncSession, account_id: int, source_id: int
 ) -> Sequence[Rule]:
@@ -1171,6 +1196,48 @@ async def task_health(
         entry["error_at"] = log.created_at
         entry["failing"] = log.id > last_ok.get(log.rule_id, 0)
     return health
+
+
+async def forward_stats(
+    session: AsyncSession, user_id: int | None, days: int = 14
+) -> dict:
+    """Сколько успешных пересылок было в каждый из последних N дней.
+
+    Агрегация в Python, а не в SQL: даты в SQLite и Postgres режутся
+    по-разному, а строк за две недели — тысячи, не миллионы.
+    user_id=None — глобально по сервису (для админки).
+    """
+    days = max(1, min(days, 90))
+    cutoff = utcnow() - timedelta(days=days)
+    query = (
+        select(ForwardLog.created_at)
+        .where(ForwardLog.created_at >= cutoff, ForwardLog.status == "ok")
+        .order_by(ForwardLog.id.desc())
+        .limit(20000)
+    )
+    if user_id is not None:
+        query = query.where(ForwardLog.user_id == user_id)
+    rows = (await session.execute(query)).scalars().all()
+    per_day: dict[str, int] = {}
+    for ts in rows:
+        if ts is None:
+            continue
+        key = ts.date().isoformat()
+        per_day[key] = per_day.get(key, 0) + 1
+    return {"per_day": per_day, "total": sum(per_day.values())}
+
+
+async def recent_logs(
+    session: AsyncSession, user_id: int, limit: int = 30
+) -> Sequence[ForwardLog]:
+    """Последние срабатывания пользователя — для ленты активности."""
+    result = await session.execute(
+        select(ForwardLog)
+        .where(ForwardLog.user_id == user_id)
+        .order_by(ForwardLog.id.desc())
+        .limit(max(1, min(limit, 100)))
+    )
+    return result.scalars().all()
 
 
 async def trim_forward_logs(

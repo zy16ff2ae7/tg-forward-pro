@@ -12,7 +12,8 @@ import json
 import re
 import time
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qsl
 
@@ -270,7 +271,45 @@ def require_auth(handler: Callable) -> Callable:
     return wrapper
 
 
+# Простой in-memory rate limit для дорогих мутирующих эндпоинтов
+# (защита от спама созданием/запуском задач поверх лимитов nginx).
+# Декоратор обязан стоять ПОД @require_auth — user_id уже лежит в запросе.
+_RATE_BUCKETS: dict[tuple[int, str], list[float]] = {}
+
+
+def rate_limit(max_calls: int, period_seconds: int) -> Callable:
+    """Не чаще max_calls вызовов за period_seconds на пользователя. Лишнее — 429."""
+
+    def decorator(handler: Callable) -> Callable:
+        name = getattr(handler, "__name__", "handler")
+
+        async def wrapper(request: web.Request) -> web.StreamResponse:
+            user_id = request[USER_ID_KEY]
+            now = time.monotonic()
+            key = (int(user_id or 0), f"{name}:{max_calls}:{period_seconds}")
+            calls = _RATE_BUCKETS.setdefault(key, [])
+            while calls and calls[0] <= now - period_seconds:
+                calls.pop(0)
+            if len(calls) >= max_calls:
+                retry = int(calls[0] + period_seconds - now) + 1
+                return _json(
+                    {"error": f"Слишком часто. Повторите через {retry} сек."},
+                    status=429,
+                )
+            calls.append(now)
+            # Не даём словарю расти бесконечно (счётчики за прошлые периоды бесполезны)
+            if len(_RATE_BUCKETS) > 10000:
+                _RATE_BUCKETS.clear()
+            return await handler(request)
+
+        return wrapper
+
+    return decorator
+
+
 # ───────────────────────────────── Эндпоинты ──────────────────────────────────
+
+STARTED_AT = time.time()
 
 
 @routes.get("/api/health")
@@ -289,6 +328,14 @@ async def health(_request: web.Request) -> web.Response:
     except Exception as exc:  # noqa: BLE001 — health не должен падать из-за БД
         logger.debug("health: не прочитали журнал ожидания: {}", exc)
         delivery["persisted"] = None
+    db_size: int | None = None
+    url = settings.database_url
+    if url.startswith("sqlite"):
+        path = url.rsplit("///", 1)[-1].split("?", 1)[0]
+        try:
+            db_size = Path(path).stat().st_size
+        except OSError:
+            db_size = None
     return _json(
         {
             "ok": True,
@@ -296,6 +343,9 @@ async def health(_request: web.Request) -> web.Response:
             # Метка сборки мини-аппа: по ней кабинет понимает, что держит в
             # руках старый бандл, и перезагружается сам (см. webapp/app.js).
             "build": webapp_build.build_stamp(settings.webapp_dir),
+            "uptime_seconds": int(time.time() - STARTED_AT),
+            "accounts_online": sum(1 for _ in manager.online_ids()),
+            "db_size_bytes": db_size,
             "delivery": delivery,
         }
     )
@@ -726,6 +776,7 @@ async def _apply_task_settings(
 
 @routes.post("/api/tasks")
 @require_auth
+@rate_limit(20, 60)
 async def create_task(request: web.Request) -> web.Response:
     """Создаёт задачу любого типа.
 
@@ -1210,6 +1261,7 @@ async def archive_task(request: web.Request) -> web.Response:
 
 @routes.post(r"/api/tasks/{task_id:\d+}/run")
 @require_auth
+@rate_limit(10, 60)
 async def run_task(request: web.Request) -> web.Response:
     """Запускает разовую задачу: парсер аудитории или автоподписку."""
     user_id = request[USER_ID_KEY]
@@ -1550,6 +1602,146 @@ async def delete_task(request: web.Request) -> web.Response:
     return _json({"ok": True})
 
 
+@routes.get("/api/stats")
+@require_auth
+async def stats(request: web.Request) -> web.Response:
+    """Сводка для экрана статистики: итоги, пересылки по дням, топ задач."""
+    user_id = request[USER_ID_KEY]
+    try:
+        days = int(request.query.get("days") or 14)
+    except (TypeError, ValueError):
+        days = 14
+    days = max(1, min(days, 90))
+
+    async with SessionLocal() as session:
+        agg = await repo.forward_stats(session, user_id, days)
+        rules = list(await repo.list_rules(session, user_id, include_archived=False))
+        accounts = list(await repo.list_accounts(session, user_id))
+        until = await repo.subscription_until(session, user_id)
+
+    today = repo.utcnow().date()
+    per_day = [
+        {
+            "date": (today - timedelta(days=offset)).isoformat(),
+            "count": agg["per_day"].get((today - timedelta(days=offset)).isoformat(), 0),
+        }
+        for offset in range(days - 1, -1, -1)
+    ]
+    top = sorted(rules, key=lambda r: r.forwarded_count or 0, reverse=True)[:5]
+    return _json(
+        {
+            "totals": {
+                "rules": len(rules),
+                "accounts": len(accounts),
+                "forwarded": sum(r.forwarded_count or 0 for r in rules),
+                "forwarded_days": agg["total"],
+            },
+            "subscription": {
+                "active": until is not None,
+                "until": until.isoformat() if until else None,
+            },
+            "per_day": per_day,
+            "top_rules": [
+                {
+                    "id": r.id,
+                    "title": _task_view(r)["title"],
+                    "forwarded": r.forwarded_count or 0,
+                }
+                for r in top
+            ],
+        }
+    )
+
+
+@routes.get("/api/activity")
+@require_auth
+async def activity(request: web.Request) -> web.Response:
+    """Лента последних срабатываний: какая задача, где и чем закончилось."""
+    user_id = request[USER_ID_KEY]
+    limit = _as_int(request.query.get("limit"), 30)
+
+    async with SessionLocal() as session:
+        logs = list(await repo.recent_logs(session, user_id, limit))
+        titles = {r.id: _task_view(r)["title"] for r in await repo.list_rules(session, user_id)}
+
+    return _json(
+        {
+            "items": [
+                {
+                    "rule_id": row.rule_id,
+                    "rule_title": titles.get(row.rule_id, f"Задача #{row.rule_id}"),
+                    "status": row.status,
+                    "error": (row.error or "")[:160] if row.status != "ok" else None,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in logs
+            ]
+        }
+    )
+
+
+@routes.post(r"/api/tasks/{task_id:\d+}/duplicate")
+@require_auth
+@rate_limit(20, 60)
+async def duplicate_task(request: web.Request) -> web.Response:
+    """Копия задачи: те же источник/приёмник/настройки, но на паузе."""
+    user_id = request[USER_ID_KEY]
+    task_id = int(request.match_info["task_id"])
+
+    async with SessionLocal() as session:
+        rule = await repo.get_rule(session, task_id, user_id)
+        if rule is None:
+            return _json({"error": "Задача не найдена"}, status=404)
+        rules_count = await repo.count_rules(session, user_id, include_archived=False)
+        if not await repo.has_active_subscription(session, user_id):
+            if rules_count >= settings.max_rules_free:
+                return _json(
+                    {
+                        "error": f"Без абонемента доступно только {settings.max_rules_free} правила",
+                        "need_subscription": True,
+                    },
+                    status=402,
+                )
+        clone = await repo.duplicate_rule(session, rule)
+        await session.commit()
+        clone_id = clone.id
+
+    await manager.refresh_rules()
+    async with SessionLocal() as session:
+        saved = await repo.get_rule(session, clone_id, user_id)
+    return _json({"task": _task_view(saved)}, status=201)
+
+
+@routes.post(r"/api/tasks/{task_id:\d+}/test")
+@require_auth
+@rate_limit(6, 60)
+async def test_task(request: web.Request) -> web.Response:
+    """Тестовый пост в приёмник задачи — проверка, что аккаунт может писать."""
+    user_id = request[USER_ID_KEY]
+    task_id = int(request.match_info["task_id"])
+
+    async with SessionLocal() as session:
+        rule = await repo.get_rule(session, task_id, user_id)
+        if rule is None:
+            return _json({"error": "Задача не найдена"}, status=404)
+        if not isinstance(rule.target_id, int) or not rule.target_id:
+            return _json({"error": "У задачи нет приёмника"}, status=409)
+        if not await repo.has_active_subscription(session, user_id):
+            return _json(
+                {
+                    "error": "Тестовый пост доступен с абонементом",
+                    "need_subscription": True,
+                },
+                status=402,
+            )
+
+    _require_account_login()
+    result = await manager.send_test_post(rule.account_id, rule.target_id)
+    if not result["ok"]:
+        return _json({"error": result["error"]}, status=409)
+    return _json({"ok": True})
+
+
 @routes.get("/api/chats")
 @require_auth
 async def list_chats(request: web.Request) -> web.Response:
@@ -1769,6 +1961,7 @@ async def subscription(request: web.Request) -> web.Response:
 
 @routes.post("/api/subscription/invoice")
 @require_auth
+@rate_limit(6, 60)
 async def create_stars_invoice(request: web.Request) -> web.Response:
     """Ссылка на счёт в Telegram Stars для оплаты абонемента.
 

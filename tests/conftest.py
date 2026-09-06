@@ -107,6 +107,17 @@ def create_account():
 # ─────────────────────────── HTTP-клиенты кабинета ────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def clean_rate_limits():
+    """Rate-limit бакеты живут в памяти процесса — чистим между тестами,
+    иначе 429 из одного теста просочится в соседний."""
+    from app.webapp_api import _RATE_BUCKETS
+
+    _RATE_BUCKETS.clear()
+    yield
+    _RATE_BUCKETS.clear()
+
+
 @pytest.fixture
 def auth_headers() -> dict[str, str]:
     """Подпись Telegram: без неё любой эндпоинт кабинета отвечает 401."""

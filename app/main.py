@@ -19,7 +19,7 @@ from app.webapp_api import setup_webapp_routes
 from app.config import BASE_DIR, settings
 from app.db import repo
 from app.db.database import SessionLocal, dispose_db, init_db
-from app.errors import http_error_middleware, on_bot_error
+from app.errors import http_error_middleware, on_bot_error, security_headers_middleware
 from app.fsperms import harden_runtime_files
 from app.logging_setup import setup_logging
 from app.payments import crypto, yookassa
@@ -327,7 +327,7 @@ async def main() -> None:
 
     # HTTP-сервер поднимаем всегда: он раздаёт мини-апп и API,
     # а в режиме вебхука — ещё и принимает обновления Telegram.
-    app = web.Application(middlewares=[http_error_middleware])
+    app = web.Application(middlewares=[http_error_middleware, security_headers_middleware])
     if settings.use_webhook:
         SimpleRequestHandler(
             dispatcher=dp, bot=bot, secret_token=settings.webhook_secret

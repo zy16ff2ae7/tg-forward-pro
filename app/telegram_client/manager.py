@@ -793,6 +793,26 @@ class ClientManager:
                 found[key] = pair
         return found
 
+    async def send_test_post(self, account_id: int, target_id: int) -> dict[str, Any]:
+        """Тестовый пост в приёмник: проверяет, что аккаунт в сети и может писать."""
+        from telethon.errors import RPCError
+
+        client = self._clients.get(account_id)
+        if client is None or not client.is_connected():
+            return {"ok": False, "error": "Аккаунт не в сети. Перезапустите его в боте."}
+        if not target_id:
+            return {"ok": False, "error": "У задачи нет приёмника."}
+        try:
+            await client.send_message(target_id, "✅ Тестовый пост: приёмник на связи.")
+            return {"ok": True}
+        except FloodWaitError as exc:
+            wait = int(getattr(exc, "seconds", 60))
+            return {"ok": False, "error": f"Telegram просит подождать {wait} сек."}
+        except RPCError as exc:
+            return {"ok": False, "error": f"Не удалось написать в приёмник: {type(exc).__name__}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
     async def _resolve_by_api(
         self, client: TelegramClient, ref: str, numeric: int | None
     ) -> tuple[int, str] | None:

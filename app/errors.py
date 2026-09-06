@@ -105,6 +105,20 @@ async def http_error_middleware(request: web.Request, handler):
         return _json_error({"error": "Внутренняя ошибка сервера"}, 500)
 
 
+@web.middleware
+async def security_headers_middleware(request: web.Request, handler):
+    """Базовая гигиена HTTP-ответов мини-аппа.
+
+    X-Frame-Options специально НЕ ставим: мини-апп живёт во фрейме Telegram,
+    и запрет фреймов его сломает. Фрейминг снаружи закрывается проверкой
+    initData на каждом запросе.
+    """
+    response = await handler(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
+
 async def on_bot_error(event: ErrorEvent, bot: Bot | None = None) -> bool:
     """Глобальный перехватчик ошибок aiogram.
 

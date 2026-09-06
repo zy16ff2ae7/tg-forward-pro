@@ -12,7 +12,17 @@ from app.db.models import Rule, TelegramAccount
 from app.plans import PERIODS, stars_amount
 
 
-def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
+def main_menu(
+    is_admin: bool = False,
+    *,
+    rules_count: int | None = None,
+    accounts_online: int | None = None,
+    accounts_total: int | None = None,
+    sub_active: bool | None = None,
+) -> InlineKeyboardMarkup:
+    """Главное меню. Счётчики подставляются, когда известны, — так меню сразу
+    показывает состояние: сколько правил, сколько аккаунтов в сети, есть ли
+    абонемент."""
     builder = InlineKeyboardBuilder()
 
     # Кнопка мини-аппа — только если известен публичный HTTPS-адрес
@@ -24,12 +34,24 @@ def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
             )
         )
 
+    rules_label = "📡 Мои правила"
+    if rules_count is not None:
+        rules_label += f" ({rules_count})"
+    accounts_label = "👤 Аккаунты"
+    if accounts_total:
+        accounts_label += f" ({accounts_online or 0}/{accounts_total})"
+    sub_label = "💳 Подписка"
+    if sub_active is True:
+        sub_label += " ✅"
+    elif sub_active is False:
+        sub_label += " ❌"
+
     builder.row(
-        InlineKeyboardButton(text="📡 Мои правила", callback_data="menu:rules"),
-        InlineKeyboardButton(text="👤 Аккаунты", callback_data="menu:accounts"),
+        InlineKeyboardButton(text=rules_label, callback_data="menu:rules"),
+        InlineKeyboardButton(text=accounts_label, callback_data="menu:accounts"),
     )
     builder.row(
-        InlineKeyboardButton(text="💳 Подписка", callback_data="menu:sub"),
+        InlineKeyboardButton(text=sub_label, callback_data="menu:sub"),
         InlineKeyboardButton(text="❓ Помощь", callback_data="menu:help"),
     )
     if is_admin:

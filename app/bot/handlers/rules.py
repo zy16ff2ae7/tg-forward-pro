@@ -657,6 +657,11 @@ async def run_rule_now(callback: CallbackQuery) -> None:
         await callback.answer("Задача не найдена", show_alert=True)
         return
 
+    if callback.message is not None:
+        await smart_edit(
+            callback.message,
+            "⏳ <b>Выполняется…</b>\n\nЭто может занять пару минут — результат появится в этом же сообщении.",
+        )
     result = await manager.run_task_now(rule)
     if callback.message is not None:
         # Собранное считаем после запуска: парсер только что дописал находки, и

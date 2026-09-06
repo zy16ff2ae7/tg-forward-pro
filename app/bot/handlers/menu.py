@@ -20,8 +20,37 @@ from app.bot.utils import answer_with_banner, ensure_user, is_admin, smart_edit
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
+from app.telegram_client.jobs import task_title
+from app.telegram_client.manager import manager
 
 router = Router(name="menu")
+
+_BARS = "▁▂▃▄▅▆▇█"
+
+
+def _sparkline(values: list[int]) -> str:
+    """Мини-график одной строкой: ▁▂▃… по максимуму ряда."""
+    if not values or max(values) <= 0:
+        return "—"
+    peak = max(values)
+    return "".join(
+        _BARS[min(len(_BARS) - 1, round(v / peak * (len(_BARS) - 1)))] for v in values
+    )
+
+
+async def _menu_counts(user_id: int) -> dict:
+    """Счётчики для кнопок главного меню: правила, аккаунты в сети, абонемент."""
+    async with SessionLocal() as session:
+        rules_count = await repo.count_rules(session, user_id, include_archived=False)
+        accounts = list(await repo.list_accounts(session, user_id))
+        until = await repo.subscription_until(session, user_id)
+    online = sum(1 for a in accounts if manager.is_online(a.id))
+    return {
+        "rules_count": rules_count,
+        "accounts_online": online,
+        "accounts_total": len(accounts),
+        "sub_active": until is not None,
+    }
 
 # Диплинки из мини-аппа: /start <ключ>
 DEEP_LINKS = {
@@ -95,7 +124,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         return
 
     caption = texts.welcome(message.from_user.full_name or "друг")
-    reply = kb.main_menu(is_admin(user.id))
+    reply = kb.main_menu(is_admin(user.id), **await _menu_counts(user.id))
     await answer_with_banner(message, WELCOME_PHOTO, caption, reply_markup=reply)
 
 
@@ -126,7 +155,8 @@ async def cmd_app(message: Message) -> None:
 @router.message(Command("menu"))
 async def cmd_menu(message: Message) -> None:
     user = await ensure_user(message)
-    await message.answer("Главное меню:", reply_markup=kb.main_menu(is_admin(user.id)))
+    reply = kb.main_menu(is_admin(user.id), **await _menu_counts(user.id))
+    await message.answer("Главное меню:", reply_markup=reply)
 
 
 @router.callback_query(F.data == "menu:main")
@@ -135,9 +165,8 @@ async def back_to_main(callback: CallbackQuery) -> None:
     await callback.answer()
     if callback.message is None:
         return
-    await smart_edit(callback.message, 
-        "Главное меню:", reply_markup=kb.main_menu(is_admin(user.id))
-    )
+    reply = kb.main_menu(is_admin(user.id), **await _menu_counts(user.id))
+    await smart_edit(callback.message, "Главное меню:", reply_markup=reply)
 
 
 @router.callback_query(F.data == "menu:help")
@@ -203,13 +232,27 @@ async def cmd_stats(message: Message) -> None:
     """Короткая сводка по пользователю (без прав админа)."""
     if message.from_user is None:
         return
+    user_id = message.from_user.id
     async with SessionLocal() as session:
-        until = await repo.subscription_until(session, message.from_user.id)
-        rules_count = await repo.count_rules(session, message.from_user.id)
-    status = (
-        f"до {until:%d.%m.%Y}" if until else "не активен"
-    )
-    await message.answer(
-        f"📊 Ваша статистика\n\nАбонемент: {status}\nПравил: {rules_count}",
-        reply_markup=kb.back_to_main(),
-    )
+        until = await repo.subscription_until(session, user_id)
+        rules = list(await repo.list_rules(session, user_id, include_archived=False))
+        accounts = list(await repo.list_accounts(session, user_id))
+        agg = await repo.forward_stats(session, user_id)
+    ordered = [c for _, c in sorted(agg["per_day"].items())]
+    online = sum(1 for a in accounts if manager.is_online(a.id))
+    status = f"до {until:%d.%m.%Y}" if until else "не активен"
+    top = sorted(rules, key=lambda r: r.forwarded_count or 0, reverse=True)[:3]
+    lines = [
+        "📊 <b>Ваша статистика</b>",
+        "",
+        f"Абонемент: {status}",
+        f"Правил: <b>{len(rules)}</b> · аккаунтов в сети: <b>{online}/{len(accounts)}</b>",
+        f"Переслано за неделю: <b>{agg['total']}</b>",
+        f"<code>{_sparkline(ordered)}</code>",
+    ]
+    if top:
+        lines.append("")
+        lines.append("Топ задач:")
+        for rule in top:
+            lines.append(f"• {task_title(rule)} — {rule.forwarded_count or 0}")
+    await message.answer("\n".join(lines), reply_markup=kb.back_to_main())
