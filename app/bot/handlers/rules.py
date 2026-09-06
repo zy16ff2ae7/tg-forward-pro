@@ -4,7 +4,7 @@ from __future__ import annotations
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 from loguru import logger
 
 from app import exports
@@ -16,7 +16,7 @@ from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
 from app.telegram_client.filters import default_filters, parse_words
-from app.telegram_client.jobs import MAX_PARSER_LIMIT, task_title
+from app.telegram_client.jobs import COLLECTING_KINDS, MAX_PARSER_LIMIT, task_title
 from app.telegram_client.manager import manager
 
 router = Router(name="rules")
@@ -24,6 +24,26 @@ router = Router(name="rules")
 # Сколько строк собранного помещается в одно сообщение бота. Больше не влезает
 # по лимиту в 4096 знаков, поэтому весь список отдаётся файлом.
 RESULTS_PREVIEW = 20
+
+
+async def _collected_count(rule) -> int:
+    """Сколько задача уже нашла. У несобирающих задач — ноль без запроса."""
+    if (rule.kind or "forward") not in COLLECTING_KINDS:
+        return 0
+    async with SessionLocal() as session:
+        return await repo.count_collected_items(session, rule.id)
+
+
+async def _rule_view(rule) -> tuple[str, InlineKeyboardMarkup]:
+    """Карточка задачи и её меню — одним куском.
+
+    Обоим нужно одно число: сколько задача уже нашла. Карточке — чтобы не
+    показывать «сработало раз: 0» у парсера, собравшего тысячи (счётчик отправок
+    он не трогает), меню — чтобы «⬇️ Файлом» появлялась там, где файл получится
+    непустым.
+    """
+    collected = await _collected_count(rule)
+    return texts.rule_card(rule, collected=collected), kb.rule_menu(rule, collected=collected)
 
 
 @router.message(Command("rules"))
@@ -180,10 +200,8 @@ async def set_target(message: Message, state: FSMContext) -> None:
             reply_markup=kb.back_to_main(),
         )
         return
-    await wait.edit_text(
-        f"🎉 Правило создано!\n\n{texts.rule_card(rule)}",
-        reply_markup=kb.rule_menu(rule),
-    )
+    card, menu = await _rule_view(rule)
+    await wait.edit_text(f"🎉 Правило создано!\n\n{card}", reply_markup=menu)
 
 
 @router.callback_query(F.data.startswith("rule:open:"))
@@ -197,9 +215,8 @@ async def open_rule(callback: CallbackQuery) -> None:
         await callback.answer("Правило не найдено", show_alert=True)
         return
     if callback.message is not None:
-        await smart_edit(callback.message, 
-            texts.rule_card(rule), reply_markup=kb.rule_menu(rule)
-        )
+        card, menu = await _rule_view(rule)
+        await smart_edit(callback.message, card, reply_markup=menu)
 
 
 @router.callback_query(F.data.startswith("rule:toggle:"))
@@ -217,9 +234,8 @@ async def toggle_rule(callback: CallbackQuery) -> None:
         rule = await repo.get_rule(session, rule_id, callback.from_user.id)
     await manager.refresh_rules()
     if callback.message is not None and rule is not None:
-        await smart_edit(callback.message, 
-            texts.rule_card(rule), reply_markup=kb.rule_menu(rule)
-        )
+        card, menu = await _rule_view(rule)
+        await smart_edit(callback.message, card, reply_markup=menu)
 
 
 @router.callback_query(F.data.startswith("rule:mode:"))
@@ -236,9 +252,8 @@ async def switch_mode(callback: CallbackQuery) -> None:
         rule = await repo.get_rule(session, rule_id, callback.from_user.id)
     await manager.refresh_rules()
     if callback.message is not None and rule is not None:
-        await smart_edit(callback.message, 
-            texts.rule_card(rule), reply_markup=kb.rule_menu(rule)
-        )
+        card, menu = await _rule_view(rule)
+        await smart_edit(callback.message, card, reply_markup=menu)
 
 
 @router.callback_query(F.data.startswith("rule:delete:"))
@@ -311,8 +326,9 @@ async def set_delay(message: Message, state: FSMContext) -> None:
         rule = await repo.get_rule(session, rule_id, message.from_user.id)
     await manager.refresh_rules()
     await state.clear()
+    card, _ = await _rule_view(rule)
     await message.answer(
-        f"✅ Задержка: {delay} сек\n\n{texts.rule_card(rule)}",
+        f"✅ Задержка: {delay} сек\n\n{card}",
         reply_markup=kb.settings_menu(rule_id),
     )
 
@@ -603,7 +619,8 @@ async def archive_rule(callback: CallbackQuery) -> None:
     await manager.refresh_rules()
     if callback.message is not None and rule is not None:
         note = "📦 Задача убрана в архив.\n\n" if archived else "↩️ Задача возвращена из архива.\n\n"
-        await smart_edit(callback.message, note + texts.rule_card(rule), reply_markup=kb.rule_menu(rule))
+        card, menu = await _rule_view(rule)
+        await smart_edit(callback.message, note + card, reply_markup=menu)
 
 
 @router.callback_query(F.data.startswith("rule:run:"))
@@ -621,7 +638,11 @@ async def run_rule_now(callback: CallbackQuery) -> None:
 
     result = await manager.run_task_now(rule)
     if callback.message is not None:
-        await smart_edit(callback.message, _run_result_text(rule, result), reply_markup=kb.rule_menu(rule))
+        # Собранное считаем после запуска: парсер только что дописал находки, и
+        # «⬇️ Файлом» нужна здесь же — иначе за файлом пришлось бы идти через
+        # «Результаты», хотя человек стоит ровно на итоге сбора.
+        menu = kb.rule_menu(rule, collected=await _collected_count(rule))
+        await smart_edit(callback.message, _run_result_text(rule, result), reply_markup=menu)
 
 
 def _run_result_text(rule, result: dict) -> str:

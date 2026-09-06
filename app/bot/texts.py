@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.config import settings
-from app.timeutil import utcnow
+from app.timeutil import tz_suffix, utcnow
 
 
 def welcome(name: str) -> str:
@@ -129,9 +129,23 @@ def bonus_card(claimed: bool) -> str:
     )
 
 
-def rule_card(rule) -> str:
-    """Карточка задачи. Состав строк зависит от типа задачи."""
-    from app.telegram_client.jobs import KIND_LABELS, chat_recipients, task_title
+def rule_card(rule, *, collected: int = 0) -> str:
+    """Карточка задачи. Состав строк зависит от типа задачи.
+
+    ``collected`` — сколько задача уже нашла (строки в ``collected_items``).
+    Число приходит снаружи: у парсера счётчик отправок ``forwarded_count``
+    остаётся нулём навсегда — он считает отправленные сообщения, а парсер
+    ничего не отправляет, и карточка годами говорила «сработало раз: 0» после
+    собранных тысяч.
+    """
+    from app.telegram_client.filters import FilterConfig
+    from app.telegram_client.jobs import (
+        COLLECTING_KINDS,
+        KIND_LABELS,
+        ONE_SHOT_KINDS,
+        chat_recipients,
+        task_title,
+    )
 
     kind = rule.kind or "forward"
     filters = rule.filters or {}
@@ -179,8 +193,43 @@ def rule_card(rule) -> str:
     if keywords:
         lines.append(f"Ключевые слова: {', '.join(str(word) for word in keywords)}")
 
-    lines.append(f"Задержка: {rule.delay_seconds} сек")
-    lines.append(f"Сработало раз: {rule.forwarded_count}")
+    # Чем задача живёт: расписанием, кнопкой или входящими сообщениями. Раньше
+    # тут у всех стояла «Задержка: N сек», хотя постинг, рассылку и парсер она не
+    # касается вовсе (её отрабатывает только путь входящего сообщения), а
+    # настоящее расписание — интервал, окно, паузу и круги — в боте было не
+    # видно: за ним приходилось идти в кабинет.
+    conf = FilterConfig.from_dict(filters)
+    if kind == "poster":
+        lines.append(f"Раз в {max(1, int(conf.interval_seconds) // 60)} мин")
+        window = f"{conf.window_start}–{conf.window_end}"
+        clock = "по часам сервера" if conf.window_tz is None else tz_suffix(conf.window_tz)
+        lines.append(f"Окно: {window} {clock}")
+    elif kind == "mailing":
+        lines.append(f"Пауза между чатами: {conf.gap_seconds} сек")
+        lines.append(f"Кругов: {conf.repeats}" if conf.repeats else "Кругов: без конца")
+    elif kind == "parser":
+        lines.append("Запуск: по кнопке")
+    elif kind == "autosubscribe":
+        # Автоподписка живёт двумя путями сразу: кнопкой по списку каналов и по
+        # ссылкам, которые находит в источнике. Второй путь и есть тот случай,
+        # когда задержка работает, — о ней говорим только там.
+        if rule.source_id:
+            lines.append("Запуск: по кнопке и по ссылкам из источника")
+            if rule.delay_seconds:
+                lines.append(f"Задержка: {rule.delay_seconds} сек")
+        else:
+            lines.append("Запуск: по кнопке")
+    else:
+        lines.append(f"Задержка: {rule.delay_seconds} сек")
+
+    # Сделанное. У собирающих задач это найденные записи (их же показывает
+    # кнопка «Результаты»), у автоподписки — вступления, у остальных — отправки.
+    if kind in COLLECTING_KINDS:
+        lines.append(f"{'Поймано' if kind == 'checks' else 'Собрано'}: {collected}")
+    elif kind in ONE_SHOT_KINDS:
+        lines.append(f"Вступили в чаты: {rule.forwarded_count}")
+    else:
+        lines.append(f"Сработало раз: {rule.forwarded_count}")
 
     blacklist = filters.get("blacklist") or []
     whitelist = filters.get("whitelist") or []

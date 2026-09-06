@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from types import SimpleNamespace
 
 import pytest
 
@@ -29,37 +28,9 @@ from app.db import repo
 from app.db.database import session_scope
 from app.db.models import Rule
 from app.telegram_client.jobs import task_title
-from tests.helpers import TEST_USER_ID, RecordingBot
+from tests.helpers import TEST_USER_ID, FakeCallback, RecordingBot, make_collector
 
 pytestmark = pytest.mark.usefixtures("database")
-
-
-async def make_collector(
-    create_user, create_account, *, kind: str = "parser", count: int = 3
-) -> int:
-    """Задача-сборщик с готовыми находками. Возвращает её id."""
-    user_id = await create_user(id=TEST_USER_ID)
-    account_id = await create_account(user_id)
-    async with session_scope() as session:
-        rule = Rule(
-            user_id=user_id,
-            account_id=account_id,
-            source_id=-1001,
-            target_id=-1002,
-            kind=kind,
-            source_title="Театр у моря",
-        )
-        session.add(rule)
-        await session.flush()
-        rule_id = rule.id
-        payloads = [
-            {"user_id": 500 + n, "username": f"guest_{n}", "name": f"Гость {n}", "phone": ""}
-            if kind == "parser"
-            else {"chat_id": -100, "message_id": n, "link": f"https://t.me/g/{n}", "text": "чек"}
-            for n in range(1, count + 1)
-        ]
-        await repo.add_collected_items(session, rule_id, user_id, kind, payloads)
-    return rule_id
 
 
 # ─────────────────────────────── Страницы ─────────────────────────────────────
@@ -270,39 +241,6 @@ def test_caption_does_not_break_on_angle_brackets():
 
 
 # ─────────────────────────── То же самое в боте ───────────────────────────────
-
-
-class FakeMessage:
-    """Сообщение с меню задачи: правку смотрим по тому, что в него написали."""
-
-    photo = document = video = animation = None
-
-    def __init__(self) -> None:
-        self.text = "Меню задачи"
-        self.edits: list[tuple[str, object]] = []
-
-    async def edit_text(self, text: str, reply_markup=None, **kwargs):
-        self.edits.append((text, reply_markup))
-        return self
-
-
-class FakeCallback:
-    """Нажатие кнопки: ровно то, чего касаются хендлеры, и ничего больше."""
-
-    def __init__(self, data: str, bot, *, user_id: int = TEST_USER_ID) -> None:
-        self.data = data
-        self.bot = bot
-        self.from_user = SimpleNamespace(id=user_id)
-        self.message = FakeMessage()
-        self.answers: list[tuple[str, bool]] = []
-
-    async def answer(self, text: str = "", show_alert: bool = False, **kwargs) -> None:
-        self.answers.append((text, show_alert))
-
-    @property
-    def alerts(self) -> str:
-        """Всё, что человек увидел всплывающим окном, одной строкой."""
-        return " ".join(text for text, alert in self.answers if alert)
 
 
 async def test_bot_sends_the_same_file(create_user, create_account):

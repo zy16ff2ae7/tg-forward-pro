@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from html import escape
 from typing import Any, Sequence
 
+from app.timeutil import tz_suffix as _tz_suffix
 from app.timeutil import utcnow
 
 # Заголовок — теми же словами, что и в шторке кабинета: человек нажал
@@ -71,14 +72,10 @@ def tz_suffix(tz_minutes: int | None) -> str:
     """Чем подписать колонку времени: «UTC+3» или просто «UTC».
 
     В базе всё в UTC, а человек читает файл по своим часам. Без подписи он бы
-    решил, что парсер работал ночью, и не поверил бы собранному.
+    решил, что парсер работал ночью, и не поверил бы собранному. Сама подпись
+    живёт в ``app.timeutil``: теми же словами названо окно постинга в карточке.
     """
-    minutes = int(tz_minutes or 0)
-    if not minutes:
-        return "UTC"
-    hours, rest = divmod(abs(minutes), 60)
-    tail = f":{rest:02d}" if rest else ""
-    return f"UTC{'+' if minutes > 0 else '-'}{hours}{tail}"
+    return _tz_suffix(tz_minutes)
 
 
 def _when(value: Any, tz_minutes: int | None) -> str:
