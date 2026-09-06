@@ -342,8 +342,8 @@ button { border: none; background: none; cursor: pointer; }
   inset: 0;
   background-image: var(--hero-image, none);
   background-size: cover;
-  /* Девушка стоит справа: кадр держим на короне и лице */
-  background-position: 62% 26%;
+  /* Девушка справа: кадр держим на лице */
+  background-position: 78% 30%;
   opacity: 0.95;
 }
 
@@ -1634,6 +1634,17 @@ button { border: none; background: none; cursor: pointer; }
   font-size: 34px;
   line-height: 1;
   filter: drop-shadow(0 0 14px rgba(255, 61, 154, 0.4));
+}
+
+/* Дремлющий кот в пустых экранах: круг со свечением, кадр на мордочке */
+.empty__pic {
+  width: 118px;
+  height: 118px;
+  object-fit: cover;
+  object-position: 50% 56%;
+  border-radius: 50%;
+  border: 1px solid var(--line-hi);
+  box-shadow: var(--glow), 0 8px 26px rgba(0, 0, 0, 0.45);
 }
 
 .empty__title {

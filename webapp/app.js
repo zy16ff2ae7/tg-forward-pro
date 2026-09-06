@@ -1516,7 +1516,8 @@ function renderHomeTasks() {
       'Пока ничего не работает',
       paused
         ? `${paused} задач(и) на паузе — снимите с паузы или создайте новую.`
-        : 'Нажмите корону внизу или «создать задачу» — соберём первую вместе.'
+        : 'Нажмите корону внизу или «создать задачу» — соберём первую вместе.',
+      'assets/cat.jpg'
     );
     return;
   }
@@ -2167,7 +2168,9 @@ function renderTasks(tasks) {
       done: ['📦', 'Завершённых задач нет', 'Архив появится здесь после первых запусков.'],
     }[state.taskStatus];
     if (query) texts = ['🔍', 'Ничего не найдено', 'Попробуйте другое слово или сбросьте поиск.'];
-    holder.innerHTML = emptyHtml(texts[0], texts[1], texts[2]);
+    // Кот дремлет там, где всё спит: активные пусты и поиск не при чём.
+    const pic = !query && state.taskStatus === 'active' ? 'assets/cat.jpg' : null;
+    holder.innerHTML = emptyHtml(texts[0], texts[1], texts[2], pic);
     return;
   }
 
@@ -4245,10 +4248,13 @@ function renderMore() {
 
 /* ────────────────────────────── Пустое состояние ─────────────────────── */
 
-function emptyHtml(emoji, title, text) {
+function emptyHtml(emoji, title, text, pic = null) {
+  const head = pic
+    ? `<img class="empty__pic" src="${pic}" alt="" loading="lazy">`
+    : `<div class="empty__big">${emoji}</div>`;
   return `
     <div class="empty">
-      <div class="empty__big">${emoji}</div>
+      ${head}
       <div class="empty__title">${esc(title)}</div>
       <div>${esc(text)}</div>
     </div>`;
