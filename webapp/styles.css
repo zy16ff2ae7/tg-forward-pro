@@ -164,10 +164,48 @@ button { border: none; background: none; cursor: pointer; }
   100% { transform: translateX(250%); }
 }
 
+/* ДОЧА на заставке: фото приглушено вуалью, контент поверх */
+.boot__bg {
+  position: absolute;
+  inset: 0;
+  background: url("assets/docha.jpg") 78% 30% / cover no-repeat;
+  opacity: 0.3;
+}
+
+.boot__bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(90% 60% at 50% 42%, transparent 30%, rgba(10, 5, 16, 0.72) 78%),
+    linear-gradient(180deg, rgba(10, 5, 16, 0.55) 0%, rgba(10, 5, 16, 0.82) 100%);
+}
+
+.boot > *:not(.boot__bg) { position: relative; z-index: 1; }
+
+.boot__tip {
+  min-height: 32px;
+  max-width: 250px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+@keyframes bootFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-7px); }
+}
+
 /* ══════════════════════════ Корона: знак бренда ══════════════════════════ */
 
 .mascot { display: block; width: 40px; height: 40px; }
-.mascot--lg { width: 84px; height: 84px; }
+.mascot--lg {
+  width: 88px;
+  height: 88px;
+  filter: drop-shadow(0 0 26px rgba(255, 61, 154, 0.55));
+  animation: bootFloat 3s ease-in-out infinite;
+}
 .mascot--md { width: 56px; height: 56px; }
 .mascot--logo { width: 30px; height: 30px; }
 
@@ -529,6 +567,32 @@ button { border: none; background: none; cursor: pointer; }
 .tile:active { transform: scale(0.96); border-color: var(--line-hi); }
 .tile__ico { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; font-size: 17px; }
 .tile__name { font-size: 11px; letter-spacing: 0.01em; color: var(--muted); text-align: center; }
+
+/* Выбор «Что создаём»: сетка команд 3 в ряд, иконка + короткое имя */
+.create-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+  padding: 4px 2px 8px;
+}
+
+.create-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 13px 4px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--glass);
+  transition: transform 0.14s ease, border-color 0.14s ease;
+}
+
+.create-cell:active { transform: scale(0.95); border-color: var(--line-hi); }
+.create-cell.is-off { opacity: 0.45; }
+.create-cell .tile__ico { width: 40px; height: 40px; border-radius: 13px; }
+.create-cell .tile__ico .ic { width: 21px; height: 21px; }
+.create-cell__name { font-size: 11px; line-height: 1.25; color: var(--muted); text-align: center; }
 
 /* Цвета плиток и карточек команд: у каждой группы свой оттенок, чтобы список
    читался как набор инструментов, а не как одна простыня. */

@@ -1682,6 +1682,26 @@ function openCommand(id) {
   }
 }
 
+/* Выбор «Что создаём»: сетка команд вместо прыжка в пустую форму. Сюда ведут
+   корона, FAB и кнопка на главной — одно окно на все три входа. */
+function openCreateSheet() {
+  if (!state.commands.length) {
+    toast('Каталог команд ещё не загружен');
+    return;
+  }
+  const holder = $('createGrid');
+  holder.innerHTML = state.commands
+    .map(
+      (command) => `
+      <button class="create-cell${command.status === 'ready' ? '' : ' is-off'}" data-command="${command.id}">
+        <span class="tile__ico ${icoClass(command.kind)}" aria-hidden="true">${icon(kindIcon(command.kind))}</span>
+        <span class="create-cell__name">${esc(command.title)}</span>
+      </button>`
+    )
+    .join('');
+  $('createSheet').classList.add('is-open');
+}
+
 /* ─────────────────────────────── Команды ─────────────────────────────── */
 
 async function loadCommands() {
@@ -4374,8 +4394,17 @@ function bindEvents() {
   });
   // Корона в центре навигации — то же, что «создать задачу»: главное действие
   // кабинета должно быть под большим пальцем, а не в глубине экрана.
-  $('crownBtn').addEventListener('click', () => { buzz('light'); openTaskSheet(null); });
+  $('crownBtn').addEventListener('click', () => { buzz('light'); openCreateSheet(); });
   bindBackButton();
+
+  // Выбор команды в шторке «Что создаём»: закрываем выбор, открываем форму.
+  $('createGrid').addEventListener('click', (event) => {
+    const cell = event.target.closest('[data-command]');
+    if (!cell) return;
+    buzz('select');
+    closeSheets();
+    openCommand(cell.dataset.command);
+  });
 
   // Поиск по задачам: фильтрует уже загруженный список, без запросов.
   $('taskSearch').addEventListener('input', (event) => {
@@ -4384,7 +4413,7 @@ function bindEvents() {
   });
 
   // главная
-  $('homeCreate').addEventListener('click', () => openTaskSheet(null));
+  $('homeCreate').addEventListener('click', () => { buzz('light'); openCreateSheet(); });
   $('homeTiles').addEventListener('click', (event) => {
     const tile = event.target.closest('[data-command], [data-goto]');
     if (!tile) return;
@@ -4468,7 +4497,7 @@ function bindEvents() {
     taskAction(button.dataset.action, button.dataset.id, button);
   });
   // «＋ Запустить задачу» без выбранной команды — открываем пересылку
-  $('addTaskBtn').addEventListener('click', () => { buzz('light'); openTaskSheet(null); });
+  $('addTaskBtn').addEventListener('click', () => { buzz('light'); openCreateSheet(); });
 
   // чаты
   renderChatTags();
@@ -4740,8 +4769,38 @@ async function reloadIfBuildIsStale() {
   return true;
 }
 
+/* Советы на заставке: крутятся, пока кабинет грузится. Короткие — заставка
+   живёт секунды, длинный текст никто не дочитает. */
+const BOOT_TIPS = [
+  'Задачи работают 24/7 — даже когда вы офлайн',
+  'Копия канала — без метки «Переслано от»',
+  'Рассылка идёт по чатам поштучно: чат, пауза, следующий',
+  'Парсер собирает участников чужого чата',
+  'Ловец чеков складывает подарочные ссылки в одно место',
+];
+
+let bootTipTimer = null;
+
+function startBootTips() {
+  const node = $('bootTip');
+  if (!node) return;
+  let idx = Math.floor(Math.random() * BOOT_TIPS.length);
+  node.textContent = BOOT_TIPS[idx];
+  bootTipTimer = setInterval(() => {
+    idx = (idx + 1) % BOOT_TIPS.length;
+    node.textContent = BOOT_TIPS[idx];
+  }, 1800);
+}
+
+function stopBootTips() {
+  clearInterval(bootTipTimer);
+  bootTipTimer = null;
+}
+
 async function boot() {
   if (await reloadIfBuildIsStale()) return;
+  const bootStarted = Date.now();
+  startBootTips();
   if (tg) {
     tg.ready();
     tg.expand();
@@ -4783,7 +4842,11 @@ async function boot() {
     ]);
   } finally {
     // Заставку убираем в любом случае: если часть запросов упала, пользователь
-    // всё равно должен увидеть кабинет и кнопки «Повторить».
+    // всё равно должен увидеть кабинет и кнопки «Повторить». Но не раньше, чем
+    // через секунду: мелькнувший логотип выглядит как глюк, а не как бренд.
+    stopBootTips();
+    const elapsed = Date.now() - bootStarted;
+    if (elapsed < 1000) await new Promise((r) => setTimeout(r, 1000 - elapsed));
     $('boot').classList.add('is-hidden');
   }
 }
