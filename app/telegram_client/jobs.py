@@ -502,6 +502,11 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
         try:
             await send_copy(client, target, message, text)
             sent += 1
+        except FloodWaitError:
+            # «Подождите» — не отказ чата, а пауза всего задания: отдаём её
+            # наверх очереди, она подождёт вне слота отправки и повторит всё
+            # задание. Глотать её здесь — значит молча потерять оставшиеся чаты.
+            raise
         except RPCError as exc:
             logger.warning("Рассылка #{}: не ушло в {}: {}", rule.id, target, exc)
     if sent:
@@ -577,9 +582,17 @@ async def _checks(client: Any, message: Any, rule: RuleSnapshot) -> None:
             {"chat_id": chat_id, "message_id": message_id, "link": None, "text": raw_text[:500]}
         ]
 
+    # Сначала в хранилище, потом в чат: если отправка упадёт, находка уже
+    # сохранена и не потеряется вместе с ошибкой.
+    _, capped = await _store(rule, "checks", payloads)
     if rule.target_id:
         await send_copy(client, rule.target_id, message, transform_text(raw_text, rule.filters))
-    await _store(rule, "checks", payloads)
+    if capped:
+        logger.warning(
+            "Ловец чеков #{}: хранилище переполнено ({}), новые находки отброшены",
+            rule.id,
+            MAX_PARSER_LIMIT,
+        )
     await record_ok(rule, message)
 
 
@@ -670,16 +683,36 @@ async def run_parser(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
                 }
             )
     except FloodWaitError as exc:
+        # Собранное до отказа сохраняем: иначе 180 найденных участников
+        # пропадали вместе с ошибкой и следующий запуск начинал с нуля.
+        added, capped = await _store(rule, "parser", payloads)
         return {
             "ok": False,
             "error": f"Telegram просит подождать {int(getattr(exc, 'seconds', 60))} сек",
-            "collected": 0,
+            "collected": added,
+            "partial": True,
+            "capped": capped,
+            "skipped": skipped,
         }
     except RPCError as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "collected": 0}
+        added, capped = await _store(rule, "parser", payloads)
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "collected": added,
+            "partial": True,
+            "capped": capped,
+            "skipped": skipped,
+        }
 
-    added = await _store(rule, "parser", payloads)
-    return {"ok": True, "collected": added, "skipped": skipped, "limit": limit}
+    added, capped = await _store(rule, "parser", payloads)
+    return {
+        "ok": True,
+        "collected": added,
+        "skipped": skipped,
+        "limit": limit,
+        "capped": capped,
+    }
 
 
 async def run_autosubscribe(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
@@ -812,20 +845,31 @@ async def _sender_header(message: Any) -> str:
     return f"💬 {name} (id {sender_id}):\n"
 
 
-async def _store(rule: RuleSnapshot, kind: str, payloads: list[dict]) -> int:
-    """Кладёт собранные результаты в БД."""
+async def _store(rule: RuleSnapshot, kind: str, payloads: list[dict]) -> tuple[int, bool]:
+    """Кладёт собранные результаты в БД. Возвращает (записано, упёрлись в лимит).
+
+    Больше MAX_PARSER_LIMIT записей на правило не храним: иначе повторные
+    запуски растят таблицу бесконечно, а множество «уже собранных» (оно
+    читается с тем же лимитом) перестаёт их всех покрывать — и старые находки
+    начинают дублироваться.
+    """
     if not payloads:
-        return 0
+        return 0, False
     async with SessionLocal() as session:
+        existing = await repo.count_collected_items(session, rule.id)
+        room = MAX_PARSER_LIMIT - existing
+        if room <= 0:
+            return 0, True
+        trimmed = payloads[:room]
         added = await repo.add_collected_items(
             session,
             rule_id=rule.id,
             user_id=rule.user_id,
             kind=kind,
-            payloads=payloads,
+            payloads=trimmed,
         )
         await session.commit()
-    return added
+    return added, len(payloads) > room
 
 
 async def record_ok(rule: RuleSnapshot, message: Any, count: int = 1) -> None:

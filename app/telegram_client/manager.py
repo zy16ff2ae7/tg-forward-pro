@@ -1285,6 +1285,20 @@ class ClientManager:
         from app.telegram_client.jobs import record_oneshot, run_oneshot
 
         snapshot = _snapshot(rule)
+        # Абонемент проверяем здесь, а не в вызывателях: сюда сходятся кнопка
+        # кабинета, кнопка бота и автозапуск при создании — дырка в любом из
+        # трёх давала бы запуски с кончившейся подпиской.
+        if not await subscription_active(rule.user_id):
+            result = {
+                "ok": False,
+                "error": "Запуск доступен с абонементом — продлите подписку.",
+                "need_subscription": True,
+            }
+            try:
+                await record_oneshot(snapshot, result)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Запуск задачи #{} не попал в журнал: {}", rule.id, exc)
+            return result
         client = self._clients.get(rule.account_id)
         if client is None or not client.is_connected():
             result = {

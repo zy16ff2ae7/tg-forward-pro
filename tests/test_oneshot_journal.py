@@ -134,6 +134,11 @@ async def make_oneshot(
     подписанный initData.
     """
     user_id = user_id or await create_user()
+    # Запуск gated абонементом: тесты проверяют сам запуск, а не оплату,
+    # поэтому пробник выдаём здесь же (повторная выдача — no-op).
+    async with session_scope() as session:
+        await repo.grant_trial(session, user_id)
+        await session.commit()
     account_id = await create_account(user_id)
     async with session_scope() as session:
         rule = Rule(

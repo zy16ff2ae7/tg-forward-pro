@@ -187,8 +187,21 @@ async def set_target(message: Message, state: FSMContext) -> None:
     target_id, target_title = found
     assert message.from_user is not None
 
+    # Приёмник совпал с источником — такое правило молча ничего не делает:
+    # свои же форварды аккаунт не читает. Ловим здесь, как в кабинете.
+    if int(target_id) == int(data["source_id"]):
+        await wait.edit_text(
+            "❌ Приёмник совпадает с источником — пересылать будет некуда.\n\n"
+            "Пришлите другой чат:",
+            reply_markup=kb.cancel_kb(),
+        )
+        return
+
     async with SessionLocal() as session:
-        rules_count = await repo.count_rules(session, message.from_user.id)
+        # Архив в лимит не входит — так же считает кабинет.
+        rules_count = await repo.count_rules(
+            session, message.from_user.id, include_archived=False
+        )
         subscribed = await repo.has_active_subscription(session, message.from_user.id)
         if not subscribed and rules_count >= settings.max_rules_free:
             await state.clear()

@@ -631,6 +631,16 @@ async def add_collected_items(
     return added
 
 
+async def count_collected_items(session: AsyncSession, rule_id: int) -> int:
+    """Сколько результатов уже лежит у задачи-сборщика."""
+    result = await session.execute(
+        select(func.count())
+        .select_from(CollectedItem)
+        .where(CollectedItem.rule_id == rule_id)
+    )
+    return int(result.scalar() or 0)
+
+
 async def list_collected_items(
     session: AsyncSession, rule_id: int, limit: int = 100, offset: int = 0
 ) -> Sequence[CollectedItem]:
