@@ -233,3 +233,103 @@ async def test_oneshot_second_run_is_busy(create_user, create_account):
 
     assert result["ok"] is False
     assert "ещё идёт" in result["error"]
+
+
+# ───────────────── M1-хвост: подтверждения USDT ─────────────────────────
+
+
+def test_confirmed_only_follows_setting(monkeypatch):
+    """USDT_MIN_CONFIRMATIONS — не пустышка: 0 разрешает свежие переводы."""
+    monkeypatch.setattr(settings, "usdt_min_confirmations", 1)
+    assert crypto._confirmed_only() is True
+    monkeypatch.setattr(settings, "usdt_min_confirmations", 5)
+    assert crypto._confirmed_only() is True
+    monkeypatch.setattr(settings, "usdt_min_confirmations", 0)
+    assert crypto._confirmed_only() is False
+
+
+async def test_fetch_sends_only_confirmed_flag(monkeypatch):
+    """Флаг из настройки реально уходит в запрос к TronGrid."""
+    monkeypatch.setattr(settings, "usdt_wallet", "TOurWallet")
+    seen: dict = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def json(self, content_type=None):
+            return {"data": []}
+
+    class FakeGet:
+        def __init__(self, params):
+            seen.update(params)
+
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class FakeSession:
+        def get(self, url, params=None, headers=None, timeout=None):
+            return FakeGet(params or {})
+
+    monkeypatch.setattr(settings, "usdt_min_confirmations", 1)
+    assert await crypto._fetch_transactions(FakeSession()) == []
+    assert seen.get("only_confirmed") == "true"
+
+    monkeypatch.setattr(settings, "usdt_min_confirmations", 0)
+    assert await crypto._fetch_transactions(FakeSession()) == []
+    assert seen.get("only_confirmed") == "false"
+
+
+# ─────────────── M10: дамп с api_hash не остаётся в /tmp ─────────────────
+
+
+def _load_script(name: str):
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "scripts" / name
+    spec = importlib.util.spec_from_file_location(name.removesuffix(".py"), path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_dump_cleanup_removes_file(tmp_path, monkeypatch):
+    """Успешный прогон get_api_credentials затирает дамп с api_hash."""
+    script = _load_script("get_api_credentials.py")
+    dump = tmp_path / "apps.html"
+    dump.write_text("<html>hash</html>")
+    monkeypatch.setattr(script, "DUMP", dump)
+    script.cleanup_dump()
+    assert not dump.exists()
+
+
+# ─────────── L6/L9: деплой везёт нужное и не везёт лишнее ─────────────────
+
+
+def _repo_root():
+    from pathlib import Path
+
+    return Path(__file__).resolve().parent.parent
+
+
+def test_requirements_cover_postgres_driver():
+    """.env.example обещает Postgres одной строкой — драйвер должен ставиться."""
+    requirements = (_repo_root() / "requirements.txt").read_text()
+    assert "asyncpg" in requirements
+
+
+def test_deploy_keeps_dev_tools_off_the_server():
+    """gen_initdata (подпись чужого кабинета) и tests/ на сервер не едут."""
+    deploy = (_repo_root() / "deploy" / "deploy.sh").read_text()
+    assert "scripts/gen_initdata.py" in deploy
+    assert "--exclude 'tests/'" in deploy
+    for line in deploy.splitlines():
+        assert line.strip() not in (
+            "--exclude 'scripts' \\",
+            "--exclude 'scripts/' \\",
+            "--exclude 'scripts/*' \\",
+        ), "рабочие скрипты (import/export_session) нужны на сервере"

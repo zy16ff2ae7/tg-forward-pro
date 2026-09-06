@@ -31,12 +31,19 @@ echo "==> Синхронизирую файлы в $TARGET_HOST:$APP_DIR"
 # Поэтому под запретом всё .env.*, а .env.example разрешён явно и раньше запрета —
 # в rsync побеждает первое подошедшее правило, а без примера первый деплой не соберёт .env.
 
+# Имперсонация и dev-инструменты на сервер не едут:
+# - tests/ на проде не нужны никогда;
+# - scripts/gen_initdata.py подписывает валидный initData на любой user_id —
+#   готовый ключ от чужого кабинета при доступе к серверу. Остальные скрипты
+#   (import/export_session, gen_secret) на сервере используются, их оставляем.
 rsync -av --delete \
   --exclude '.git' \
   --exclude 'venv' \
   --exclude '__pycache__' \
   --exclude '.pytest_cache' \
   --exclude '.DS_Store' \
+  --exclude 'tests/' \
+  --exclude 'scripts/gen_initdata.py' \
   --exclude 'data/*' \
   --exclude 'logs/*' \
   --exclude '.env' \

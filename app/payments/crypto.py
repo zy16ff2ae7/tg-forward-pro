@@ -87,7 +87,7 @@ async def _fetch_transactions(session: aiohttp.ClientSession, since_ms: int = 0)
         "limit": "100",
         "only_to": "true",
         "contract_address": USDT_CONTRACT,
-        "only_confirmed": "true",
+        "only_confirmed": "true" if _confirmed_only() else "false",
     }
     if since_ms:
         params["min_timestamp"] = str(since_ms)
@@ -101,6 +101,20 @@ async def _fetch_transactions(session: aiohttp.ClientSession, since_ms: int = 0)
             return []
         payload = await response.json(content_type=None)
     return payload.get("data") or []
+
+
+def _confirmed_only() -> bool:
+    """Брать ли у TronGrid только подтверждённые переводы.
+
+    У метода нет «минимум N подтверждений» — только флаги confirmed /
+    unconfirmed. Поэтому USDT_MIN_CONFIRMATIONS читается как выключатель:
+    >0 — только подтверждённые (по умолчанию), 0 — брать и свежие:
+    зачисление быстрее, но перевод теоретически могут откатить.
+    """
+    try:
+        return int(settings.usdt_min_confirmations or 0) > 0
+    except (TypeError, ValueError):
+        return True
 
 
 def _since_ms(since: datetime | None) -> int:

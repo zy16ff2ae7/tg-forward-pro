@@ -128,6 +128,18 @@ def _write_dump(html: str) -> None:
         pass
 
 
+def cleanup_dump() -> None:
+    """Удаляет дамп /apps: api_hash в нём больше не нужен, а /tmp общий.
+
+    На неуспехе оставляем файл — там текст ошибки, который не показывает
+    веб-форма. Поэтому вызываем только на успешных путях main().
+    """
+    try:
+        DUMP.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def read_apps(sess: Session) -> tuple[str, str]:
     """Читает страницу /apps и вытаскивает уже существующие api_id / api_hash."""
     status, html = sess.call("/apps", referer="/")
@@ -247,6 +259,7 @@ def main() -> int:
         print(f"API_ID={api_id}")
         print(f"API_HASH={api_hash}")
         write_env(api_id, api_hash)
+        cleanup_dump()
         return 0
 
     print("\nГотовых приложений на аккаунте не найдено.")
@@ -261,6 +274,7 @@ def main() -> int:
         print(f"API_ID={api_id}")
         print(f"API_HASH={api_hash}")
         write_env(api_id, api_hash)
+        cleanup_dump()
         return 0
 
     print("\nСоздать не получилось. Текст ошибки выше.")
