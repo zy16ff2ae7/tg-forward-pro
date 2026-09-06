@@ -73,14 +73,14 @@ def test_admin_menu_is_not_poorer_than_the_common_one():
     for_admin = [item.command for item in bot_commands.admin_commands()]
 
     assert for_admin[: len(common)] == common
-    assert set(for_admin) - set(common) == {"users", "grant"}
+    assert set(for_admin) - set(common) == {"admin", "users", "grant"}
 
 
 def test_admin_commands_are_hidden_from_everyone_else():
     """/grant и /users в общем списке — приглашение постучаться в них."""
     common = {item.command for item in bot_commands.user_commands()}
 
-    assert "grant" not in common and "users" not in common
+    assert "grant" not in common and "users" not in common and "admin" not in common
 
 
 def test_bonus_shows_up_only_when_the_gift_works(monkeypatch):

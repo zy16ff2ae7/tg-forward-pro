@@ -71,6 +71,26 @@ async def list_user_ids(session: AsyncSession) -> Sequence[int]:
     return result.scalars().all()
 
 
+async def recent_users(session: AsyncSession, limit: int = 15) -> Sequence[User]:
+    """Последние пользователи для панели владельца — свежие вперёд."""
+    result = await session.execute(
+        select(User).order_by(User.created_at.desc()).limit(max(1, limit))
+    )
+    return result.scalars().all()
+
+
+async def count_rules_all(session: AsyncSession) -> int:
+    """Все задачи сервиса — цифра для панели владельца."""
+    result = await session.execute(select(func.count()).select_from(Rule))
+    return int(result.scalar() or 0)
+
+
+async def count_accounts_all(session: AsyncSession) -> int:
+    """Все подключённые аккаунты — цифра для панели владельца."""
+    result = await session.execute(select(func.count()).select_from(TelegramAccount))
+    return int(result.scalar() or 0)
+
+
 # ───────────────────────────────── Подписки ───────────────────────────────────
 
 

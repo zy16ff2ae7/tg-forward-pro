@@ -27,3 +27,10 @@ class EditStates(StatesGroup):
     whitelist = State()
     append = State()
     replace = State()
+
+
+class OwnerStates(StatesGroup):
+    """Панель владельца: кому выдать абонемент и что разослать."""
+
+    grant_user = State()
+    broadcast_text = State()

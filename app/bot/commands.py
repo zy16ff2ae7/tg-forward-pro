@@ -36,6 +36,7 @@ USER_COMMANDS: tuple[tuple[str, str], ...] = (
 BONUS_COMMAND = ("bonus", "Подарок за подписку на канал")
 
 ADMIN_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("admin", "Панель владельца"),
     ("users", "Все пользователи"),
     ("grant", "Выдать дни"),
 )

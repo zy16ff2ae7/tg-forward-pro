@@ -55,7 +55,9 @@ def main_menu(
         InlineKeyboardButton(text="❓ Помощь", callback_data="menu:help"),
     )
     if is_admin:
-        builder.row(InlineKeyboardButton(text="🛠 Админка", callback_data="menu:admin"))
+        builder.row(
+            InlineKeyboardButton(text="🛠 Панель владельца", callback_data="menu:admin")
+        )
     return builder.as_markup()
 
 
@@ -395,7 +397,40 @@ def admin_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
+        InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="💳 Выдать абонемент", callback_data="admin:grant"),
+        InlineKeyboardButton(text="📣 Рассылка", callback_data="admin:broadcast"),
+    )
+    builder.row(
         InlineKeyboardButton(text="🔄 Перезапустить аккаунты", callback_data="admin:restart"),
     )
     builder.row(InlineKeyboardButton(text="◀️ В меню", callback_data="menu:main"))
+    return builder.as_markup()
+
+
+def grant_months_kb() -> InlineKeyboardMarkup:
+    """Срок абонемента — те же периоды, что в тарифах."""
+    from app.plans import PERIODS
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        *[
+            InlineKeyboardButton(
+                text=f"{months} мес.", callback_data=f"admin:grant:{months}"
+            )
+            for months in PERIODS
+        ]
+    )
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="nav:cancel"))
+    return builder.as_markup()
+
+
+def broadcast_confirm_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Отправить всем", callback_data="admin:bcast:send"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="admin:bcast:cancel"),
+    )
     return builder.as_markup()
