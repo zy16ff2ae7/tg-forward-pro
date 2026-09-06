@@ -113,6 +113,8 @@ const FIELD_SPEC = {
   repeats: { label: 'Сколько кругов', control: 'number', placeholder: '1', note: '0 — крутить без конца' },
   typing: { label: 'Показывать «печатает» перед отправкой', control: 'check' },
   random_pick: { label: 'Брать сообщение наугад, а не по очереди', control: 'check' },
+  link_preview: { label: 'Оставлять предпросмотр ссылок', control: 'check' },
+  send_mode: { label: 'Как отправлять', control: 'send_mode' },
 };
 
 /* Заголовок шторки результатов для каждого типа задачи. */
@@ -173,30 +175,28 @@ const OWN_TEXT_KINDS = ['poster', 'mailing'];
 
 /* Плитки «быстрый старт» на Главной: восемь слотов, последний — весь каталог.
    Подписи короткие: на 390 px в четыре столбца длинное название не влезает.
-   Двух «пересылок» и двух «рассылок» здесь быть не должно — плитки называются
-   так же, как задачи в каталоге: копия канала, один пост во все чаты,
-   постинг по расписанию и рассылка по очереди. */
+   Первая плитка — единый слот своих сообщений: им пользуются чаще всего. */
 const TILES = [
+  { id: 'sender', name: 'Посты' },
   { id: 'copy_channel', name: 'Копия' },
   { id: 'broadcast', name: 'В чаты' },
-  { id: 'poster', name: 'Постинг' },
-  { id: 'mailing', name: 'Рассылка' },
   { id: 'parser', name: 'Парсер' },
   { id: 'autosubscribe', name: 'Подписка' },
   { id: 'checks', name: 'Чеки' },
+  { id: 'dialogs', name: 'ЛС' },
   { id: null, name: 'Все', icon: 'i-dots', ico: 'ico--violet', tab: 'commands' },
 ];
 
 /* Умный поиск по командам работает локально: фраза → слова → команды.
    Никакого внешнего AI и ключей — значит, ничего не стоит и не отваливается.
    Ключевые слова подобраны под то, как о задачах говорят вслух. Одно слово на
-   две задачи не вешаем: «рассылка» — это свои сообщения по чатам (mailing), а
+   две задачи не вешаем: «рассылка» — это свои сообщения по чатам (sender), а
    один пост из источника во все чаты ищут словами «в чаты» и «во все». */
 const SMART_WORDS = {
   copy_channel: ['перес', 'копир', 'дубл', 'зеркал', 'репост', 'канал в канал'],
   broadcast: ['в чаты', 'во все', 'один пост', 'из канала в чаты', 'массов'],
-  poster: ['пост', 'публик', 'по расписан', 'кажд', 'таймер', 'автопост', 'интервал'],
-  mailing: ['рассыл', 'разосл', 'по чатам', 'отправ', 'прогрев', 'спам', 'реклам', 'всем'],
+  sender: ['пост', 'публик', 'по расписан', 'кажд', 'таймер', 'автопост', 'интервал',
+    'рассыл', 'разосл', 'по чатам', 'отправ', 'прогрев', 'спам', 'реклам', 'всем', 'очередь'],
   parser: ['парс', 'собра', 'участник', 'аудитор', 'база', 'юзер', 'подписчик'],
   autosubscribe: ['подпис', 'вступ', 'войти', 'инвайт', 'присоедин'],
   checks: ['чек', 'подар', 'gift', 'ловец', 'халяв', 'промо'],
@@ -206,7 +206,7 @@ const SMART_WORDS = {
 };
 
 /* Что показать, когда человек просто открыл поле и ничего не набрал. */
-const SMART_FALLBACK = ['copy_channel', 'broadcast', 'poster'];
+const SMART_FALLBACK = ['sender', 'copy_channel', 'broadcast'];
 
 const SETTINGS = [
   { icon: 'i-users', title: 'Рефералы', desc: 'Ссылка, зеркала и выплаты', start: 'referrals' },
@@ -407,7 +407,8 @@ const DEMO_STATE = {
       edit: {
         account_id: 1, names: { 1006: 'Команда (чат)', 1005: 'Подборки' },
         targets: ['1006', '1005'], message: 'Напоминаем: показ сегодня в 19:00.',
-        library_ids: [], gap: 8, cycle: 60, repeats: 3, typing: true, random_pick: false,
+        library_ids: [], send_mode: 'queue', gap: 8, cycle: 60, repeats: 3,
+        typing: true, random_pick: false, link_preview: false,
       },
       created_at: '2026-08-29T14:15:00' },
     // Разовая задача в работе: без неё в демо не было ни кнопки «Запустить», ни
@@ -463,14 +464,20 @@ function demoJournalRun(task, run) {
 /* Демо-каталог повторяет COMMANDS и COMMAND_GROUPS из app/webapp_api.py:
    в демо-режиме кабинет должен выглядеть точно так же, как с сервером. */
 const DEMO_COMMAND_GROUPS = [
-  { id: 'publish', title: 'чужие посты' },
   { id: 'own', title: 'свои сообщения' },
+  { id: 'publish', title: 'чужие посты' },
   { id: 'audience', title: 'аудитория' },
   { id: 'inbox', title: 'входящее' },
   { id: 'moderation', title: 'модерация' },
 ];
 
 const DEMO_COMMANDS = [
+  { id: 'sender', group: 'own', kind: 'poster', kinds: ['poster', 'mailing'], emoji: '📤', title: 'Постинг и рассылка', status: 'ready',
+    needs: ['account', 'targets', 'message'],
+    optional: ['send_mode', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview'],
+    description: 'Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.',
+    hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
+    tags: ['ваш текст', 'расписание или очередь'] },
   { id: 'copy_channel', group: 'publish', kind: 'forward', emoji: '🔁', title: 'Копирование канала', status: 'ready',
     needs: ['account', 'source', 'target'], optional: ['mode'],
     description: 'Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.',
@@ -507,16 +514,6 @@ const DEMO_COMMANDS = [
     needs: ['account', 'source', 'target_user'], optional: ['keywords'],
     description: 'Удаляет сообщения выбранного человека в чате, где вы администратор.',
     tags: ['один человек', 'нужны права админа'] },
-  { id: 'poster', group: 'own', kind: 'poster', emoji: '📤', title: 'Постинг по расписанию', status: 'ready',
-    needs: ['account', 'targets', 'message'], optional: ['interval', 'start', 'end'],
-    description: 'Ваше объявление висит в чатах постоянно: сам шлёт его во все выбранные каждые N минут, пока открыто окно времени. Текст берётся здесь или из библиотеки.',
-    hint: 'Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Текст наберите здесь либо возьмите из библиотеки — она общая с рассылкой, и правка записи меняет обе задачи. Переносы строк внутри сообщения сохраняются как есть — прайс уйдёт целиком. Нужно второе сообщение — отделите его пустой строкой: за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ по вашим часам.',
-    tags: ['ваш текст', 'каждые N минут', 'окно времени'] },
-  { id: 'mailing', group: 'own', kind: 'mailing', emoji: '📨', title: 'Рассылка по очереди', status: 'ready',
-    needs: ['account', 'targets', 'message'], optional: ['gap', 'cycle', 'repeats', 'typing', 'random_pick'],
-    description: 'Обход чатов по одному: чат — пауза — следующий, и так круг за кругом. Текст берётся здесь или из библиотеки.',
-    hint: 'Получателей отмечайте кнопкой «выбрать» — или заранее во вкладке «Чаты». Текст наберите здесь либо возьмите из библиотеки — она общая с постингом: переносы строк сохраняются, а пустая строка делит текст на два сообщения — уходят по очереди, первое всем, затем второе. Пауза между чатами в секундах, «кругов 0» — крутить без конца.',
-    tags: ['ваш текст', 'по одному чату', 'пауза и круги'] },
 ];
 
 const DEMO_FEATURES = { account_login_enabled: true, account_login_status: 'ready' };
@@ -915,8 +912,17 @@ function demoOwnTextsEdit(libraryIds) {
 /* Тело запроса → поля задачи. Одна функция и на создание, и на правку: демо
    повторяет здесь _task_view сервера, и второй такой расчёт разошёлся бы с ним
    на первой же новой настройке. */
+/* Единый слот в демо — та же механика, что на сервере: kind выбирает
+   переключатель, а не карточка каталога. */
+function demoKind(body, command) {
+  if (command && command.id === 'sender') {
+    return body.send_mode === 'queue' ? 'mailing' : 'poster';
+  }
+  return command ? command.kind : 'forward';
+}
+
 function demoTaskFill(task, body, command) {
-  const kind = command.kind;
+  const kind = demoKind(body, command);
   const chats = demoChatList(body, kind);
   const libraryIds = OWN_TEXT_KINDS.includes(kind) ? demoOwnTexts(body) : [];
   const done = task.progress ? task.progress.done || 0 : 0;
@@ -970,7 +976,7 @@ function demoTaskFill(task, body, command) {
    (на сервере их собирает _edit_view). Форма правки в кабинете одна на демо и на
    сервер, поэтому и набор полей обязан быть один. */
 function demoTaskEdit(body, command, chats, libraryIds) {
-  const kind = command.kind;
+  const kind = demoKind(body, command);
   const fields = [...(command.needs || []), ...(command.optional || [])];
   const names = {};
   [...chats, body.source, body.target, body.target_user].forEach((raw) => {
@@ -997,44 +1003,47 @@ function demoTaskEdit(body, command, chats, libraryIds) {
   else if (kind === 'baiting') edit.reaction = body.reaction || '👍';
   else if (['checks', 'dialogs', 'mute'].includes(kind)) {
     edit.keywords = (body.keywords || []).join(', ');
-  } else if (kind === 'poster') {
-    // Текст постинга лежит в библиотеке — тем же полем, что у рассылки.
+  } else if (kind === 'poster' || kind === 'mailing') {
+    // Единый слот: форма правки одна на обе механики — отдаём оба набора
+    // полей, как _edit_view на сервере. Иначе переключение режима в правке
+    // показывало бы пустоту.
     Object.assign(edit, demoOwnTextsEdit(libraryIds));
+    edit.send_mode = kind === 'mailing' ? 'queue' : 'schedule';
     edit.interval = Number(body.interval) || 2;
     edit.start = body.start || '00:00';
     edit.end = body.end || '23:59';
     edit.tz = body.tz === undefined ? browserTz() : windowTz(body.tz);
-  } else if (kind === 'mailing') {
-    Object.assign(edit, demoOwnTextsEdit(libraryIds));
     edit.gap = Number(body.gap) || 5;
     edit.cycle = Number(body.cycle) || 10;
     edit.repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
     edit.typing = Boolean(body.typing);
     edit.random_pick = Boolean(body.random_pick);
+    edit.link_preview = Boolean(body.link_preview);
   }
   return edit;
 }
 
 function demoTaskTitle(body, command) {
   if (command) {
-    if (command.kind === 'parser') return `Парсер аудитории: ${body.source}`;
-    if (command.kind === 'autosubscribe') {
+    const kind = demoKind(body, command);
+    if (kind === 'parser') return `Парсер аудитории: ${body.source}`;
+    if (kind === 'autosubscribe') {
       const channels = (body.targets || []).length;
       if (channels) return `Автоподписка: ${channels} кан.` + (body.source ? ` из «${body.source}»` : '');
       return `Автоподписка: ${body.source || 'все чаты аккаунта'}`;
     }
-    if (command.kind === 'dialogs') return `Уведомления из диалогов → ${body.target}`;
-    if (command.kind === 'baiting') return `Байтинг: ${body.target_user} в ${body.source}`;
-    if (command.kind === 'mute') return `Мут: ${body.target_user} в ${body.source}`;
-    if (command.kind === 'checks') return `Ловец чеков: ${body.source} → ${body.target}`;
+    if (kind === 'dialogs') return `Уведомления из диалогов → ${body.target}`;
+    if (kind === 'baiting') return `Байтинг: ${body.target_user} в ${body.source}`;
+    if (kind === 'mute') return `Мут: ${body.target_user} в ${body.source}`;
+    if (kind === 'checks') return `Ловец чеков: ${body.source} → ${body.target}`;
     // Постинг, рассылка и пересылка в чаты ходят в любое число чатов: в
     // заголовке счёт, а имя чата — только когда он один. Тот же расчёт, что
     // task_title на сервере.
-    if (DEMO_MULTI_CHAT.includes(command.kind)) {
-      const chats = demoChatList(body, command.kind);
+    if (DEMO_MULTI_CHAT.includes(kind)) {
+      const chats = demoChatList(body, kind);
       const many = chats.length > 1 ? `${chats.length} чат.` : (chats[0] || '');
-      if (command.kind === 'broadcast') return `Пересылка: ${body.source} → ${many}`;
-      const name = command.kind === 'poster' ? 'Постинг по расписанию' : 'Рассылка по очереди';
+      if (kind === 'broadcast') return `Пересылка: ${body.source} → ${many}`;
+      const name = kind === 'poster' ? 'Постинг по расписанию' : 'Рассылка по очереди';
       if (!chats.length) return name;
       return chats.length > 1 ? `${name}: ${many}` : `${name} → ${many}`;
     }
@@ -3287,6 +3296,16 @@ function fieldHtml(key) {
         <button type="button" class="seg" data-mode="forward">Форвард</button>
       </div></div>`;
   }
+  if (spec.control === 'send_mode') {
+    // Единый слот своих сообщений: механика — переключателем, а поля ниже
+    // подстраиваются (см. applySendModeVisibility): расписанию — интервал и
+    // окно, очереди — паузы и круги.
+    return `<div class="field"><span>${spec.label}</span>
+      <div class="segmented segmented--sm" id="taskSendMode">
+        <button type="button" class="seg is-active" data-send-mode="schedule">По расписанию</button>
+        <button type="button" class="seg" data-send-mode="queue">По очереди</button>
+      </div></div>`;
+  }
   if (spec.control === 'textarea') {
     // Рассылка и постинг берут тексты из библиотеки, поэтому у их поля есть
     // кнопка выбора: перепечатывать сохранённое не нужно, а правка записи
@@ -3352,6 +3371,7 @@ function fieldValue(key) {
     return select ? select.value.trim() : '';
   }
   if (spec.control === 'mode') return state.mode;
+  if (spec.control === 'send_mode') return state.sendMode || 'schedule';
   const node = $(`task_${key}`);
   if (spec.control === 'check') return node ? node.checked : false;
   return node && node.value ? String(node.value).trim() : '';
@@ -3482,6 +3502,7 @@ function openTaskSheet(command, prefill, task) {
   // полей, и второй такой набор разошёлся бы с первым на первой же настройке.
   state.editTask = task && task.edit ? task : null;
   state.mode = 'copy';
+  state.sendMode = 'schedule';
   // Выбор из библиотеки живёт ровно одну форму: чужой выбор в новой задаче
   // молча отправил бы не те сообщения.
   state.libraryPick = [];
@@ -3491,14 +3512,23 @@ function openTaskSheet(command, prefill, task) {
     ? `${icon('i-sliders')} Настройка задачи`
     : `${icon(kindIcon(state.activeCommand.kind))} ${esc(state.activeCommand.title)}`;
   $('taskSheet').setAttribute('aria-label', editing ? 'Настройка задачи' : 'Новая задача');
+  const canSwitchMode = editing && state.activeCommand.id === 'sender';
   $('taskSheetLead').textContent = editing
     ? `«${task.title}» · ${state.activeCommand.title}. Меняется только то, что поправите: ` +
-      'счётчики, номер задачи и место в круге рассылки останутся на месте.'
+      (canSwitchMode
+        ? 'переключатель режима меняет механику, остальное — на месте.'
+        : 'счётчики, номер задачи и место в круге рассылки останутся на месте.')
     : state.activeCommand.description || '';
-  $('taskFields').innerHTML = [
+  const fieldKeys = [
     ...state.activeCommand.needs,
     ...(state.activeCommand.optional || []),
-  ].map(fieldHtml).join('');
+  ];
+  $('taskFields').innerHTML = fieldKeys.map(fieldHtml).join('');
+  // Каждому полю — его ключ: по нему переключатель режима прячет чужое
+  // (расписанию не нужны паузы, очереди — окно времени).
+  [...$('taskFields').children].forEach((node, index) => {
+    node.dataset.field = fieldKeys[index] || '';
+  });
   $('taskHint').textContent = editing
     ? 'Тип задачи и аккаунт не меняются — это была бы уже другая задача. Новый чат в ' +
       'списке кабинет найдёт через аккаунт, для прежних чатов связь не нужна.' +
@@ -3535,7 +3565,9 @@ function openTaskEdit(id) {
     toast('Сначала верните задачу из архива');
     return;
   }
-  const command = state.commands.find((item) => item.kind === task.kind)
+  // Единый слот заявляет оба своих kind (см. kinds у sender): правка ищет
+  // команду по kind правила, а у постинга и рассылки kind разный.
+  const command = state.commands.find((item) => (item.kinds || [item.kind]).includes(task.kind))
     || state.commands.find((item) => item.id === 'copy_channel');
   if (!command) {
     toast('Каталог команд ещё не загружен');
@@ -3569,7 +3601,7 @@ function applyTaskPrefill(prefill) {
   // лишние для этой команды поля просто не находятся в разметке.
   ['keywords', 'reaction', 'limit', 'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats']
     .forEach((key) => setValue(key, prefill[key]));
-  ['typing', 'random_pick'].forEach((key) => {
+  ['typing', 'random_pick', 'link_preview'].forEach((key) => {
     const node = $(`task_${key}`);
     if (node) node.checked = Boolean(prefill[key]);
   });
@@ -3579,6 +3611,13 @@ function applyTaskPrefill(prefill) {
       seg.classList.toggle('is-active', seg.dataset.mode === prefill.mode);
     });
   }
+  if (prefill.send_mode === 'schedule' || prefill.send_mode === 'queue') {
+    state.sendMode = prefill.send_mode;
+    document.querySelectorAll('#taskSendMode .seg').forEach((seg) => {
+      seg.classList.toggle('is-active', seg.dataset.sendMode === prefill.send_mode);
+    });
+  }
+  applySendModeVisibility();
   // Аккаунт задачи не меняется: другой аккаунт — это другие чаты и другая
   // задача. Показываем его и запираем, чтобы это было видно, а не угадывалось.
   const account = $('taskAccount');
@@ -3598,6 +3637,27 @@ function applyTaskPrefill(prefill) {
   renderFieldCounts();
 }
 
+/* Какие поля какому режиму единого слота: расписание живёт интервалом и
+   окном, очередь — паузами и кругами. Чужое прячем: спрятанное поле в запрос
+   не попадает (см. collectTaskPayload), а его значение лежит в задаче и ждёт
+   переключения режима обратно. */
+const SEND_MODE_FIELDS = {
+  schedule: ['interval', 'start', 'end'],
+  queue: ['gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview'],
+};
+
+function applySendModeVisibility() {
+  const holder = $('taskFields');
+  if (!holder || !$('taskSendMode')) return;
+  const mode = state.sendMode || 'schedule';
+  const visible = new Set(SEND_MODE_FIELDS[mode] || []);
+  const either = new Set([...SEND_MODE_FIELDS.schedule, ...SEND_MODE_FIELDS.queue]);
+  holder.querySelectorAll('[data-field]').forEach((node) => {
+    const key = node.dataset.field || '';
+    if (either.has(key)) node.hidden = !visible.has(key);
+  });
+}
+
 function bindSheetFields() {
   document.querySelectorAll('#taskMode .seg').forEach((seg) => {
     seg.addEventListener('click', () => {
@@ -3605,6 +3665,16 @@ function bindSheetFields() {
       document.querySelectorAll('#taskMode .seg').forEach((item) => {
         item.classList.toggle('is-active', item === seg);
       });
+    });
+  });
+  document.querySelectorAll('#taskSendMode .seg').forEach((seg) => {
+    seg.addEventListener('click', () => {
+      buzz('light');
+      state.sendMode = seg.dataset.sendMode;
+      document.querySelectorAll('#taskSendMode .seg').forEach((item) => {
+        item.classList.toggle('is-active', item === seg);
+      });
+      applySendModeVisibility();
     });
   });
 }
@@ -3969,6 +4039,12 @@ function collectTaskPayload() {
   [...command.needs, ...(command.optional || [])].forEach((key) => {
     values[key] = fieldValue(key);
   });
+  // Поля, спрятанные переключателем режима, в запрос не попадают: чужой
+  // механике они не нужны, а при правке старые значения должны уцелеть —
+  // вдруг человек переключит режим обратно.
+  document.querySelectorAll('#taskFields [data-field][hidden]').forEach((node) => {
+    values[node.dataset.field || ''] = undefined;
+  });
 
   const missing = command.needs
     // Сообщение можно не набирать, если выбрано из библиотеки: рассылка и
@@ -3999,6 +4075,7 @@ function collectTaskPayload() {
   text('target_user', values.target_user);
   text('reaction', values.reaction);
   text('mode', values.mode);
+  text('send_mode', values.send_mode);
   text('message', values.message);
   text('start', values.start);
   text('end', values.end);
@@ -4019,6 +4096,7 @@ function collectTaskPayload() {
   number('repeats', values.repeats);
   flag('typing', values.typing);
   flag('random_pick', values.random_pick);
+  flag('link_preview', values.link_preview);
   // Явный выбор из библиотеки важнее набранного текста — так же считает сервер.
   if (state.libraryPick.length) body.library_ids = state.libraryPick;
   else if (editing && OWN_TEXT_KINDS.includes(command.kind)) body.library_ids = [];
@@ -4540,14 +4618,12 @@ function bindEvents() {
     }
     if (action === 'broadcast') {
       openTaskForSelection('broadcast');
-    } else if (action === 'mailing') {
-      openTaskForSelection('mailing');
+    } else if (action === 'sender') {
+      openTaskForSelection('sender');
     } else if (action === 'forward') {
       openTaskForSelection('copy_channel');
     } else if (action === 'parser') {
       openTaskForSelection('parser');
-    } else if (action === 'poster') {
-      openTaskForSelection('poster');
     }
   });
   $('chatTags').addEventListener('click', (event) => {

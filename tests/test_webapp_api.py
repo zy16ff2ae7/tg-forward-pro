@@ -223,7 +223,8 @@ async def test_commands_answer_carries_group_order(client, auth_headers):
     body = await (await client.get("/api/commands", headers=auth_headers)).json()
 
     assert body["groups"] == COMMAND_GROUPS
-    assert [group["id"] for group in body["groups"]][0] == "publish"
+    # Свои сообщения — первая и самая ходовая группа каталога.
+    assert [group["id"] for group in body["groups"]][0] == "own"
     assert all(group["title"] for group in body["groups"])
 
 
@@ -237,23 +238,24 @@ async def test_every_command_belongs_to_a_known_group(client, auth_headers):
 
 
 async def test_commands_that_go_to_many_chats_do_not_read_alike(client, auth_headers):
-    """Четыре «в несколько чатов» должны читаться как четыре разные задачи.
+    """Три «в несколько чатов» должны читаться как три разные задачи.
 
-    Пересылка, копия канала, постинг и рассылка внешне похожи — все шлют что-то
-    в чаты, — и в каталоге их путали («кажется это всё одно и то же»). Отличие
-    держится на трёх вещах: своё название, своё описание и свои метки в подвале
-    карточки. Совпадение любой из них снова слепит две задачи в одну.
+    Пересылка, копия канала и единый слот своих сообщений внешне похожи — все
+    шлют что-то в чаты, — и в каталоге их путали («кажется это всё одно и то
+    же»). Постинг и рассылка теперь вообще один слот с переключателем режима.
+    Отличие держится на трёх вещах: своё название, своё описание и свои метки
+    в подвале карточки. Совпадение любой из них снова слепит две задачи в одну.
     """
     body = await (await client.get("/api/commands", headers=auth_headers)).json()
     twins = [
         item
         for item in body["commands"]
-        if item["id"] in ("copy_channel", "broadcast", "poster", "mailing")
+        if item["id"] in ("copy_channel", "broadcast", "sender")
     ]
 
-    assert len(twins) == 4
-    assert len({item["title"] for item in twins}) == 4
-    assert len({item["description"] for item in twins}) == 4
+    assert len(twins) == 3
+    assert len({item["title"] for item in twins}) == 3
+    assert len({item["description"] for item in twins}) == 3
     # Метки берутся парами-тройками, и хотя бы одна у каждой пары своя.
     marks = {item["id"]: set(item["tags"]) for item in twins}
     for left in marks:

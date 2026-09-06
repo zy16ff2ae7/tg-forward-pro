@@ -521,19 +521,20 @@ async def check_commands(cab: Cabinet, rep: Report) -> None:
         f"без блока: {unknown}" if unknown else "",
     )
 
-    # Четыре задачи «в чаты» внешне похожи, и в каталоге их путали. Различает их
-    # только текст карточки: название, описание и метки в подвале.
+    # Три задачи «в чаты» внешне похожи, и в каталоге их путали. Различает их
+    # только текст карточки: название, описание и метки в подвале. Постинг и
+    # рассылка — один слот sender с переключателем режима.
     twins = [
         item
         for item in items
-        if item.get("id") in ("copy_channel", "broadcast", "poster", "mailing")
+        if item.get("id") in ("copy_channel", "broadcast", "sender")
     ]
     rep.check(
-        "четыре задачи «в чаты» читаются как разные",
-        len(twins) == 4
-        and len({item.get("title") for item in twins}) == 4
-        and len({item.get("description") for item in twins}) == 4
-        and len({tuple(item.get("tags") or ()) for item in twins}) == 4,
+        "три задачи «в чаты» читаются как разные",
+        len(twins) == 3
+        and len({item.get("title") for item in twins}) == 3
+        and len({item.get("description") for item in twins}) == 3
+        and len({tuple(item.get("tags") or ()) for item in twins}) == 3,
         f"{[item.get('title') for item in twins]}",
     )
     rep.check(

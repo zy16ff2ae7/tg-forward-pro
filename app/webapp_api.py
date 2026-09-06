@@ -793,8 +793,21 @@ async def create_task(request: web.Request) -> web.Response:
     command_id = str(payload.get("command") or "").strip()
     kind = str(payload.get("kind") or "").strip()
     command = COMMANDS_BY_ID.get(command_id)
+    if command is None and command_id in ("poster", "mailing"):
+        # Старые клиенты помнят две команды вместо единого слота: их id
+        # понимаем — это тот же слот с уже выбранным режимом.
+        legacy_mode = "queue" if command_id == "mailing" else "schedule"
+        command_id = "sender"
+        payload = {**payload, "send_mode": legacy_mode}
+        command = COMMANDS_BY_ID["sender"]
     if command is not None:
         kind = command["kind"]
+        if command_id == "sender":
+            # Единый слот: механика — из переключателя формы. Очередь — только
+            # явным выбором, всё остальное (и старые клиенты без поля) — постинг.
+            send_mode = str(payload.get("send_mode") or "").strip().lower()
+            if send_mode in ("queue", "mailing"):
+                kind = "mailing"
     elif kind in VALID_KINDS:
         command = COMMANDS_BY_KIND.get(kind)
     else:
@@ -1142,6 +1155,17 @@ async def update_task(request: web.Request) -> web.Response:
     if kind == "parser":
         target_id, target_title = source_id, source_title
 
+    if kind in ("poster", "mailing"):
+        # Единый слот: переключатель режима в форме правки меняет механику.
+        # Это единственный разрешённый сдвиг типа — остальные задачи типа
+        # не меняют (см. докстринг). Разбираем до настроек: ветка парсинга
+        # зависит от kind.
+        send_mode = str(payload.get("send_mode") or "").strip().lower()
+        if send_mode in ("queue", "mailing"):
+            kind = "mailing"
+        elif send_mode in ("schedule", "poster"):
+            kind = "poster"
+
     _remember_names(filters, [found_source, found_target, found_user, *chat_pairs])
     await _apply_task_settings(
         kind, payload, filters, user_id=user_id, targets=targets, partial=True
@@ -1154,6 +1178,7 @@ async def update_task(request: web.Request) -> web.Response:
         rule.source_id, rule.source_title = source_id, source_title
         rule.target_id, rule.target_title = target_id, target_title
         rule.mode = mode
+        rule.kind = kind
         rule.filters = filters
         if kind == "poster":
             # интервал постинга планировщик читает из delay_seconds
@@ -2524,6 +2549,16 @@ def _edit_view(
         # Кабинет присылает своё при каждом сохранении, но форме оно нужно и
         # прежним: по нему видно, чьи часы у задачи сейчас.
         edit["tz"] = window_tz_minutes(conf.window_tz)
+        edit["send_mode"] = "schedule"
+        # Единый слот: форма правки одна на обе механики, поэтому отдаём и
+        # поля очереди — с текущими значениями (у постинга это умолчания).
+        # Иначе переключение режима в правке показывало бы пустоту.
+        edit["gap"] = conf.gap_seconds
+        edit["cycle"] = conf.cycle_seconds
+        edit["repeats"] = conf.repeats
+        edit["typing"] = bool(conf.typing)
+        edit["random_pick"] = bool(conf.random_pick)
+        edit["link_preview"] = bool(conf.link_preview)
     elif kind == "mailing":
         # Текст рассылки лежит в библиотеке, но правят его здесь: поле показывает
         # то, что уйдёт, — как у постинга. Раньше поле стояло пустым, а набранный
@@ -2534,6 +2569,13 @@ def _edit_view(
         edit["repeats"] = conf.repeats
         edit["typing"] = bool(conf.typing)
         edit["random_pick"] = bool(conf.random_pick)
+        edit["link_preview"] = bool(conf.link_preview)
+        edit["send_mode"] = "queue"
+        # И наоборот: поля расписания с умолчаниями — для переключения режима.
+        edit["interval"] = max(1, conf.interval_seconds // 60)
+        edit["start"] = conf.window_start
+        edit["end"] = conf.window_end
+        edit["tz"] = window_tz_minutes(conf.window_tz)
     return edit
 
 
@@ -2547,6 +2589,24 @@ def _edit_view(
 # же»), поэтому у каждой в метках стоит ровно то, чем она отличается от
 # соседней: ЧЕЙ текст уходит и КАК он расходится по чатам.
 COMMANDS: list[dict] = [
+    {
+        "id": "sender",
+        "group": "own",
+        # Один слот на две механики: расписание и очередь — это «как слать»,
+        # а не разные задачи. Точный kind выбирает send_mode из формы
+        # (см. create_task); обе механики шлют свои тексты из общей библиотеки.
+        # Слот первый в каталоге: своими сообщениями пользуются чаще всего.
+        "kind": "poster",
+        "kinds": ["poster", "mailing"],
+        "emoji": "📤",
+        "title": "Постинг и рассылка",
+        "description": "Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.",
+        "status": "ready",
+        "needs": ["account", "targets", "message"],
+        "optional": ["send_mode", "interval", "start", "end", "gap", "cycle", "repeats", "typing", "random_pick", "link_preview"],
+        "hint": "Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.",
+        "tags": ["ваш текст", "расписание или очередь"],
+    },
     {
         "id": "copy_channel",
         "group": "publish",
@@ -2653,37 +2713,6 @@ COMMANDS: list[dict] = [
         "optional": ["keywords"],
         "tags": ["один человек", "нужны права админа"],
     },
-    {
-        "id": "poster",
-        "group": "own",
-        "kind": "poster",
-        "emoji": "📤",
-        # «Постинг по расписанию», а не «авто-постинг»: рядом стоит рассылка,
-        # и оба названия читались как «шлёт мои сообщения». Отличие вынесено в
-        # само название — здесь главное расписание, у рассылки очередь.
-        "title": "Постинг по расписанию",
-        "description": "Ваше объявление висит в чатах постоянно: сам шлёт его во все выбранные каждые N минут, пока открыто окно времени. Текст берётся здесь или из библиотеки.",
-        "status": "ready",
-        "needs": ["account", "targets", "message"],
-        "optional": ["interval", "start", "end"],
-        "hint": "Чаты отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу; круг идёт по очереди, с паузой между чатами. Текст наберите здесь либо возьмите из библиотеки — она общая с рассылкой, и правка записи меняет обе задачи. Переносы строк внутри сообщения сохраняются как есть — прайс уйдёт целиком. Нужно второе сообщение — отделите его пустой строкой: за круг уходит одно, следующий круг возьмёт следующее. Интервал в минутах, окно — ЧЧ:ММ по вашим часам.",
-        "tags": ["ваш текст", "каждые N минут", "окно времени"],
-    },
-    {
-        "id": "mailing",
-        "group": "own",
-        "kind": "mailing",
-        "emoji": "📨",
-        # «По очереди» — единственное, чем она отличается от постинга: там залп
-        # по расписанию, здесь один чат за раз с паузой и кругами.
-        "title": "Рассылка по очереди",
-        "description": "Обход чатов по одному: чат — пауза — следующий, и так круг за кругом. Текст берётся здесь или из библиотеки.",
-        "status": "ready",
-        "needs": ["account", "targets", "message"],
-        "optional": ["gap", "cycle", "repeats", "typing", "random_pick"],
-        "hint": "Получателей отмечайте кнопкой «выбрать» — или заранее во вкладке «Чаты». Текст наберите здесь либо возьмите из библиотеки — она общая с постингом: переносы строк сохраняются, а пустая строка делит текст на два сообщения — уходят по очереди, первое всем, затем второе. Пауза между чатами в секундах, «кругов 0» — крутить без конца.",
-        "tags": ["ваш текст", "по одному чату", "пауза и круги"],
-    },
 ]
 
 # Блоки каталога в порядке показа. Подписи и порядок живут здесь, а не в
@@ -2694,8 +2723,8 @@ COMMANDS: list[dict] = [
 # и рассылкой своего текста в списке не читалась вообще. Подписи короткие — они
 # же стоят в чипсах над списком, а там на 390 px длинная фраза уезжает за край.
 COMMAND_GROUPS: list[dict] = [
-    {"id": "publish", "title": "чужие посты"},
     {"id": "own", "title": "свои сообщения"},
+    {"id": "publish", "title": "чужие посты"},
     {"id": "audience", "title": "аудитория"},
     {"id": "inbox", "title": "входящее"},
     {"id": "moderation", "title": "модерация"},
@@ -2705,6 +2734,9 @@ COMMANDS_BY_ID: dict[str, dict] = {item["id"]: item for item in COMMANDS}
 # Команда по типу задачи: у сохранённого правила есть kind, а форму правки надо
 # собрать по той же команде, из которой задачу создали.
 COMMANDS_BY_KIND: dict[str, dict] = {item["kind"]: item for item in COMMANDS}
+# Обе механики единого слота открывают одну и ту же форму: правка задачи
+# находит команду по kind правила, а kind у постинга и рассылки разный.
+COMMANDS_BY_KIND["mailing"] = COMMANDS_BY_ID["sender"]
 VALID_KINDS: set[str] = {item["kind"] for item in COMMANDS}
 
 

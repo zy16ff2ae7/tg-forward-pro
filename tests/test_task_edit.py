@@ -344,22 +344,27 @@ FULL_FORM: list[tuple[str, dict, dict]] = [
         {"source": "@ch-5", "target_user": "@ch-7", "keywords": "спам, ставки"},
     ),
     (
-        "poster",
-        {"targets": ["@ch-1"], "message": "прайс", "interval": 9,
-         "start": "08:00", "end": "22:30"},
+        "sender",
+        {"targets": ["@ch-1"], "message": "прайс", "send_mode": "schedule",
+         "interval": 9, "start": "08:00", "end": "22:30"},
         {"targets": ["@ch-6"], "message": "новый прайс\n\nвторое", "interval": 15,
          "start": "10:00", "end": "20:00"},
     ),
     (
-        "mailing",
-        {"targets": ["@ch-1", "@ch-2"], "message": "текст", "gap": 7, "cycle": 30,
-         "repeats": 3, "typing": True, "random_pick": True},
+        "sender",
+        {"targets": ["@ch-1", "@ch-2"], "message": "текст", "send_mode": "queue",
+         "gap": 7, "cycle": 30, "repeats": 3, "typing": True, "random_pick": True,
+         "link_preview": True},
         {"targets": ["@ch-6"], "message": "другой текст", "gap": 11, "cycle": 40,
          "repeats": 0, "typing": False, "random_pick": False},
     ),
 ]
 
-FULL_IDS = [item[0] for item in FULL_FORM]
+# Единый слот встречается дважды (оба режима) — id различаем режимом.
+FULL_IDS = [
+    item[0] if item[0] != "sender" else f"sender:{item[1].get('send_mode', 'schedule')}"
+    for item in FULL_FORM
+]
 
 
 def _chat_id(ref: str) -> str:
@@ -426,3 +431,84 @@ async def test_every_field_takes_a_new_value(
     for key, value in changes.items():
         assert edit[key] == _expected(command, key, value), key
 
+
+
+# ─────────────────── Единый слот «Постинг и рассылка» ────────────────────
+
+
+async def test_sender_creates_poster_by_default(
+    client, auth_headers, create_account, login_open, many_chats_resolved,
+):
+    """Без режима — постинг: расписание — основная механика слота."""
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+
+    task = await make_task(
+        client, auth_headers, account_id, command="sender",
+        targets=["@ch-1"], message="прайс",
+    )
+
+    assert task["kind"] == "poster"
+    assert task["edit"]["send_mode"] == "schedule"
+
+
+async def test_sender_queue_mode_creates_mailing(
+    client, auth_headers, create_account, login_open, many_chats_resolved,
+):
+    """Режим «по очереди» — рассылка с паузами и кругами."""
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+
+    task = await make_task(
+        client, auth_headers, account_id, command="sender", send_mode="queue",
+        targets=["@ch-1"], message="текст", gap=7, repeats=3,
+    )
+
+    assert task["kind"] == "mailing"
+    assert task["edit"]["send_mode"] == "queue"
+    assert task["edit"]["gap"] == 7
+    assert task["edit"]["repeats"] == 3
+
+
+async def test_legacy_ids_still_work(
+    client, auth_headers, create_account, login_open, many_chats_resolved,
+):
+    """Старые клиенты со «poster»/«mailing» попадают в тот же слот."""
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+
+    scheduled = await make_task(
+        client, auth_headers, account_id, command="poster",
+        targets=["@ch-1"], message="прайс",
+    )
+    queued = await make_task(
+        client, auth_headers, account_id, command="mailing",
+        targets=["@ch-1"], message="текст",
+    )
+
+    assert scheduled["kind"] == "poster"
+    assert queued["kind"] == "mailing"
+
+
+async def test_edit_switches_send_mode(
+    client, auth_headers, create_account, login_open, many_chats_resolved,
+    one_shot_stubbed,
+):
+    """Переключатель в правке меняет механику, не пересоздавая задачу."""
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    task = await make_task(
+        client, auth_headers, account_id, command="sender",
+        targets=["@ch-1"], message="прайс",
+    )
+
+    response = await patch_task(
+        client, auth_headers, task["id"], send_mode="queue", gap=9
+    )
+
+    assert response.status == 200, await response.text()
+    edited = (await response.json())["task"]
+    assert edited["id"] == task["id"], "та же задача, а не новая"
+    assert edited["kind"] == "mailing"
+    assert edited["edit"]["send_mode"] == "queue"
+    assert edited["edit"]["gap"] == 9
