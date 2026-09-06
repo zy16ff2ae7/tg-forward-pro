@@ -1578,6 +1578,28 @@ button { border: none; background: none; cursor: pointer; }
 
 .toast.is-show { opacity: 1; transform: translate(-50%, 0); }
 
+/* Тип сообщения виден цветом рамки: зелёный — успех, красный — ошибка. */
+.toast--ok { border-color: #34d17b; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(52, 209, 123, 0.35); }
+.toast--error { border-color: #ff5d7a; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 93, 122, 0.35); }
+
+/* Кружок профиля в шапке: фото из Telegram или первая буква имени. */
+.avatar {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent, #ff4d8d), #8b2ff7);
+  overflow: hidden;
+}
+
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
+
 /* Полоса «демо-данные» вставляется первым элементом <body> (см. showDemoBar),
    поэтому никаких отрицательных отступов: они выталкивали её за 390 px, и весь
    документ становился шире экрана — появлялась горизонтальная прокрутка. */

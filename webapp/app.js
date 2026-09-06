@@ -30,6 +30,7 @@ const state = {
   tasksByStatus: { active: [], paused: [], done: [] },
   taskCounts: {}, // kind → { active, paused, done }
   taskStatus: 'active',
+  taskQuery: '', // строка поиска по задачам — фильтрует видимый список
   chatTag: null,
   mode: 'copy',
   botUrl: '',
@@ -259,9 +260,13 @@ function toastLift() {
   return Math.min(lift, Math.round(view * 0.45));
 }
 
-function toast(text) {
+/* kind: '' — обычный, 'ok' — успех, 'error' — ошибка. Тип виден цветом
+   рамки, а успех/ошибка ещё и отдаются в моторчик телефона. */
+function toast(text, kind = '') {
   const node = $('toast');
   node.textContent = text;
+  node.classList.toggle('toast--ok', kind === 'ok');
+  node.classList.toggle('toast--error', kind === 'error');
   node.style.removeProperty('--toast-lift');
   const base = parseFloat(getComputedStyle(node).bottom) || 0;
   const lift = toastLift();
@@ -269,6 +274,66 @@ function toast(text) {
   node.classList.add('is-show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => node.classList.remove('is-show'), 2600);
+  if (kind === 'ok') buzz('success');
+  if (kind === 'error') buzz('error');
+}
+
+/* ─────────── Тактильный отклик и системные кнопки Telegram ─────────── */
+
+/* Лёгкий отклик на нажатия — вне Telegram просто ничего не делает. */
+function buzz(kind = 'light') {
+  try {
+    const hf = tg && tg.HapticFeedback;
+    if (!hf) return;
+    if (kind === 'success' || kind === 'error' || kind === 'warning') hf.notificationOccurred(kind);
+    else if (kind === 'select') hf.selectionChanged();
+    else hf.impactOccurred(kind);
+  } catch (error) {
+    /* старые клиенты — молча пропускаем */
+  }
+}
+
+let mainButtonHandler = null;
+/* Системная нижняя кнопка Telegram: на вкладке «Задачи» дублирует FAB. */
+function uiMainButton(text, onClick) {
+  if (!tg || !tg.MainButton) return;
+  if (mainButtonHandler) tg.MainButton.offClick(mainButtonHandler);
+  mainButtonHandler = onClick;
+  tg.MainButton.setText(text);
+  tg.MainButton.onClick(onClick);
+  tg.MainButton.show();
+}
+
+function uiMainButtonHide() {
+  if (!tg || !tg.MainButton) return;
+  if (mainButtonHandler) tg.MainButton.offClick(mainButtonHandler);
+  mainButtonHandler = null;
+  tg.MainButton.hide();
+}
+
+/* Системная кнопка «Назад»: закрывает шторку, иначе возвращает на «Главную». */
+function updateBackButton() {
+  if (!tg || !tg.BackButton) return;
+  const sheetOpen = !!document.querySelector('.sheet.is-open');
+  if (sheetOpen || state.tab !== 'home') tg.BackButton.show();
+  else tg.BackButton.hide();
+}
+
+function bindBackButton() {
+  if (!tg || !tg.BackButton || bindBackButton.done) return;
+  bindBackButton.done = true;
+  tg.BackButton.onClick(() => {
+    buzz('select');
+    if (document.querySelector('.sheet.is-open')) closeSheets();
+    else if (state.tab !== 'home') switchTab('home');
+  });
+  // Шторки открываются из шести мест напрямую через classList — вместо правки
+  // каждой точки смотрим за классом и пересчитываем кнопку «Назад» сами.
+  new MutationObserver(updateBackButton).observe(document.body, {
+    attributes: true,
+    subtree: true,
+    attributeFilter: ['class'],
+  });
 }
 
 /* ───────────────────────── Демо-режим (mock API) ─────────────────────── */
@@ -1353,6 +1418,12 @@ function switchTab(name) {
   if (tab === 'library') loadLibrary();
   // Прокрутка у документа общая: без сброса новый экран открывается с середины.
   window.scrollTo({ top: 0, behavior: 'auto' });
+  buzz('select');
+  // Системная кнопка дублирует FAB только на задачах — на остальных экранах
+  // у неё нет понятного действия, и она прячется.
+  if (onTasks) uiMainButton('＋ Новая задача', () => $('addTaskBtn').click());
+  else uiMainButtonHide();
+  updateBackButton();
 }
 
 /* У нижнего запаса один хозяин: на задачах — FAB, на чатах — панель выбора.
@@ -1377,6 +1448,16 @@ function syncFloatingPad() {
 function renderHeader() {
   const me = state.me;
   if (!me) return;
+  // Кружок с фото или первой буквой имени — человек видит, чьим
+  // аккаунтом открыт кабинет, и не путает его с чужим телефоном.
+  const avatar = $('userAvatar');
+  const name = (me.name || '').trim();
+  avatar.title = name || 'Профиль';
+  if (me.photo_url) {
+    avatar.innerHTML = `<img src="${esc(me.photo_url)}" alt="">`;
+  } else {
+    avatar.textContent = (name[0] || '?').toUpperCase();
+  }
   state.features = me.features || state.features;
   if (!state.features.account_login_enabled) {
     $('headerSub').textContent = 'кабинет готов · вход аккаунтов на настройке';
@@ -2065,15 +2146,27 @@ function renderTasks(tasks) {
     `${live} ${subscriptionStopped() ? 'ждут абонемента' : 'работают'} · ` +
     `${(counts.paused || []).length} на паузе · ${(counts.done || []).length} в архиве`;
 
+  // Поиск режет видимый список по названию, источнику и приёмнику — ищет
+  // по всем трём полям сразу, потому что человек помнит то одно, то другое.
+  const query = (state.taskQuery || '').trim().toLowerCase();
+  if (query && tasks && tasks.length) {
+    tasks = tasks.filter((task) =>
+      [task.title, task.source, task.target]
+        .filter(Boolean)
+        .some((field) => String(field).toLowerCase().includes(query))
+    );
+  }
+
   // tasksByStatus[active] может быть пустым просто потому, что у пользователя
   // нет активных рассылок. Скелетон в этом случае не нужен — покажем сразу
   // дружелюбное пустое состояние.
   if (!tasks || !tasks.length) {
-    const texts = {
+    let texts = {
       active: ['✅', 'Нет задач', 'Здесь появятся активные рассылки и триггеры. Запустите первую — она будет работать, даже когда вы офлайн.'],
       paused: ['⏸', 'Нет задач на паузе', 'Остановленные задачи можно вернуть в работу одним нажатием.'],
       done: ['📦', 'Завершённых задач нет', 'Архив появится здесь после первых запусков.'],
     }[state.taskStatus];
+    if (query) texts = ['🔍', 'Ничего не найдено', 'Попробуйте другое слово или сбросьте поиск.'];
     holder.innerHTML = emptyHtml(texts[0], texts[1], texts[2]);
     return;
   }
@@ -2129,14 +2222,14 @@ async function taskAction(action, id, button) {
     }
     if (action === 'run') {
       const data = await withLoading(button, () => api(`/api/tasks/${id}/run`, { method: 'POST' }));
-      toast(runMessage(data.run));
+      toast(runMessage(data.run), data.run && data.run.ok === false ? 'error' : 'ok');
       await refreshAllTaskLists();
       return;
     }
-    toast(ACTION_MESSAGES[action] || 'Готово');
+    toast(ACTION_MESSAGES[action] || 'Готово', 'ok');
     await refreshAllTaskLists();
   } catch (error) {
-    toast(error.message);
+    toast(error.message, 'error');
   }
 }
 
@@ -2248,7 +2341,7 @@ async function loadMoreResults(button) {
       body.insertAdjacentHTML('beforeend', data.items.map(resultRowHtml).join(''));
       $('resultsMore').hidden = !data.has_more;
     } catch (error) {
-      toast(error.message || 'Не удалось показать ещё');
+      toast(error.message || 'Не удалось показать ещё', 'error');
     }
   });
 }
@@ -2263,9 +2356,9 @@ async function exportResults(button) {
       const data = await api(`/api/tasks/${id}/export?tz=${browserTz()}`, { method: 'POST' });
       const sent = data.sent || 0;
       const partial = data.total > sent ? ` из ${data.total}` : '';
-      toast(`Файл отправлен в чат с ботом: ${sent}${partial} стр.`);
+      toast(`Файл отправлен в чат с ботом: ${sent}${partial} стр.`, 'ok');
     } catch (error) {
-      toast(error.message || 'Не удалось выгрузить');
+      toast(error.message || 'Не удалось выгрузить', 'error');
     }
   });
 }
@@ -2563,10 +2656,10 @@ async function addLibraryItems(button) {
     });
     field.value = '';
     renderLibraryDraft();
-    toast(blocks.length === 1 ? 'Сообщение сохранено' : `Сохранено сообщений: ${blocks.length}`);
+    toast(blocks.length === 1 ? 'Сообщение сохранено' : `Сохранено сообщений: ${blocks.length}`, 'ok');
     await loadLibrary();
   } catch (error) {
-    toast(error.message);
+    toast(error.message, 'error');
   }
 }
 
@@ -2665,10 +2758,10 @@ async function saveLibraryEdit(button) {
     state.libraryEdit = null;
     field.value = '';
     applyLibraryMode();
-    toast(users ? `Исправлено — уйдёт в задачах: ${users}` : 'Сообщение исправлено');
+    toast(users ? `Исправлено — уйдёт в задачах: ${users}` : 'Сообщение исправлено', 'ok');
     await loadLibrary();
   } catch (error) {
-    toast(error.message);
+    toast(error.message, 'error');
   }
 }
 
@@ -2699,7 +2792,7 @@ async function deleteLibraryItem(id, button) {
     }
     await loadLibrary();
   } catch (error) {
-    toast(error.message);
+    toast(error.message, 'error');
   }
 }
 
@@ -2951,7 +3044,7 @@ async function applyLoginStep(step) {
   if (step.stage === 'done') {
     closeSheets();
     loginReset();
-    toast(`Аккаунт ${step.phone || ''} подключён`.replace('  ', ' '));
+    toast(`Аккаунт ${step.phone || ''} подключён`.replace('  ', ' '), 'ok');
     await loadAccounts();
     return;
   }
@@ -2965,7 +3058,7 @@ async function applyLoginStep(step) {
   renderLoginStage();
   if (step.stage === 'code' && wasStage === 'phone') toast(deliveryHint(step.delivery));
   if (step.stage === 'code' && wasStage === 'code') {
-    toast('Новый код отправлен. Код из прошлого сообщения больше не действует.');
+    toast('Новый код отправлен. Код из прошлого сообщения больше не действует.', 'ok');
   }
   $('loginInput').focus();
 }
@@ -2987,7 +3080,7 @@ async function loginFailed(error) {
   }
   if (error.status === 503) {
     closeSheets();
-    toast(error.message);
+    toast(error.message, 'error');
     await loadAccounts();
     return;
   }
@@ -3038,7 +3131,7 @@ async function restartLogin() {
       api('/api/accounts/login/cancel', { method: 'POST' })
     );
   } catch (error) {
-    toast(error.message);
+    toast(error.message, 'error');
   }
   loginReset();
   state.pendingLogin = null;
@@ -3059,13 +3152,14 @@ async function retryAccount(id, button) {
     toast(
       data.online
         ? `Аккаунт ${data.phone || phone} на связи`
-        : `Пока не выходит на связь: ${data.error || 'причина неизвестна'}`
+        : `Пока не выходит на связь: ${data.error || 'причина неизвестна'}`,
+      data.online ? 'ok' : 'error'
     );
     await loadAccounts();
     // Задачи на этом аккаунте показывали «нет связи» — теперь метка другая.
     if (data.online) await refreshAllTaskLists();
   } catch (error) {
-    toast(error.message);
+    toast(error.message, 'error');
   }
 }
 
@@ -3080,11 +3174,11 @@ async function deleteAccount(id, button) {
   if (!agreed) return;
   try {
     const data = await withLoading(button, () => api(`/api/accounts/${id}`, { method: 'DELETE' }));
-    toast(`Аккаунт ${data.phone || phone} отключён`);
+    toast(`Аккаунт ${data.phone || phone} отключён`, 'ok');
     await loadAccounts();
     await refreshAllTaskLists();
   } catch (error) {
-    toast(error.message);
+    toast(error.message, 'error');
   }
 }
 
@@ -3888,14 +3982,14 @@ async function submitTask() {
     // Правка ничего не запускает и не переносит задачу между списками: она
     // остаётся там же, где была, — обновляем списки и остаёмся на месте.
     if (editing) {
-      toast('Настройки сохранены');
+      toast('Настройки сохранены', 'ok');
       await refreshAllTaskLists();
       return;
     }
 
     const run = data.run;
-    if (run) toast(runMessage(run));
-    else toast('Задача запущена');
+    if (run) toast(runMessage(run), run.ok === false ? 'error' : 'ok');
+    else toast('Задача запущена', 'ok');
 
     // разовая задача отработала и ушла в архив — показываем архив, иначе активные
     state.taskStatus = data.task && data.task.archived ? 'done' : 'active';
@@ -3957,19 +4051,19 @@ async function payWithStars(button, months = 1) {
     );
     openStarsInvoice(invoice.url);
   } catch (error) {
-    toast(error.message);
+    toast(error.message, 'error');
   }
 }
 
 function openStarsInvoice(url) {
   tg.openInvoice(url, (status) => {
     if (status === 'paid') {
-      toast('Оплата прошла — абонемент активен.');
+      toast('Оплата прошла — абонемент активен.', 'ok');
       loadAccounts();
     } else if (status === 'pending') {
       toast('Платёж обрабатывается, абонемент появится после подтверждения.');
     } else if (status === 'failed') {
-      toast('Платёж не прошёл. Попробуйте ещё раз.');
+      toast('Платёж не прошёл. Попробуйте ещё раз.', 'error');
     }
     // 'cancelled' — пользователь закрыл окно сам, молчим.
   });
@@ -4013,7 +4107,7 @@ async function payOnWeb(button) {
     const data = await withLoading(button, () => api('/api/pay/link'));
     openExternal(data.url);
   } catch (error) {
-    toast(error.message);
+    toast(error.message, 'error');
   }
 }
 
@@ -4081,13 +4175,13 @@ async function claimBonus(button) {
     const data = await withLoading(button, () =>
       api('/api/subscription/bonus', { method: 'POST', body: '{}' })
     );
-    toast(data.message || 'Подарок начислен');
+    toast(data.message || 'Подарок начислен', 'ok');
     if (state.me) state.me.bonus = { ...info, claimed: true, days: data.days };
     renderBonus();
     // Дни уже в подписке — обновляем копилку, бейдж и шапку одним запросом.
     await loadAccounts();
   } catch (error) {
-    toast(error.message);
+    toast(error.message, 'error');
     // 403 — «не вижу вас в канале»: сразу открываем канал, чтобы человек не
     // искал его сам. Остальные отказы говорят за себя.
     if (error.status === 403) openBonusChannel();
@@ -4101,11 +4195,12 @@ async function moveBankDays(direction, button) {
     toast(
       direction === 'freeze'
         ? `${data.moved} дн. убрано в копилку`
-        : `${data.moved} дн. вернулось в подписку`
+        : `${data.moved} дн. вернулось в подписку`,
+      'ok'
     );
     await loadAccounts();
   } catch (error) {
-    toast(error.message);
+    toast(error.message, 'error');
   }
 }
 
@@ -4233,7 +4328,14 @@ function bindEvents() {
   });
   // Корона в центре навигации — то же, что «создать задачу»: главное действие
   // кабинета должно быть под большим пальцем, а не в глубине экрана.
-  $('crownBtn').addEventListener('click', () => openTaskSheet(null));
+  $('crownBtn').addEventListener('click', () => { buzz('light'); openTaskSheet(null); });
+  bindBackButton();
+
+  // Поиск по задачам: фильтрует уже загруженный список, без запросов.
+  $('taskSearch').addEventListener('input', (event) => {
+    state.taskQuery = event.target.value;
+    renderTasks(state.tasksByStatus[state.taskStatus]);
+  });
 
   // главная
   $('homeCreate').addEventListener('click', () => openTaskSheet(null));
@@ -4320,7 +4422,7 @@ function bindEvents() {
     taskAction(button.dataset.action, button.dataset.id, button);
   });
   // «＋ Запустить задачу» без выбранной команды — открываем пересылку
-  $('addTaskBtn').addEventListener('click', () => openTaskSheet(null));
+  $('addTaskBtn').addEventListener('click', () => { buzz('light'); openTaskSheet(null); });
 
   // чаты
   renderChatTags();
@@ -4617,7 +4719,7 @@ async function boot() {
       // карточки в «Аккаунтах» просто нет.
       renderBonus();
     } catch (error) {
-      toast(error.message);
+      toast(error.message, 'error');
     }
 
     await loadAccounts();

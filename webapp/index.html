@@ -53,6 +53,7 @@
   <!-- Шапка -->
   <header class="header">
     <div class="header__left">
+      <div class="avatar" id="userAvatar" aria-hidden="true">?</div>
       <svg class="mascot mascot--logo" viewBox="0 0 120 120" role="img"
            aria-label="ДОЧА"><use href="#crown" /></svg>
       <div>
@@ -116,6 +117,11 @@
     <section class="tab hidden" id="tab-tasks" aria-label="Задачи">
       <div class="screen__title">Задачи</div>
       <div class="screen__sub" id="taskSummary">Что уже работает и что стоит на паузе.</div>
+      <div class="search">
+        <span class="search__icon" aria-hidden="true">🔍</span>
+        <input type="text" id="taskSearch" placeholder="Название, источник или приёмник"
+               autocomplete="off" aria-label="Поиск задачи">
+      </div>
       <div class="segmented" id="taskStatus" role="tablist" aria-label="Статус задач">
         <button class="seg is-active" data-status="active" role="tab" aria-selected="true">Активные</button>
         <button class="seg" data-status="paused" role="tab" aria-selected="false">На паузе</button>
