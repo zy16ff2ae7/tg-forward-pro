@@ -5,9 +5,10 @@ from pathlib import Path
 
 from app.config import BASE_DIR
 
-# Папка assets лежит в корне проекта и попадает в git. Здесь живут
-# сгенерированные баннеры: `python scripts/make_banner.py` создаёт welcome.png.
+# Папка assets лежит в корне проекта и попадает в git. Основной баннер —
+# welcome.jpg (ДОЧА в неоне); `python scripts/make_banner.py` рисует кодом
+# запасной welcome-code.png на случай, если фото потеряется.
 ASSETS_DIR: Path = BASE_DIR / "assets"
 
-# Приветственный баннер — арт-деко в зелёных тонах.
-WELCOME_PHOTO: Path = ASSETS_DIR / "welcome.png"
+# Приветственный баннер — ДОЧА в розовом неоне.
+WELCOME_PHOTO: Path = ASSETS_DIR / "welcome.jpg"

@@ -316,10 +316,12 @@ button { border: none; background: none; cursor: pointer; }
 
 /* ══════════════════════════ Главная: герой-блок ═══════════════════════════ */
 
-/* Картинку кладут в webapp/assets/hero.webp и включают двумя переменными:
-   --hero-image (url) и, если нужно выше, --hero-h. Пока файла нет, блок живёт
+/* Картинка лежит в webapp/assets/hero.jpg и включается двумя переменными:
+   --hero-image (url) и, если нужно выше, --hero-h. Без файла блок живёт
    на градиентах: высота ровно под подпись, без пустого поля сверху. */
 .hero {
+  --hero-image: url("assets/docha.jpg");
+  --hero-h: 264px;
   position: relative;
   margin: -14px -14px 16px;
   min-height: var(--hero-h, 188px);
@@ -340,16 +342,20 @@ button { border: none; background: none; cursor: pointer; }
   inset: 0;
   background-image: var(--hero-image, none);
   background-size: cover;
-  background-position: 50% 22%;
-  opacity: 0.9;
+  /* Девушка стоит справа: кадр держим на короне и лице */
+  background-position: 62% 26%;
+  opacity: 0.95;
 }
 
-/* Тень снизу: подпись читается поверх любой картинки */
+/* Тень снизу и вуаль слева: подпись читается поверх любой картинки,
+   а текст слева не спорит с лицом справа */
 .hero::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, rgba(10, 5, 16, 0.12) 0%, rgba(10, 5, 16, 0.62) 62%, #0A0510 100%);
+  background:
+    linear-gradient(90deg, rgba(10, 5, 16, 0.55) 0%, transparent 52%),
+    linear-gradient(180deg, rgba(10, 5, 16, 0.12) 0%, rgba(10, 5, 16, 0.62) 62%, #0A0510 100%);
 }
 
 .hero__body { position: relative; z-index: 2; }

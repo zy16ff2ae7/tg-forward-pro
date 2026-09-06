@@ -937,5 +937,5 @@ pytest.ini, requirements-dev.txt   тестовый контур (продакш
   фото, правится `caption`, иначе `text`. Без этого все кнопки меню молча
   перестают работать после `/start` с баннером (Telegram: «there is no text in
   the message to edit»).
-- Если `assets/welcome.png` нет, `/start` отправляет текстовое приветствие —
+- Если `assets/welcome.jpg` нет, `/start` отправляет текстовое приветствие —
   баннер необязателен.

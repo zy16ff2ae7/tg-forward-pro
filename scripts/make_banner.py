@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Приветственный баннер бота: assets/welcome.png.
+"""Запасной баннер бота: assets/welcome-code.png.
 
 Стиль — тот же, что в кабинете (webapp/styles.css): неон на почти чёрном,
 розово-пурпурный акцент, знак-корона. Из прежнего арт-деко остались только
@@ -22,7 +22,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-OUT_FILE = BASE_DIR / "assets" / "welcome.png"
+OUT_FILE = BASE_DIR / "assets" / "welcome-code.png"
 
 # ─────────────────────────────── НАСТРОЙКИ ────────────────────────────────
 W, H = 1280, 720
