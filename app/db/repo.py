@@ -24,6 +24,7 @@ from app.db.models import (
     PromoRedemption,
     Rule,
     SavedMessage,
+    ScheduledDelete,
     Subscription,
     TelegramAccount,
     User,
@@ -2485,3 +2486,55 @@ async def drop_orphan_records(session: AsyncSession) -> dict[str, int]:
             dropped[model.__tablename__] = int(result.rowcount)
     await session.flush()
     return dropped
+
+
+async def schedule_delete(
+    session: AsyncSession,
+    *,
+    rule_id: int,
+    user_id: int,
+    account_id: int,
+    chat_id: int,
+    msg_id: int,
+    delete_at: datetime,
+) -> int:
+    """Записывает снос сообщения. Возвращает id строки."""
+    row = ScheduledDelete(
+        rule_id=rule_id,
+        user_id=user_id,
+        account_id=account_id,
+        chat_id=chat_id,
+        msg_id=msg_id,
+        delete_at=delete_at,
+    )
+    session.add(row)
+    await session.flush()
+    return int(row.id)
+
+
+async def due_deletes(
+    session: AsyncSession, now: datetime, limit: int = 100
+) -> Sequence[ScheduledDelete]:
+    """Сносы, которым пора, — от старых к новым, не больше лимита за проход."""
+    result = await session.execute(
+        select(ScheduledDelete)
+        .where(ScheduledDelete.delete_at <= now)
+        .order_by(ScheduledDelete.delete_at)
+        .limit(max(1, limit))
+    )
+    return list(result.scalars().all())
+
+
+async def drop_delete(session: AsyncSession, delete_id: int) -> None:
+    """Убирает снос: снесли, безнадёжен или попытки кончились."""
+    await session.execute(delete(ScheduledDelete).where(ScheduledDelete.id == delete_id))
+
+
+async def bump_delete_attempt(session: AsyncSession, delete_id: int) -> int:
+    """Считает неудачную попытку сноса. Возвращает новое число попыток."""
+    row = await session.get(ScheduledDelete, delete_id)
+    if row is None:
+        return 0
+    row.attempts = int(row.attempts or 0) + 1
+    await session.flush()
+    return int(row.attempts)

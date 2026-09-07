@@ -14,6 +14,7 @@ from app.db import repo
 from app.db.database import SessionLocal, session_scope
 from app.telegram_client.filters import (
     FilterConfig,
+    autodelete_hours,
     media_kind,
     message_text,
     should_forward,
@@ -209,6 +210,21 @@ async def deliver(client: Any, message: Any, rule: RuleSnapshot) -> DeliveryResu
             target_msg_id=int(target_msg_id) if target_msg_id else None,
             status="ok",
         )
+        hours = autodelete_hours(filters)
+        if hours > 0 and target_msg_id:
+            from datetime import timedelta
+
+            from app.timeutil import utcnow
+
+            await repo.schedule_delete(
+                session,
+                rule_id=rule.id,
+                user_id=rule.user_id,
+                account_id=rule.account_id,
+                chat_id=int(rule.target_id),
+                msg_id=int(target_msg_id),
+                delete_at=utcnow() + timedelta(hours=hours),
+            )
     logger.debug(
         "Правило #{}: переслано {} ({})", rule.id, target_msg_id, media_kind(message)
     )

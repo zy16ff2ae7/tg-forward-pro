@@ -141,6 +141,8 @@ class FilterConfig:
     library_ids: list[int] = field(default_factory=list)  # id из saved_messages
     # Закреплять каждое отправленное сообщение (нужны права в приёмнике).
     pin_on_send: bool = False
+    # Автоудаление: через сколько часов снести отправленное (0 — не сносить).
+    autodelete_hours: float = 0
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "FilterConfig":
@@ -215,7 +217,28 @@ class FilterConfig:
             "random_pick": self.random_pick,
             "library_ids": self.library_ids,
             "pin_on_send": self.pin_on_send,
+            "autodelete_hours": self.autodelete_hours,
         }
+
+
+# Дольше месяца посты не живут: опечатка «8760 часов» не должна вешать
+# строку в базе на год.
+AUTODELETE_MAX_HOURS = 24 * 30
+
+
+def autodelete_hours(config: Any) -> float:
+    """Через сколько часов сносить отправленное. 0 — не сносить.
+
+    Живёт в filters, а не в jobs: пересылка (forwarder) тянет его напрямую,
+    а jobs для неё — верхний уровень, импортировать его оттуда нельзя.
+    """
+    try:
+        hours = float(getattr(config, "autodelete_hours", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    if hours <= 0:
+        return 0
+    return min(hours, AUTODELETE_MAX_HOURS)
 
 
 def media_kind(message: Any) -> str:

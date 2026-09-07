@@ -1053,10 +1053,67 @@ class ClientManager:
                 await asyncio.sleep(20)
                 await self._poster_tick()
                 await self._clone_tick()
+                await self._autodelete_tick()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — планировщик не должен падать
                 logger.exception("Постер-планировщик упал: {}", exc)
+
+    async def _autodelete_tick(self) -> None:
+        """Один проход уборщика: сносит сообщения, чьи часы жизни вышли.
+
+        Аккаунта нет на связи — строка ждёт следующего круга, а не сгорает:
+        «пост живёт сутки» не должно превращаться в «пост живёт вечно»
+        из-за ночного переподключения. Безнадёжные сносы (сообщения уже нет,
+        прав не хватает, чат умер) убираются сразу — долбить их нечего.
+        """
+        from telethon.errors import (
+            MessageAuthorRequiredError,
+            MessageDeleteForbiddenError,
+            MessageIdInvalidError,
+        )
+
+        from app.telegram_client.jobs import (
+            AUTODELETE_ATTEMPTS,
+            AUTODELETE_BATCH,
+            is_hopeless_chat_error,
+        )
+
+        async with session_scope() as session:
+            rows = await repo.due_deletes(session, repo.utcnow(), AUTODELETE_BATCH)
+        for row in rows:
+            client = self._clients.get(row.account_id)
+            if client is None or not client.is_connected():
+                continue
+            try:
+                await client.delete_messages(row.chat_id, row.msg_id)
+            except (
+                MessageIdInvalidError,
+                MessageDeleteForbiddenError,
+                MessageAuthorRequiredError,
+            ) as exc:
+                logger.info(
+                    "Снос #{}: горевать не о чем ({}) — строку убираем",
+                    row.id, type(exc).__name__,
+                )
+                async with session_scope() as session:
+                    await repo.drop_delete(session, row.id)
+            except Exception as exc:  # noqa: BLE001 — сеть упала, попробуем позже
+                if is_hopeless_chat_error(exc):
+                    async with session_scope() as session:
+                        await repo.drop_delete(session, row.id)
+                    continue
+                async with session_scope() as session:
+                    attempts = await repo.bump_delete_attempt(session, row.id)
+                    if attempts >= AUTODELETE_ATTEMPTS:
+                        logger.warning(
+                            "Снос #{}: {} попыток не снесли {} в {} — сдаёмся",
+                            row.id, attempts, row.msg_id, row.chat_id,
+                        )
+                        await repo.drop_delete(session, row.id)
+            else:
+                async with session_scope() as session:
+                    await repo.drop_delete(session, row.id)
 
     async def _clone_tick(self) -> None:
         """Один проход догрузки историй: каждому недогрузившему клону — порция.
@@ -1136,6 +1193,7 @@ class ClientManager:
             mailing_send,
             own_text_item,
             record_pruned_chats,
+            schedule_autodelete,
             window_now_sec,
             window_tz_minutes,
         )
@@ -1235,6 +1293,8 @@ class ClientManager:
                     sent_id = await mailing_send(client, rule, item, chat_id)
                     if getattr(rule.filters, "pin_on_send", False) and sent_id:
                         await pin_sent(client, chat_id, sent_id, rule_id=rule.id)
+                    if sent_id:
+                        await schedule_autodelete(rule, chat_id, sent_id)
                 except FloodWaitError as exc:
                     # Telegram явно говорит, сколько ждать. Слушаемся: иначе на
                     # следующем тике тот же отказ и поток предупреждений в журнале.
@@ -1324,6 +1384,7 @@ class ClientManager:
             mailing_position,
             mailing_recipients,
             mailing_send,
+            schedule_autodelete,
             window_allows,
         )
         from app.telegram_client.forwarder import pin_sent
@@ -1406,6 +1467,8 @@ class ClientManager:
                 sent_id = await mailing_send(client, rule, item, target_id)
                 if getattr(rule.filters, "pin_on_send", False) and sent_id:
                     await pin_sent(client, target_id, sent_id, rule_id=rule.id)
+                if sent_id:
+                    await schedule_autodelete(rule, target_id, sent_id)
             except FloodWaitError as exc:
                 # Telegram явно сказал, сколько ждать, — слушаемся, иначе на
                 # следующем тике тот же отказ и поток предупреждений в журнале.
@@ -1513,6 +1576,7 @@ class ClientManager:
             mailing_send,
             record_batch,
             record_pruned_chats,
+            schedule_autodelete,
             scheduled_pending,
         )
         from app.telegram_client.forwarder import pin_sent
@@ -1548,6 +1612,8 @@ class ClientManager:
                 sent_id = await mailing_send(client, rule, item, chat_id)
                 if getattr(rule.filters, "pin_on_send", False) and sent_id:
                     await pin_sent(client, chat_id, sent_id, rule_id=rule.id)
+                if sent_id:
+                    await schedule_autodelete(rule, chat_id, sent_id)
             except FloodWaitError as exc:
                 # Чат не обработан — вернёмся к нему после паузы.
                 wait = int(getattr(exc, "seconds", 30)) + 1

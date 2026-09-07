@@ -247,6 +247,28 @@ class ForwardLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
 
+class ScheduledDelete(Base):
+    """Автоудаление: какое сообщение снести и когда.
+
+    Строка переживает перезапуск: время сноса — в БД, а не в памяти. Удаление
+    задачи строки не трогает: «пост живёт сутки» — обещание, данное в момент
+    отправки, и действует оно независимо от судьбы задачи.
+    """
+
+    __tablename__ = "scheduled_deletes"
+    __table_args__ = (Index("ix_scheduled_deletes_due", "delete_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    rule_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    account_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    msg_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    delete_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
 class JoinLog(Base):
     """Вступления автоподписки — по строке на вступление.
 

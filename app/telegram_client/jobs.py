@@ -1742,6 +1742,43 @@ async def _store(rule: RuleSnapshot, kind: str, payloads: list[dict]) -> tuple[i
     return added, len(payloads) > room
 
 
+# Сносов за проход уборщика: сотня удалений — уже заметная пачка запросов,
+# остальное подождёт следующего круга (20 секунд — не срок для часов жизни).
+AUTODELETE_BATCH = 100
+# Неудачных попыток снести одно сообщение: дальше строка считается мёртвой.
+AUTODELETE_ATTEMPTS = 10
+
+
+async def schedule_autodelete(rule: RuleSnapshot, chat_id: int, msg_id: int) -> None:
+    """Планирует снос отправленного, если в задаче стоят часы жизни.
+
+    Рассылка и постер зовут после каждой отправки. Своя сессия и best effort:
+    планировщик шлёт дальше, даже если запись не легла (сообщение тогда
+    останется — об этом скажет лог службы, а не молчание).
+    """
+    from app.db.database import session_scope
+    from app.telegram_client.filters import autodelete_hours
+
+    hours = autodelete_hours(getattr(rule, "filters", None))
+    if hours <= 0 or not msg_id:
+        return
+    try:
+        async with session_scope() as session:
+            await repo.schedule_delete(
+                session,
+                rule_id=rule.id,
+                user_id=rule.user_id,
+                account_id=rule.account_id,
+                chat_id=int(chat_id),
+                msg_id=int(msg_id),
+                delete_at=repo.utcnow() + timedelta(hours=hours),
+            )
+    except Exception as exc:  # noqa: BLE001 — планировщик шлёт дальше
+        logger.warning(
+            "Задача #{}: не записали снос {} в {}: {}", rule.id, msg_id, chat_id, exc
+        )
+
+
 async def record_ok(rule: RuleSnapshot, message: Any, count: int = 1) -> None:
     """Отмечает успешное срабатывание задачи."""
     async with SessionLocal() as session:
