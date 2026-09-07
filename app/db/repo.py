@@ -1987,6 +1987,79 @@ async def forward_stats(
     }
 
 
+# Сколько событий надо, чтобы советовать окно: меньше — шум, а не пик.
+ACTIVITY_MIN_EVENTS = 10
+# Ширина советуемого окна в часах: уже — промахнуться, шире — не совет.
+ACTIVITY_PEAK_WIDTH = 2
+
+
+async def activity_hours(
+    session: AsyncSession, user_id: int, days: int = 14, tz_offset: int = 0
+) -> dict:
+    """Активность ленты по часам суток: когда жить, тогда и постить.
+
+    Сигналы — живые события с метками времени: доставки и попытки журнала
+    (источники постят — лента движется) плюс пойманное ловцом чеков
+    (аудитория пишет сама). Парсер в счёт не идёт: его метки — время сбора,
+    а не время жизни. Агрегация в Python, как в ``forward_stats``: даты
+    в SQLite и Postgres режутся по-разному, а строк — тысячи.
+
+    ``tz_offset`` — сдвиг в минутах от UTC: часы считаются в нём, иначе
+    «постите в 9» прилетело бы не в те девять. Пик — лучшее окно шириной
+    ``ACTIVITY_PEAK_WIDTH``; мало событий — пика нет (None), а не выдумка.
+    """
+    days = max(1, min(days, 90))
+    tz_offset = max(-720, min(720, tz_offset))
+    cutoff = utcnow() - timedelta(days=days)
+    shift = timedelta(minutes=tz_offset)
+
+    log_rows = (
+        await session.execute(
+            select(ForwardLog.created_at)
+            .where(
+                ForwardLog.user_id == user_id,
+                ForwardLog.created_at >= cutoff,
+                ForwardLog.status.in_(("ok", "error")),
+            )
+            .limit(20000)
+        )
+    ).all()
+    check_rows = (
+        await session.execute(
+            select(CollectedItem.created_at)
+            .where(
+                CollectedItem.user_id == user_id,
+                CollectedItem.kind == "checks",
+                CollectedItem.created_at >= cutoff,
+            )
+            .limit(20000)
+        )
+    ).all()
+
+    hours = [0] * 24
+    for (ts,) in (*log_rows, *check_rows):
+        if ts is None:
+            continue
+        hours[(ts + shift).hour] += 1
+    total = sum(hours)
+
+    peak = None
+    if total >= ACTIVITY_MIN_EVENTS:
+        width = ACTIVITY_PEAK_WIDTH
+        # Окно может перейти через полночь — часы складываются по кругу.
+        # При равной сумме побеждает окно с пикового часа: всё случилось
+        # в 12 — советуем «12–14», а не «11–13».
+        best = max(
+            range(24),
+            key=lambda h: (
+                sum(hours[(h + step) % 24] for step in range(width)),
+                hours[h],
+            ),
+        )
+        peak = {"start": best, "end": (best + width) % 24}
+    return {"hours": hours, "total": total, "peak": peak}
+
+
 async def recent_logs(
     session: AsyncSession, user_id: int, limit: int = 30
 ) -> Sequence[ForwardLog]:

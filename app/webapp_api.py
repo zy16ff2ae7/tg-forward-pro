@@ -1946,6 +1946,30 @@ async def stats(request: web.Request) -> web.Response:
     )
 
 
+@routes.get("/api/activity/hours")
+@require_auth
+async def activity_hours(request: web.Request) -> web.Response:
+    """Активность ленты по часам: когда жить, тогда и постить.
+
+    Параметры: ``days`` (1–90, по умолчанию 14) и ``tz`` — сдвиг в минутах
+    от UTC, в котором считать часы (по умолчанию 0). Часы кабинета шлёт
+    свои: иначе «постите в 9» прилетело бы не в те девять.
+    """
+    user_id = request[USER_ID_KEY]
+    try:
+        days = int(request.query.get("days") or 14)
+    except (TypeError, ValueError):
+        days = 14
+    try:
+        tz_offset = int(request.query.get("tz") or 0)
+    except (TypeError, ValueError):
+        tz_offset = 0
+
+    async with SessionLocal() as session:
+        result = await repo.activity_hours(session, user_id, days, tz_offset)
+    return _json({**result, "days": max(1, min(days, 90)), "tz": tz_offset})
+
+
 @routes.get("/api/activity")
 @require_auth
 async def activity(request: web.Request) -> web.Response:

@@ -2202,6 +2202,57 @@ function renderBulkButtons() {
   ).join('');
 }
 
+/* Лучшее время для постинга: пик активности ленты за 14 дней — в шторке
+   постинга по расписанию. Очереди и остальным командам окна не положены,
+   им и подсказка ни к чему. Часы — в tz задачи (или устройства): иначе
+   «постите в 9» прилетело бы не в те девять. */
+async function maybeRenderActivityHint(task) {
+  const box = $('activityHint');
+  if (!box) return;
+  box.hidden = true;
+  box.innerHTML = '';
+  const command = state.activeCommand || {};
+  const kind = (task && task.kind) || command.kind || '';
+  const posterish = kind === 'poster'
+    || (command.id === 'sender' && (state.sendMode || 'schedule') !== 'queue');
+  if (!posterish) return;
+  const tzField = $('task_tz');
+  let tz = -new Date().getTimezoneOffset();
+  if (tzField && tzField.value !== '' && tzField.value !== undefined) {
+    const parsed = Number(tzField.value);
+    if (Number.isFinite(parsed)) tz = parsed;
+  }
+  box.hidden = false;
+  box.textContent = '📊 Считаем активность ленты…';
+  let data;
+  try {
+    data = await api(`/api/activity/hours?days=14&tz=${tz}`);
+  } catch (error) {
+    box.hidden = true;
+    return;
+  }
+  // Шторку могли закрыть, пока считали, — не воскрешаем мёртвое.
+  if (!$('taskSheet').classList.contains('is-open')) return;
+  if (!data.total) {
+    box.textContent = '📊 Активности пока нет: как лента оживёт — подскажем лучшее окно.';
+    return;
+  }
+  if (!data.peak) {
+    box.textContent = `📊 Событий пока мало (${data.total}) — окно посоветуем, когда наберётся.`;
+    return;
+  }
+  const clock = (hour) => `${String(hour).padStart(2, '0')}:00`;
+  box.innerHTML = `📊 Пик активности: <b>${clock(data.peak.start)}–${clock(data.peak.end)}</b> ` +
+    `(${data.total} соб.) <button type="button" class="btn btn--sm" id="activityApply">Поставить окно</button>`;
+  $('activityApply').addEventListener('click', () => {
+    const start = $('task_start');
+    const end = $('task_end');
+    if (start) start.value = clock(data.peak.start);
+    if (end) end.value = clock(data.peak.end);
+    toast(`Окно ${clock(data.peak.start)}–${clock(data.peak.end)} поставлено.`, 'ok');
+  });
+}
+
 async function bulkTasks(button, action) {
   try {
     const result = await withLoading(button, () =>
@@ -3942,6 +3993,7 @@ function openTaskSheet(command, prefill, task) {
   fillTaskAccounts();
   bindSheetFields();
   applyTaskPrefill(prefill || {});
+  maybeRenderActivityHint(editing ? task : null);
   $('taskSheet').classList.add('is-open');
 }
 
@@ -4179,6 +4231,7 @@ function bindSheetFields() {
         item.classList.toggle('is-active', item === seg);
       });
       applySendModeVisibility();
+      maybeRenderActivityHint(state.editTask || null);
     });
   });
   const schedBox = $('task_schedule_only');

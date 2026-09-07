@@ -427,6 +427,9 @@
         <div class="sheet__lead" id="taskSheetLead"></div>
         <div id="taskFields"></div>
         <div class="hint" id="taskHint"></div>
+        <!-- Лучшее время для постинга: пик активности ленты за 14 дней.
+             Рисует maybeRenderActivityHint — только у постинга по расписанию. -->
+        <div class="hint" id="activityHint" hidden></div>
         <button class="btn btn--primary btn--block" id="taskSubmit">Запустить задачу</button>
         <div class="error" id="taskError" role="alert"></div>
       </div>
