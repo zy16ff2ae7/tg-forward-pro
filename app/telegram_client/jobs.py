@@ -27,6 +27,10 @@ from typing import Any, Callable, Awaitable, Sequence
 
 from loguru import logger
 from telethon.errors import FloodWaitError, RPCError
+from telethon.tl.functions.channels import (
+    GetFullChannelRequest,
+    InviteToChannelRequest,
+)
 from telethon.tl.types import ChannelParticipantsAdmins
 
 from app.db import repo
@@ -98,6 +102,11 @@ NOT_A_CHAT_LINK = frozenset(
 )
 
 MAX_PARSER_LIMIT = 10_000
+# Ответов на один пост при сборе комментаторов: дальше — шум, а не люди.
+COMMENTS_PER_POST = 200
+# Приглашений за один нажим кнопки: инвайт — тяжёлая операция, пачками по
+# многу Telegram режет и заодно банит аккаунт за спам.
+INVITE_BATCH = 20
 
 # Отказы Telegram, которые не значат «не получилось»: в чате мы и так есть, а
 # заявку уже отправили и её рассматривает админ. Исправлять человеку нечего,
@@ -998,6 +1007,30 @@ def _user_passes_filters(user: Any, conf: Any, admin_ids: set[int]) -> bool:
     return True
 
 
+def _screen_user(
+    user: Any, conf: Any, admin_ids: set[int], known: set[int]
+) -> tuple[dict | None, str]:
+    """Отсев собранного человека: удалён/бот, уже есть, не прошёл фильтры.
+
+    Возвращает (payload, причина): "ok" — забираем, "skipped" — уже собран,
+    "filtered" — отсеян. Один на режимы «авторы» и «комментарии»: проверки
+    одинаковые, а расходились они уже дважды — правили в одном месте и забывали
+    во втором.
+    """
+    if (
+        getattr(user, "deleted", False)
+        or getattr(user, "bot", False)
+        or getattr(user, "broadcast", False)
+    ):
+        return None, "filtered"
+    user_id = int(getattr(user, "id", 0) or 0)
+    if not user_id or user_id in known:
+        return None, "skipped"
+    if not _user_passes_filters(user, conf, admin_ids):
+        return None, "filtered"
+    return _parser_payload(user), "ok"
+
+
 def _parser_payload(user: Any) -> dict:
     """Участник — в запись хранилища (те же поля, что ждёт выгрузка в файл)."""
     name = " ".join(
@@ -1013,17 +1046,107 @@ def _parser_payload(user: Any) -> dict:
     }
 
 
+async def _discussion_id(client: Any, source_id: int) -> int | None:
+    """Где живут комментарии источника: у группы — она сама, у канала — группа
+    обсуждений из полного описания. Нет группы — негде собирать (None)."""
+    try:
+        entity = await client.get_entity(source_id)
+    except Exception:  # noqa: BLE001 — источник недоступен, скажет вызывающий
+        return None
+    if not getattr(entity, "broadcast", False):
+        return int(source_id)
+    try:
+        full = await client(GetFullChannelRequest(entity))
+    except Exception:  # noqa: BLE001 — приватный канал без доступа
+        return None
+    linked = getattr(getattr(full, "full_chat", None), "linked_chat_id", None)
+    return int(linked) if linked else None
+
+
+async def invite_collected(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
+    """Зовёт собранных парсером людей в чат из настроек задачи.
+
+    Идёт пачкой INVITE_BATCH за вызов: инвайт упирается в лимиты Telegram, и
+    гнать тысячу зараз — верный бан аккаунта. Каждый приглашённый помечается в
+    хранилище, повторный вызов берёт следующих. Чужая приватность уважается:
+    кого позвать нельзя, тот помечается причиной и больше не трогается.
+    FloodWait останавливает пачку: недоприглашённые ждут следующего вызова.
+    """
+    conf = rule.filters
+    target_ref = str(getattr(conf, "invite_to", "") or "").strip()
+    if not target_ref:
+        return {"ok": False, "error": "Укажите чат для приглашений в настройках задачи"}
+    try:
+        target = await client.get_entity(target_ref)
+    except Exception as exc:  # noqa: BLE001 — ссылка битая или нет доступа
+        return {"ok": False, "error": f"Чат для приглашений недоступен: {exc}"}
+    delay = max(2, min(int(getattr(conf, "api_delay", 0) or 0), 60))
+
+    async with SessionLocal() as session:
+        items = await repo.list_collected_items(
+            session, rule.id, limit=MAX_PARSER_LIMIT
+        )
+    pending = [
+        item
+        for item in items
+        if not (getattr(item, "payload", None) or {}).get("invited")
+        and not (getattr(item, "payload", None) or {}).get("invite_error")
+    ]
+    invited = 0
+    failed = 0
+    for item in pending[:INVITE_BATCH]:
+        payload = getattr(item, "payload", None) or {}
+        user_id = int(payload.get("user_id") or 0)
+        if invited:
+            await asyncio.sleep(delay)
+        if not user_id:
+            failed += 1
+            continue
+        try:
+            await client(InviteToChannelRequest(target, [user_id]))
+        except FloodWaitError as exc:
+            seconds = int(getattr(exc, "seconds", 60))
+            return {
+                "ok": False,
+                "error": f"Telegram просит подождать {seconds} сек",
+                "invited": invited,
+                "failed": failed,
+                "pending": len(pending) - invited - failed,
+                "wait_seconds": seconds,
+                "partial": True,
+            }
+        except RPCError as exc:
+            failed += 1
+            async with SessionLocal() as session:
+                await repo.update_collected_payload(
+                    session, item.id, {"invite_error": f"{type(exc).__name__}"}
+                )
+                await session.commit()
+            continue
+        invited += 1
+        async with SessionLocal() as session:
+            await repo.update_collected_payload(session, item.id, {"invited": True})
+            await session.commit()
+    return {
+        "ok": True,
+        "invited": invited,
+        "failed": failed,
+        "pending": max(0, len(pending) - invited - failed),
+    }
+
+
 async def run_parser(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
     """Собирает участников чата-источника в ``collected_items``.
 
-    Два режима: ``participants`` листает состав чата, ``history`` — авторов
-    последних сообщений (живая аудитория вместо мёртвых душ). Результат
+    Три режима: ``participants`` листает состав чата, ``history`` — авторов
+    последних сообщений (живая аудитория вместо мёртвых душ), ``comments`` —
+    комментаторов последних постов (самая вовлечённая часть). Результат
     ограничен ``limit`` (сколько сохранить), просмотр — ``scan_limit``
     (сколько перебрать: фильтры отсеивают, и смотреть приходится больше).
     """
     conf = rule.filters
     mode = getattr(conf, "parser_mode", "participants")
-    if mode not in ("participants", "history"):
+    if mode not in ("participants", "history", "comments"):
         mode = "participants"
     wanted = int(getattr(conf, "limit", 0) or 0)
     result_limit = max(1, min(wanted if wanted > 0 else 200, MAX_PARSER_LIMIT))
@@ -1068,22 +1191,61 @@ async def run_parser(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
                     await asyncio.sleep(delay)
                 user = await client.get_entity(sender_id)
                 scanned += 1
-                if (
-                    getattr(user, "deleted", False)
-                    or getattr(user, "bot", False)
-                    or getattr(user, "broadcast", False)
+                payload, reason = _screen_user(user, conf, admin_ids, known)
+                if reason != "ok":
+                    if reason == "filtered":
+                        filtered += 1
+                    else:
+                        skipped += 1
+                    continue
+                known.add(int(payload["user_id"]))
+                payloads.append(payload)
+        elif mode == "comments":
+            discussion_id = await _discussion_id(client, rule.source_id)
+            if discussion_id is None:
+                return {
+                    "ok": False,
+                    "error": "У канала нет группы обсуждений — собирать негде",
+                    "collected": 0,
+                    "mode": mode,
+                    "scanned": 0,
+                    "skipped": 0,
+                    "filtered": 0,
+                    "limit": result_limit,
+                    "scan_limit": scan_limit,
+                    "capped": False,
+                }
+            # Сначала считаем всех: лимит должен резать молчунов, а не первых
+            # попавшихся. Комментарии — в группе обсуждений, а посты — в самом
+            # канале: идём по постам, ответы добираем внизу.
+            counts: dict[int, int] = {}
+            async for post in client.iter_messages(rule.source_id, limit=scan_limit):
+                if getattr(post, "replies", None) is None:
+                    continue
+                async for reply in client.iter_messages(
+                    discussion_id, reply_to=int(post.id), limit=COMMENTS_PER_POST
                 ):
-                    filtered += 1
+                    sender_id = int(getattr(reply, "sender_id", 0) or 0)
+                    if sender_id:
+                        counts[sender_id] = counts.get(sender_id, 0) + 1
+            # Сначала самые разговорчивые.
+            for sender_id, total in sorted(counts.items(), key=lambda item: -item[1]):
+                if len(payloads) >= result_limit:
+                    break
+                if delay:
+                    await asyncio.sleep(delay)
+                user = await client.get_entity(sender_id)
+                scanned += 1
+                payload, reason = _screen_user(user, conf, admin_ids, known)
+                if reason != "ok":
+                    if reason == "filtered":
+                        filtered += 1
+                    else:
+                        skipped += 1
                     continue
-                user_id = int(getattr(user, "id", 0) or 0)
-                if not user_id or user_id in known:
-                    skipped += 1
-                    continue
-                if not _user_passes_filters(user, conf, admin_ids):
-                    filtered += 1
-                    continue
-                known.add(user_id)
-                payloads.append(_parser_payload(user))
+                known.add(int(payload["user_id"]))
+                payload["comments"] = total
+                payloads.append(payload)
         else:
             async for user in client.iter_participants(rule.source_id, limit=scan_limit):
                 if len(payloads) >= result_limit:

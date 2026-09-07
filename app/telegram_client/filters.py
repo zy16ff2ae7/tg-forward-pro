@@ -74,6 +74,8 @@ class FilterConfig:
     clone_ids: list = field(default_factory=list)
     clone_listed: bool = False
     clone_done: bool = False
+    # Парсер: куда звать собранных людей (ссылка или id чата).
+    invite_to: str = ""
     # Настройки задач из app.telegram_client.jobs
     targets: list[int] = field(default_factory=list)
     subscribe_to: list[str] = field(default_factory=list)
@@ -152,6 +154,7 @@ class FilterConfig:
             "clone_ids": self.clone_ids,
             "clone_listed": self.clone_listed,
             "clone_done": self.clone_done,
+            "invite_to": self.invite_to,
             "targets": self.targets,
             "subscribe_to": self.subscribe_to,
             "reaction": self.reaction,

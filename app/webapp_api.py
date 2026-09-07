@@ -750,7 +750,9 @@ async def _apply_task_settings(
             )
         if given("parser_mode"):
             mode = str(payload.get("parser_mode") or "").strip().lower()
-            filters["parser_mode"] = mode if mode in ("participants", "history") else "participants"
+            filters["parser_mode"] = (
+                mode if mode in ("participants", "history", "comments") else "participants"
+            )
         for field, default in (
             ("require_username", True),
             ("exclude_admins", True),
@@ -767,6 +769,8 @@ async def _apply_task_settings(
             )
         if given("api_delay"):
             filters["api_delay"] = max(0, min(_as_int(payload.get("api_delay"), 0), 60))
+        if given("invite_to"):
+            filters["invite_to"] = str(payload.get("invite_to") or "").strip()
     elif kind == "autosubscribe":
         # Ссылки-приглашения храним как есть: вступать по ним будет сама задача.
         if targets is not None:
@@ -1368,6 +1372,33 @@ async def archive_task(request: web.Request) -> web.Response:
 
     await manager.refresh_rules()
     return await _task_json(rule)
+
+
+@routes.post(r"/api/tasks/{task_id:\d+}/invite")
+@require_auth
+@rate_limit(10, 60)
+async def invite_task(request: web.Request) -> web.Response:
+    """Зовёт собранных парсером людей в чат из настроек — одну пачку.
+
+    Пачками, а не всех разом: инвайт упирается в лимиты Telegram. Сколько
+    ушло, скольких позвать нельзя и сколько осталось — в ответе.
+    """
+    user_id = request[USER_ID_KEY]
+    task_id = int(request.match_info["task_id"])
+
+    async with SessionLocal() as session:
+        rule = await repo.get_rule(session, task_id, user_id)
+        if rule is None:
+            return _json({"error": "Задача не найдена"}, status=404)
+        if (rule.kind or "forward") != "parser":
+            return _json({"error": "Приглашать умеет только парсер аудитории"}, status=409)
+        if not rule.enabled or rule.archived:
+            return _json({"error": "Задача не активна"}, status=409)
+
+    _require_account_login()
+
+    result = await manager.invite_task_now(rule)
+    return _json({"invite": result})
 
 
 @routes.post(r"/api/tasks/{task_id:\d+}/run")
@@ -2724,6 +2755,7 @@ def _edit_view(
         edit["mode"] = rule.mode
     elif kind == "parser":
         edit["parser_mode"] = conf.parser_mode or "participants"
+        edit["invite_to"] = conf.invite_to or ""
         edit["scan"] = int(conf.scan_limit or 1000)
         edit["limit"] = int(conf.limit or 200)
         edit["require_username"] = bool(conf.require_username)
@@ -2889,8 +2921,9 @@ COMMANDS: list[dict] = [
             "active_only",
             "online_within_hours",
             "api_delay",
+            "invite_to",
         ],
-        "hint": "Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Режим «участники» листает состав чата, «история» — авторов последних сообщений: так в список попадают живые, а не мёртвые души. «Просмотреть» — сколько перебрать, «собрать» — сколько сохранить: фильтры отсеивают, и смотреть приходится больше. Запускается сразу, результат — кнопкой «Результаты».",
+        "hint": "Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Режим «участники» листает состав чата, «авторы» — писавших, «комментарии» — обсуждавших посты: самые вовлечённые. «Просмотреть» — сколько перебрать, «собрать» — сколько сохранить: фильтры отсеивают, и смотреть приходится больше. Запускается сразу, результат — кнопкой «Результаты». Собранных можно позвать в свой чат кнопкой «Пригласить» — пачками по 20.",
         "tags": ["список участников", "фильтры и режимы", "запуск вручную"],
     },
     {

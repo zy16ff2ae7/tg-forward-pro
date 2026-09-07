@@ -966,6 +966,24 @@ async def list_collected_items(
     return result.scalars().all()
 
 
+async def update_collected_payload(
+    session: AsyncSession, item_id: int, patch: dict
+) -> None:
+    """Дописывает пометки в собранную запись (приглашён / ошибка инвайта).
+
+    Копия — глубокая: JSON-колонка не замечает правку вложенности, а
+    поверхностная копия даёт UPDATE со старым значением (см.
+    update_scheduled_slot).
+    """
+    item = await session.get(CollectedItem, item_id)
+    if item is None:
+        return
+    payload = copy.deepcopy(item.payload or {})
+    payload.update(patch)
+    item.payload = payload
+    await session.flush()
+
+
 async def count_collected_items(session: AsyncSession, rule_id: int) -> int:
     result = await session.execute(
         select(func.count())

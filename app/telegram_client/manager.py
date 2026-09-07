@@ -1589,6 +1589,45 @@ class ClientManager:
             logger.warning("Запуск задачи #{} не попал в журнал: {}", rule.id, exc)
         return result
 
+    async def invite_task_now(self, rule) -> dict:
+        """Зовёт собранных парсером людей в чат из настроек (одна пачка).
+
+        Тот же контракт, что у run_task_now: абонемент, живой клиент и замок
+        на пользователя — иначе двойной клик слал бы двойные инвайты.
+        """
+        from app.telegram_client.jobs import invite_collected, record_oneshot
+
+        snapshot = _snapshot(rule)
+        if not await subscription_active(rule.user_id):
+            return {
+                "ok": False,
+                "error": "Приглашения доступны с абонементом — продлите подписку.",
+                "need_subscription": True,
+            }
+        client = self._clients.get(rule.account_id)
+        if client is None or not client.is_connected():
+            return {
+                "ok": False,
+                "error": "Аккаунт не в сети. Перезапустите его в боте и повторите.",
+            }
+        lock = self._oneshot_locks.setdefault(rule.user_id, asyncio.Lock())
+        if lock.locked():
+            return {
+                "ok": False,
+                "error": "Предыдущий запуск ещё идёт — дождитесь его завершения.",
+            }
+        try:
+            async with lock:
+                result = await invite_collected(client, snapshot)
+        except Exception as exc:  # noqa: BLE001 — результат нужен в API, а не в лог
+            logger.exception("Инвайт задачи #{} не выполнился", rule.id)
+            result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        try:
+            await record_oneshot(snapshot, result)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Инвайт задачи #{} не попал в журнал: {}", rule.id, exc)
+        return result
+
     def start_periodic_refresh(self, interval: int = 60) -> None:
         """Фоновое обновление кэша правил, чтобы правки из бота подхватывались сами.
 

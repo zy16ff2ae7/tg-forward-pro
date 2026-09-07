@@ -143,6 +143,11 @@ const FIELD_SPEC = {
     control: 'check',
     note: 'синонимы и неотличимые буквы: поиск не опознает исходник',
   },
+  invite_to: {
+    label: 'Звать собранных в чат',
+    placeholder: '@mychannel',
+    note: 'кнопка «Пригласить» позовёт туда собранных — пачками по 20',
+  },
   history: {
     label: 'Постов из истории',
     control: 'number',
@@ -533,7 +538,7 @@ const DEMO_COMMANDS = [
     tags: ['чужие посты', 'все чаты разом', 'по факту поста'] },
   { id: 'parser', group: 'audience', kind: 'parser', emoji: '🕵️', title: 'Парсер аудитории', status: 'ready',
     needs: ['account', 'source'],
-    optional: ['parser_mode', 'scan', 'limit', 'require_username', 'exclude_admins',
+    optional: ['parser_mode', 'scan', 'limit', 'invite_to', 'require_username', 'exclude_admins',
       'only_premium', 'only_with_photo', 'active_only', 'online_within_hours', 'api_delay'],
     description: 'Собирает участников чужого чата в список по вашей команде.',
     hint: 'Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Режим «участники» листает состав чата, «история» — авторов последних сообщений. Запускается сразу, результат — кнопкой «Результаты».',
@@ -1055,7 +1060,7 @@ function demoTaskEdit(body, command, chats, libraryIds) {
   if (body.target_user) edit.target_user = String(body.target_user);
   if (kind === 'forward') edit.mode = body.mode || 'copy';
   else if (kind === 'parser') {
-    edit.parser_mode = body.parser_mode === 'history' ? 'history' : 'participants';
+    edit.parser_mode = ['history', 'comments'].includes(body.parser_mode) ? body.parser_mode : 'participants';
     edit.scan = Number(body.scan) || 1000;
     edit.limit = Number(body.limit) || 200;
     edit.require_username = body.require_username !== undefined ? Boolean(body.require_username) : true;
@@ -2433,9 +2438,11 @@ function resultRowHtml(item) {
   if (payload.username || payload.user_id != null) {
     const name = payload.name || payload.username || `ID ${payload.user_id}`;
     const handle = payload.username ? `@${payload.username}` : (payload.phone || '');
+    const comments = Number(payload.comments || 0);
+    const invited = payload.invited ? ' · ✉️ зван' : '';
     return `<div class="result">
-      <div class="result__title">${esc(name)}</div>
-      <div class="result__sub">${esc(handle || 'без ника')} · ID ${esc(payload.user_id)}</div>
+      <div class="result__title">${esc(name)}${comments ? ` <span class="result__badge">💬 ${comments}</span>` : ''}</div>
+      <div class="result__sub">${esc(handle || 'без ника')} · ID ${esc(payload.user_id)}${invited}</div>
     </div>`;
   }
   const text = payload.text || payload.link || payload.preview || JSON.stringify(payload);
@@ -2463,6 +2470,7 @@ async function openResults(id) {
   state.resultsTotal = 0;
   $('resultsMore').hidden = true;
   $('resultsExport').hidden = true;
+  $('resultsInvite').hidden = true;
   beginLoad(body, 'plain', 4);
   $('resultsSheet').classList.add('is-open');
 
@@ -2487,6 +2495,8 @@ async function openResults(id) {
       resultsMetaHtml(data.total, data.items.length) + data.items.map(resultRowHtml).join('');
     $('resultsMore').hidden = !data.has_more;
     $('resultsExport').hidden = false;
+    // Звать умеем только собранных парсером — у чеков звать некого.
+    $('resultsInvite').hidden = data.kind !== 'parser';
   } catch (error) {
     failLoad(body, error, 'openResults');
   }
@@ -2528,6 +2538,31 @@ async function exportResults(button) {
       toast(`Файл отправлен в чат с ботом: ${sent}${partial} стр.`, 'ok');
     } catch (error) {
       toast(error.message || 'Не удалось выгрузить', 'error');
+    }
+  });
+}
+
+/* Приглашение собранных: уходит одна пачка, остаток — следующим нажатием.
+   Сколько ушло и сколько осталось — в тосте, а не в новом экране. */
+async function inviteResults(button) {
+  const id = state.lastResultsId;
+  if (id == null) return;
+  await withLoading(button, async () => {
+    try {
+      const data = await api(`/api/tasks/${id}/invite`, { method: 'POST' });
+      const outcome = data.invite || {};
+      if (outcome.ok === false) {
+        toast(outcome.error || 'Не удалось пригласить', 'error');
+        return;
+      }
+      const left = Number(outcome.pending || 0);
+      const failed = Number(outcome.failed || 0);
+      const tail = left ? `, осталось ${left}` : '';
+      const bad = failed ? `, не вышло ${failed}` : '';
+      toast(`Приглашено: ${Number(outcome.invited || 0)}${bad}${tail}`, 'ok');
+      openResults(id);
+    } catch (error) {
+      toast(error.message || 'Не удалось пригласить', 'error');
     }
   });
 }
@@ -3722,7 +3757,7 @@ function applyTaskPrefill(prefill) {
   // Настройки задачи — одним проходом: ключ формы и ключ задачи совпадают, а
   // лишние для этой команды поля просто не находятся в разметке.
   ['keywords', 'reaction', 'limit', 'scan', 'online_within_hours', 'api_delay',
-    'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'translate_to', 'history']
+    'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'translate_to', 'history', 'invite_to']
     .forEach((key) => setValue(key, prefill[key]));
   ['typing', 'random_pick', 'link_preview', 'schedule_only', 'uniquify',
     'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only',
@@ -3743,7 +3778,7 @@ function applyTaskPrefill(prefill) {
       seg.classList.toggle('is-active', seg.dataset.sendMode === prefill.send_mode);
     });
   }
-  if (prefill.parser_mode === 'participants' || prefill.parser_mode === 'history') {
+  if (['participants', 'history', 'comments'].includes(prefill.parser_mode)) {
     state.parserMode = prefill.parser_mode;
     document.querySelectorAll('#taskParserMode .seg').forEach((seg) => {
       seg.classList.toggle('is-active', seg.dataset.parserMode === prefill.parser_mode);
@@ -4332,6 +4367,7 @@ function collectTaskPayload() {
   text('target_user', values.target_user);
   text('reaction', values.reaction);
   text('mode', values.mode);
+  text('invite_to', values.invite_to);
   text('translate_to', values.translate_to);
   text('send_mode', values.send_mode);
   text('parser_mode', values.parser_mode);
@@ -5107,6 +5143,9 @@ function bindEvents() {
   });
   $('resultsExport').addEventListener('click', (event) => {
     exportResults(event.currentTarget);
+  });
+  $('resultsInvite').addEventListener('click', (event) => {
+    inviteResults(event.currentTarget);
   });
   $('settingsBtn').addEventListener('click', () => $('settingsSheet').classList.add('is-open'));
   $('settingsList').addEventListener('click', (event) => {

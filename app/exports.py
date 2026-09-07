@@ -93,18 +93,27 @@ def _table(
     rows: list[list[str]] = []
 
     if kind == "parser":
-        head = ["id", "ник", "имя", "телефон", when]
+        # Комментаторы несут счётчик — им отдельная колонка. Остальным она ни
+        # к чему: пустая колонка в тысяче строк — мусор, а не информация.
+        with_comments = any(
+            (getattr(item, "payload", None) or {}).get("comments") for item in items
+        )
+        head = ["id", "ник", "имя", "телефон"]
+        if with_comments:
+            head.append("комментариев")
+        head.append(when)
         for item in items:
             payload = getattr(item, "payload", None) or {}
-            rows.append(
-                [
-                    _number(payload.get("user_id")),
-                    _cell(payload.get("username")),
-                    _cell(payload.get("name")),
-                    _phone(payload.get("phone")),
-                    _when(getattr(item, "created_at", None), tz_minutes),
-                ]
-            )
+            row = [
+                _number(payload.get("user_id")),
+                _cell(payload.get("username")),
+                _cell(payload.get("name")),
+                _phone(payload.get("phone")),
+            ]
+            if with_comments:
+                row.append(_number(payload.get("comments")))
+            row.append(_when(getattr(item, "created_at", None), tz_minutes))
+            rows.append(row)
         return head, rows
 
     if kind == "checks":
