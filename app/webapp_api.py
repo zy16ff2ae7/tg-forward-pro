@@ -1796,6 +1796,7 @@ async def stats(request: web.Request) -> web.Response:
         {
             "date": (today - timedelta(days=offset)).isoformat(),
             "count": agg["per_day"].get((today - timedelta(days=offset)).isoformat(), 0),
+            "errors": agg["errors_day"].get((today - timedelta(days=offset)).isoformat(), 0),
         }
         for offset in range(days - 1, -1, -1)
     ]
@@ -1807,6 +1808,7 @@ async def stats(request: web.Request) -> web.Response:
                 "accounts": len(accounts),
                 "forwarded": sum(r.forwarded_count or 0 for r in rules),
                 "forwarded_days": agg["total"],
+                "errors_days": agg["errors"],
             },
             "subscription": {
                 "active": until is not None,

@@ -1698,6 +1698,17 @@ button { border: none; background: none; cursor: pointer; }
 .result__title { font-size: 13.5px; font-weight: 600; }
 .result__sub { margin-top: 2px; font-size: 11.5px; color: var(--muted); }
 .result__badge { font-size: 11.5px; font-weight: 400; color: var(--muted); white-space: nowrap; }
+.chart { margin-top: 12px; padding: 12px 12px 10px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; }
+.chart__svg { display: block; width: 100%; height: auto; }
+.chart__ok { fill: var(--accent); opacity: 0.85; }
+.chart__bad { fill: var(--red); }
+.chart__x { fill: var(--muted); font-size: 8px; text-anchor: middle; }
+.chart__foot { display: flex; justify-content: space-between; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.chart__errors { color: var(--red); font-weight: 600; }
+.chart__top { list-style: none; margin: 4px 0 0; padding: 0; font-size: 12.5px; }
+.chart__top li { display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); }
+.chart__top li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart__top li b { font-variant-numeric: tabular-nums; }
 
 /* Тост всплывает над тем, что сейчас висит внизу: навигацией, плавающей кнопкой
    «Запустить задачу», панелью выбранных чатов, кнопкой открытой шторки. Подъём

@@ -1557,7 +1557,7 @@ async def task_health(
 async def forward_stats(
     session: AsyncSession, user_id: int | None, days: int = 14
 ) -> dict:
-    """Сколько успешных пересылок было в каждый из последних N дней.
+    """Сколько успешных пересылок и ошибок было в каждый из последних N дней.
 
     Агрегация в Python, а не в SQL: даты в SQLite и Postgres режутся
     по-разному, а строк за две недели — тысячи, не миллионы.
@@ -1566,21 +1566,31 @@ async def forward_stats(
     days = max(1, min(days, 90))
     cutoff = utcnow() - timedelta(days=days)
     query = (
-        select(ForwardLog.created_at)
-        .where(ForwardLog.created_at >= cutoff, ForwardLog.status == "ok")
+        select(ForwardLog.created_at, ForwardLog.status)
+        .where(
+            ForwardLog.created_at >= cutoff,
+            ForwardLog.status.in_(("ok", "error")),
+        )
         .order_by(ForwardLog.id.desc())
         .limit(20000)
     )
     if user_id is not None:
         query = query.where(ForwardLog.user_id == user_id)
-    rows = (await session.execute(query)).scalars().all()
+    rows = (await session.execute(query)).all()
     per_day: dict[str, int] = {}
-    for ts in rows:
+    errors_day: dict[str, int] = {}
+    for ts, status in rows:
         if ts is None:
             continue
         key = ts.date().isoformat()
-        per_day[key] = per_day.get(key, 0) + 1
-    return {"per_day": per_day, "total": sum(per_day.values())}
+        bucket = errors_day if status == "error" else per_day
+        bucket[key] = bucket.get(key, 0) + 1
+    return {
+        "per_day": per_day,
+        "total": sum(per_day.values()),
+        "errors_day": errors_day,
+        "errors": sum(errors_day.values()),
+    }
 
 
 async def recent_logs(

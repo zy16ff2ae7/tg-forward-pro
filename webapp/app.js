@@ -1625,6 +1625,7 @@ function renderHomeTasks() {
 
 function renderHome() {
   renderHomeStats();
+  loadHomeChart();
   renderTiles();
   renderHomeTasks();
 }
@@ -1657,6 +1658,73 @@ function renderHomeStats() {
       </div>`
     )
     .join('');
+}
+
+/* График пересылок за две недели: столбики SVG без библиотек. Ошибки —
+   красным верхом столбика: больной день видно сразу. Кэш на минуту: домой
+   возвращаются часто, а журнал за секунды не меняется. */
+async function loadHomeChart() {
+  const holder = $('homeChart');
+  if (!holder) return;
+  const now = Date.now();
+  if (state.homeChart && now - state.homeChartAt < 60000) {
+    holder.innerHTML = state.homeChart;
+    holder.hidden = false;
+    return;
+  }
+  try {
+    const data = await api('/api/stats?days=14');
+    const html = statsChartHtml(data);
+    state.homeChart = html;
+    state.homeChartAt = now;
+    holder.innerHTML = html;
+    holder.hidden = !html;
+  } catch (error) {
+    // График — украшение, а не повод ломать главную.
+    holder.hidden = true;
+  }
+}
+
+function statsChartHtml(data) {
+  const days = (data && data.per_day) || [];
+  const total = days.reduce((sum, day) => sum + Number(day.count || 0), 0);
+  if (!total) return '';
+  const peak = Math.max(
+    ...days.map((day) => Number(day.count || 0) + Number(day.errors || 0)), 1
+  );
+  const width = 320;
+  const height = 96;
+  const pad = 18;
+  const slot = width / days.length;
+  const bar = Math.max(2, slot - 6);
+  let svg = '';
+  days.forEach((day, idx) => {
+    const ok = Number(day.count || 0);
+    const bad = Number(day.errors || 0);
+    const h = ok + bad > 0
+      ? Math.max(3, Math.round(((ok + bad) / peak) * (height - pad)))
+      : 0;
+    if (!h) return;
+    const x = Math.round(idx * slot + (slot - bar) / 2);
+    const y = height - pad - h;
+    const badH = Math.round((bad / (ok + bad)) * h);
+    const label = `${day.date}: ${ok} ✓${bad ? `, ошибок ${bad}` : ''}`;
+    svg += `<rect x="${x}" y="${y + badH}" width="${bar}" height="${h - badH}" rx="2" class="chart__ok"><title>${esc(label)}</title></rect>`;
+    if (badH > 0) {
+      svg += `<rect x="${x}" y="${y}" width="${bar}" height="${badH}" rx="2" class="chart__bad"><title>${esc(label)}</title></rect>`;
+    }
+    if (idx % 4 === 0 || idx === days.length - 1) {
+      svg += `<text x="${Math.round(idx * slot + slot / 2)}" y="${height - 5}" class="chart__x">${esc(String(day.date).slice(8))}</text>`;
+    }
+  });
+  const errors = Number((data.totals || {}).errors_days || 0);
+  const top = (data.top_rules || []).slice(0, 5).map(
+    (rule) => `<li><span>${esc(rule.title)}</span><b>${Number(rule.forwarded || 0).toLocaleString('ru-RU')}</b></li>`
+  ).join('');
+  return `<div class="section-label">две недели</div>
+    <svg class="chart__svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Пересылки по дням">${svg}</svg>
+    <div class="chart__foot"><span>${total.toLocaleString('ru-RU')} перес.</span>${errors ? `<span class="chart__errors">ошибок: ${errors}</span>` : '<span>без ошибок</span>'}</div>
+    ${top ? `<div class="section-label">топ задач</div><ul class="chart__top">${top}</ul>` : ''}`;
 }
 
 /* ────────────────── Умный поиск по командам (локальный) ───────────────── */

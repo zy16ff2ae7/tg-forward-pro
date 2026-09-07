@@ -68,7 +68,7 @@ async def test_stats_shape(client, create_user, create_account):
     assert body["totals"]["accounts"] == 1
     assert body["totals"]["forwarded"] == 42
     assert len(body["per_day"]) == 7
-    assert set(body["per_day"][0]) == {"date", "count"}
+    assert set(body["per_day"][0]) == {"date", "count", "errors"}
     assert body["top_rules"][0]["forwarded"] == 42
     assert body["top_rules"][0]["title"]
 
