@@ -827,6 +827,10 @@ button { border: none; background: none; cursor: pointer; }
 
 .task--archived { opacity: 0.6; }
 
+/* Массовые действия под сегментом: тихие кнопки второго ряда. */
+.bulk { display: flex; gap: 8px; margin: 10px 0 2px; flex-wrap: wrap; }
+.bulk[hidden] { display: none; }
+
 /* Список встаёт каскадом: карточки появляются по очереди, а не все разом.
    backwards — чтобы после конца анимации карточка жила своими стилями
    (иначе fill «both» перебивал бы :hover). Кому анимации мешают — общий

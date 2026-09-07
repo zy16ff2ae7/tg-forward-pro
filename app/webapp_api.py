@@ -1457,6 +1457,58 @@ async def archive_task(request: web.Request) -> web.Response:
     return await _task_json(rule)
 
 
+@routes.post("/api/tasks/bulk")
+@require_auth
+async def bulk_tasks(request: web.Request) -> web.Response:
+    """Массовые действия: всё на паузу, всё запустить, всё в архив.
+
+    Тело ``{"action": "pause_all" | "resume_all" | "archive_all"}``. Область
+    действия решает сервер, а не клиент: пауза бьёт только по активным,
+    запуск — только по стоящим на паузе, архив — только по неархивным
+    неактивным. Активные задачи в архив пачкой не уезжают: это уже не
+    уборка, а способ одним неверным тапом остановить весь сервис.
+
+    Возвращает, сколько задач задело. Ноль — не ошибка: список мог быть пуст.
+    """
+    user_id = request[USER_ID_KEY]
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = None
+    action = (body or {}).get("action") if isinstance(body, dict) else None
+    if action not in ("pause_all", "resume_all", "archive_all"):
+        raise ValidationError("Действие — pause_all, resume_all или archive_all")
+
+    affected = 0
+    async with SessionLocal() as session:
+        rules = await repo.list_rules(session, user_id, include_archived=True)
+        for rule in rules:
+            kind = rule.kind or "forward"
+            if action == "pause_all":
+                if not rule.enabled or rule.archived:
+                    continue
+                rule.enabled = False
+            elif action == "resume_all":
+                if rule.enabled or rule.archived:
+                    continue
+                # Рассылка с исчерпанными кругами после включения молчала бы —
+                # как в одиночном toggle, начинаем круги заново.
+                if kind == "mailing" and _mailing_finished(rule):
+                    rule.forwarded_count = 0
+                rule.enabled = True
+            else:
+                if rule.archived or rule.enabled:
+                    continue
+                await repo.set_rule_archived(session, rule, True)
+            affected += 1
+        await session.commit()
+
+    if affected:
+        await manager.refresh_rules()
+    logger.info("Массовое действие {} от {}: задето {}", action, user_id, affected)
+    return _json({"action": action, "affected": affected})
+
+
 @routes.post(r"/api/tasks/{task_id:\d+}/invite")
 @require_auth
 @rate_limit(10, 60)

@@ -183,6 +183,9 @@
         <button class="seg" data-status="paused" role="tab" aria-selected="false">На паузе</button>
         <button class="seg" data-status="done" role="tab" aria-selected="false">Завершённые</button>
       </div>
+      <!-- Массовые действия: состав кнопок зависит от вкладки —
+           рисуются renderBulkButtons, чтобы не плодить три набора вёрстки. -->
+      <div class="bulk" id="bulkRow" hidden></div>
       <div class="list" id="taskList"></div>
     </section>
 

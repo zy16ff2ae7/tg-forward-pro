@@ -2173,8 +2173,53 @@ async function loadTasks(targetStatus) {
 /* Переключение сегмента «Активные / На паузе / Завершённые». Отдельной
    функцией, потому что дорога сюда не одна: сам сегмент, «Архив задач» из
    «Ещё» и обновление после действий над задачей. */
+/* Массовые действия под сегментом: у каждой вкладки своя пачка. Активные —
+   «все на паузу», стоящие — «все запустить» и «все в архив», у завершённых
+   пачки нет: архив поштучно разбирают, а не оптом. */
+const BULK_BUTTONS = {
+  active: [{ action: 'pause_all', label: '⏸ Все на паузу' }],
+  paused: [
+    { action: 'resume_all', label: '▶ Все запустить' },
+    { action: 'archive_all', label: '📦 Все в архив' },
+  ],
+  done: [],
+};
+
+const BULK_DONE = {
+  pause_all: 'Все задачи на паузе.',
+  resume_all: 'Все задачи запущены.',
+  archive_all: 'Все задачи в архиве.',
+};
+
+function renderBulkButtons() {
+  const row = $('bulkRow');
+  if (!row) return;
+  const buttons = BULK_BUTTONS[state.taskStatus] || [];
+  const list = state.tasksByStatus[state.taskStatus] || [];
+  row.hidden = !buttons.length || !list.length;
+  row.innerHTML = buttons.map((item) =>
+    `<button class="btn btn--sm" data-bulk="${item.action}" type="button">${item.label}</button>`
+  ).join('');
+}
+
+async function bulkTasks(button, action) {
+  try {
+    const result = await withLoading(button, () =>
+      api('/api/tasks/bulk', { method: 'POST', body: JSON.stringify({ action }) })
+    );
+    const count = Number(result.affected) || 0;
+    toast(count ? `${BULK_DONE[action]} Задето: ${count}.` : 'Нечего менять — список пуст.', count ? 'ok' : undefined);
+    // Пачка двигает задачи между вкладками — кэши всех трёх протухли.
+    state.tasksByStatus = { active: [], paused: [], done: [] };
+    await loadTasks();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
 function setTaskStatus(status) {
   state.taskStatus = status;
+  renderBulkButtons();
   document.querySelectorAll('#taskStatus .seg').forEach((seg) => {
     const active = seg.dataset.status === status;
     seg.classList.toggle('is-active', active);
@@ -2499,6 +2544,7 @@ function taskCardHtml(task, options) {
 
 function renderTasks(tasks) {
   const holder = $('taskList');
+  renderBulkButtons();
   // Подпись экрана честно считает по всем трём спискам, а не по видимому.
   // Без абонемента включённые задачи не работают, а стоят — иначе подпись
   // писала «4 работают» прямо над четырьмя карточками «нет абонемента».
@@ -5269,6 +5315,11 @@ function bindEvents() {
     const button = event.target.closest('[data-action]');
     if (!button) return;
     taskAction(button.dataset.action, button.dataset.id, button);
+  });
+  $('bulkRow').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-bulk]');
+    if (!button) return;
+    bulkTasks(button, button.dataset.bulk);
   });
   // «＋ Запустить задачу» без выбранной команды — открываем пересылку
   $('addTaskBtn').addEventListener('click', () => { buzz('light'); openCreateSheet(); });
