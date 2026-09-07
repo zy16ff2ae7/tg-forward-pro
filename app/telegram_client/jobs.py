@@ -1586,6 +1586,10 @@ async def record_error(rule: RuleSnapshot, message: Any, error: str) -> None:
             error=error,
         )
         await session.commit()
+    # Третья подряд — письмом человеку, а не только строкой в журнал.
+    from app.task_alerts import maybe_alert_problem
+
+    await maybe_alert_problem(rule, error)
 
 
 def batch_error_text(failed: Sequence[str]) -> str:
@@ -1640,6 +1644,13 @@ async def record_batch(
                 status="ok",
             )
         await session.commit()
+    # Проход, где не ушло ничего: частичные сбои («в три чата не ушло, а сто
+    # получили») остаются в журнале и на карточке — письмом о каждом таком
+    # проходе мы бы завалили личку.
+    if failed and not sent:
+        from app.task_alerts import maybe_alert_problem
+
+        await maybe_alert_problem(rule, batch_error_text(failed))
 
 
 def oneshot_problem_text(problems: Sequence[str]) -> str:

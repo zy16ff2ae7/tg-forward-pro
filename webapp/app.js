@@ -143,6 +143,11 @@ const FIELD_SPEC = {
     control: 'check',
     note: 'синонимы и неотличимые буквы: поиск не опознает исходник',
   },
+  alerts: {
+    label: 'Писать о проблемах',
+    control: 'check',
+    note: 'третья ошибка подряд — письмом в личку',
+  },
   invite_to: {
     label: 'Звать собранных в чат',
     placeholder: '@mychannel',
@@ -518,21 +523,21 @@ const DEMO_COMMAND_GROUPS = [
 const DEMO_COMMANDS = [
   { id: 'sender', group: 'own', kind: 'poster', kinds: ['poster', 'mailing'], emoji: '📤', title: 'Постинг и рассылка', status: 'ready',
     needs: ['account', 'targets', 'message'],
-    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview'],
+    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview', 'alerts'],
     description: 'Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.',
     hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
     tags: ['ваш текст', 'расписание или очередь'] },
   { id: 'copy_channel', group: 'publish', kind: 'forward', emoji: '🔁', title: 'Копирование канала', status: 'ready',
-    needs: ['account', 'source', 'target'], optional: ['mode', 'buttons', 'translate_to', 'uniquify'],
+    needs: ['account', 'source', 'target'], optional: ['mode', 'buttons', 'translate_to', 'uniquify', 'alerts'],
     description: 'Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.',
     tags: ['чужие посты', 'один канал → один'] },
   { id: 'clone', group: 'publish', kind: 'clone', emoji: '📋', title: 'Клон канала', status: 'ready',
-    needs: ['account', 'source', 'target'], optional: ['history', 'buttons', 'translate_to', 'uniquify'],
+    needs: ['account', 'source', 'target'], optional: ['history', 'buttons', 'translate_to', 'uniquify', 'alerts'],
     description: 'Ваш канал как зеркало чужого: сначала забирается история, дальше новые посты выходят сами.',
     hint: 'История забирается не залпом, а порциями — большой канал догрузится за несколько минут. Новые посты из источника выходят у вас сразу, не дожидаясь конца догрузки.',
     tags: ['чужие посты', 'с историей', 'один канал → один'] },
   { id: 'broadcast', group: 'publish', kind: 'broadcast', emoji: '📣', title: 'Пересылка в несколько чатов', status: 'ready',
-    needs: ['account', 'source', 'targets'], optional: ['buttons', 'translate_to', 'uniquify'],
+    needs: ['account', 'source', 'targets'], optional: ['buttons', 'translate_to', 'uniquify', 'alerts'],
     description: 'Тот же канал — сразу в десятки чатов: пост из источника уходит во все выбранные одним залпом, как только вышел.',
     hint: 'Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу. Свой текст здесь не нужен: уходит то, что вышло в источнике.',
     tags: ['чужие посты', 'все чаты разом', 'по факту поста'] },
@@ -549,25 +554,25 @@ const DEMO_COMMANDS = [
     hint: 'Каналы — через запятую: @chan1, t.me/+invite.',
     tags: ['вступает сама', 'ссылки из источника'] },
   { id: 'checks', group: 'inbox', kind: 'checks', emoji: '🧾', title: 'Ловец чеков', status: 'ready',
-    needs: ['account', 'source', 'target'], optional: ['keywords'],
+    needs: ['account', 'source', 'target'], optional: ['keywords', 'alerts'],
     description: 'Ловит чеки и подарочные ссылки в чатах и складывает в одно место.',
     tags: ['чеки и подарки', 'в один чат'] },
   { id: 'listener', group: 'inbox', kind: 'listener', emoji: '👂', title: 'Слушатель слов', status: 'ready',
-    needs: ['account', 'source', 'target'], optional: ['keywords'],
+    needs: ['account', 'source', 'target'], optional: ['keywords', 'alerts'],
     description: 'Следит за чатом и присылает посты с вашими словами.',
     hint: 'Слова — через запятую: «скидка, акция, розыгрыш». Совпадение ищется без учёта регистра, пост приходит с названием чата.',
     tags: ['свои слова', 'в один чат'] },
   { id: 'dialogs', group: 'inbox', kind: 'dialogs', emoji: '💬', title: 'Уведомления из диалогов', status: 'ready',
-    needs: ['account', 'target'], optional: ['keywords', 'ignore_bots', 'ignore_archived', 'ignore_muted'],
+    needs: ['account', 'target'], optional: ['keywords', 'ignore_bots', 'ignore_archived', 'ignore_muted', 'alerts'],
     description: 'Присылает входящие личные сообщения в выбранный чат.',
     hint: 'Источник не нужен: задача слушает все личные диалоги аккаунта. Ботов, архивные и заглушённые чаты пропускает — галочки снимаются.',
     tags: ['личные сообщения', 'источник не нужен'] },
   { id: 'baiting', group: 'moderation', kind: 'baiting', emoji: '🎣', title: 'Байтинг', status: 'ready',
-    needs: ['account', 'source', 'target_user'], optional: ['reaction'],
+    needs: ['account', 'source', 'target_user'], optional: ['reaction', 'alerts'],
     description: 'Ставит реакцию на сообщения выбранного человека в общем чате.',
     tags: ['один человек', 'реакция'] },
   { id: 'mute', group: 'moderation', kind: 'mute', emoji: '🔇', title: 'Мут', status: 'ready',
-    needs: ['account', 'source', 'target_user'], optional: ['keywords'],
+    needs: ['account', 'source', 'target_user'], optional: ['keywords', 'alerts'],
     description: 'Удаляет сообщения выбранного человека в чате, где вы администратор.',
     tags: ['один человек', 'нужны права админа'] },
 ];
@@ -2159,6 +2164,7 @@ function taskMetaLines(task) {
   if (task.translate_to) lines.push(`🌐 →${String(task.translate_to).toUpperCase()}`);
   if (task.uniquify) lines.push('✨ уник.');
   if (task.keywords_count) lines.push(`🔎 ${task.keywords_count} сл.`);
+  if (task.alerts === false) lines.push('🔕 без алертов');
   if (task.kind === 'clone' && !task.clone_done) {
     const total = Number(task.clone_history || 0);
     const left = Number(task.clone_left || 0);
@@ -3765,13 +3771,19 @@ function applyTaskPrefill(prefill) {
   ['keywords', 'reaction', 'limit', 'scan', 'online_within_hours', 'api_delay',
     'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'translate_to', 'history', 'invite_to']
     .forEach((key) => setValue(key, prefill[key]));
-  ['typing', 'random_pick', 'link_preview', 'schedule_only', 'uniquify',
+  ['typing', 'random_pick', 'link_preview', 'schedule_only', 'uniquify', 'alerts',
     'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only',
     'ignore_bots', 'ignore_archived', 'ignore_muted']
     .forEach((key) => {
       const node = $(`task_${key}`);
       if (node) node.checked = Boolean(prefill[key]);
     });
+  // Алерты включены из коробки: в пустой форме (создание) галочка стоит.
+    // У готовой задачи сервер всегда присылает значение — его и показали выше.
+    if (prefill.alerts === undefined) {
+      const alerts = $('task_alerts');
+      if (alerts) alerts.checked = true;
+    }
   if (prefill.mode === 'copy' || prefill.mode === 'forward') {
     state.mode = prefill.mode;
     document.querySelectorAll('#taskMode .seg').forEach((seg) => {
@@ -4408,6 +4420,9 @@ function collectTaskPayload() {
   flag('random_pick', values.random_pick);
   flag('link_preview', values.link_preview);
   flag('uniquify', values.uniquify);
+  // Алерты — всегда явно: галочка стоит из коробки, и снятие на создании
+  // должно выключать, а не теряться в «не прислали — значит по умолчанию».
+  if (values.alerts !== undefined) body.alerts = Boolean(values.alerts);
   flag('require_username', values.require_username);
   flag('exclude_admins', values.exclude_admins);
   flag('only_premium', values.only_premium);

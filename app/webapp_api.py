@@ -844,6 +844,12 @@ async def _apply_task_settings(
                 filters[field] = _as_bool(payload.get(field))
         await _own_texts(payload, filters, user_id=user_id, partial=partial)
 
+    # Письма о проблемах — у всех фоновых задач разом: разовым человек и так
+    # смотрит в лицо, а фоновые ломаются тихо. Выключается галочкой.
+    if kind in ("forward", "broadcast", "poster", "mailing", "clone",
+                "listener", "checks", "dialogs", "baiting", "mute"):
+        if "alerts" in payload or not partial:
+            filters["alerts"] = _as_bool(payload.get("alerts")) if "alerts" in payload else True
     # Кнопки-ссылки под постом — у всех, кто публикует копии: пересылка,
     # веерная отправка, постинг и рассылка. Мусор отклоняется с номером кнопки.
     if kind in ("forward", "broadcast", "poster", "mailing", "clone"):
@@ -2619,6 +2625,9 @@ def _task_view(
         view["keywords_count"] = len(
             [word for word in (conf.keywords or []) if str(word).strip()]
         )
+    if kind in ("forward", "broadcast", "poster", "mailing", "clone",
+                "listener", "checks", "dialogs", "baiting", "mute"):
+        view["alerts"] = bool(getattr(conf, "alerts", True))
     if kind == "clone":
         view["clone_done"] = bool(conf.clone_done)
         view["clone_left"] = len(conf.clone_ids or [])
@@ -2752,6 +2761,9 @@ def _edit_view(
         edit["target"] = str(rule.target_id)
     if conf.target_user_id:
         edit["target_user"] = str(conf.target_user_id)
+    if kind in ("forward", "broadcast", "poster", "mailing", "clone",
+                "listener", "checks", "dialogs", "baiting", "mute"):
+        edit["alerts"] = bool(getattr(conf, "alerts", True))
     if kind in ("forward", "broadcast", "poster", "mailing", "clone"):
         # Кнопки под постом — как есть: форма показывает их строками.
         edit["buttons"] = [
@@ -2869,7 +2881,7 @@ COMMANDS: list[dict] = [
         "description": "Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.",
         "status": "ready",
         "needs": ["account", "targets", "message"],
-        "optional": ["send_mode", "schedule_only", "scheduled_posts", "buttons", "interval", "start", "end", "gap", "cycle", "repeats", "typing", "random_pick", "link_preview"],
+        "optional": ["send_mode", "schedule_only", "scheduled_posts", "buttons", "interval", "start", "end", "gap", "cycle", "repeats", "typing", "random_pick", "link_preview", "alerts"],
         "hint": "Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.",
         "tags": ["ваш текст", "расписание или очередь"],
     },
@@ -2882,7 +2894,7 @@ COMMANDS: list[dict] = [
         "description": "Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.",
         "status": "ready",
         "needs": ["account", "source", "target"],
-        "optional": ["mode", "buttons", "translate_to", "uniquify"],
+        "optional": ["mode", "buttons", "translate_to", "uniquify", "alerts"],
         "tags": ["чужие посты", "один канал → один"],
     },
     {
@@ -2894,7 +2906,7 @@ COMMANDS: list[dict] = [
         "description": "Ваш канал как зеркало чужого: сначала забирается история, дальше новые посты выходят сами.",
         "status": "ready",
         "needs": ["account", "source", "target"],
-        "optional": ["history", "buttons", "translate_to", "uniquify"],
+        "optional": ["history", "buttons", "translate_to", "uniquify", "alerts"],
         "hint": "История забирается не залпом, а порциями — большой канал догрузится за несколько минут. Новые посты из источника выходят у вас сразу, не дожидаясь конца догрузки.",
         "tags": ["чужие посты", "с историей", "один канал → один"],
     },
@@ -2913,7 +2925,7 @@ COMMANDS: list[dict] = [
         # них всё равно становится главным. Два поля под одно и то же заставляли
         # заполнять «приёмник» руками даже при выборе чатов мышкой.
         "needs": ["account", "source", "targets"],
-        "optional": ["buttons", "translate_to", "uniquify"],
+        "optional": ["buttons", "translate_to", "uniquify", "alerts"],
         "hint": "Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу. Свой текст здесь не нужен: уходит то, что вышло в источнике.",
         "tags": ["чужие посты", "все чаты разом", "по факту поста"],
     },
@@ -2964,7 +2976,7 @@ COMMANDS: list[dict] = [
         "description": "Ловит чеки и подарочные ссылки в чатах и складывает в одно место.",
         "status": "ready",
         "needs": ["account", "source", "target"],
-        "optional": ["keywords"],
+        "optional": ["keywords", "alerts"],
         "tags": ["чеки и подарки", "в один чат"],
     },
     {
@@ -2976,7 +2988,7 @@ COMMANDS: list[dict] = [
         "description": "Следит за чатом и присылает посты с вашими словами.",
         "status": "ready",
         "needs": ["account", "source", "target"],
-        "optional": ["keywords"],
+        "optional": ["keywords", "alerts"],
         "hint": "Слова — через запятую: «скидка, акция, розыгрыш». Совпадение ищется без учёта регистра, пост приходит с названием чата.",
         "tags": ["свои слова", "в один чат"],
     },
@@ -2989,7 +3001,7 @@ COMMANDS: list[dict] = [
         "description": "Присылает входящие личные сообщения в выбранный чат.",
         "status": "ready",
         "needs": ["account", "target"],
-        "optional": ["keywords", "ignore_bots", "ignore_archived", "ignore_muted"],
+        "optional": ["keywords", "ignore_bots", "ignore_archived", "ignore_muted", "alerts"],
         "hint": "Источник не нужен: задача слушает все личные диалоги аккаунта. Ботов, архивные и заглушённые чаты пропускает — галочки снимаются.",
         "tags": ["личные сообщения", "источник не нужен"],
     },
@@ -3002,7 +3014,7 @@ COMMANDS: list[dict] = [
         "description": "Ставит реакцию на сообщения выбранного человека в общем чате.",
         "status": "ready",
         "needs": ["account", "source", "target_user"],
-        "optional": ["reaction"],
+        "optional": ["reaction", "alerts"],
         "tags": ["один человек", "реакция"],
     },
     {
@@ -3014,7 +3026,7 @@ COMMANDS: list[dict] = [
         "description": "Удаляет сообщения выбранного человека в чате, где вы администратор.",
         "status": "ready",
         "needs": ["account", "source", "target_user"],
-        "optional": ["keywords"],
+        "optional": ["keywords", "alerts"],
         "tags": ["один человек", "нужны права админа"],
     },
 ]
@@ -3123,6 +3135,10 @@ def setup_webapp_routes(app: web.Application, bot: Any = None) -> None:
     """Подключает API и раздачу статики мини-аппа."""
     global _bot
     _bot = bot
+    # Тот же бот пишет письма о больных задачах (см. app.task_alerts).
+    from app.task_alerts import set_alert_bot
+
+    set_alert_bot(bot)
     app.add_routes(routes)
     if _webapp_cache_headers not in app.middlewares:
         app.middlewares.append(_webapp_cache_headers)

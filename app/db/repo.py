@@ -1475,6 +1475,27 @@ async def log_forward(
     await session.flush()
 
 
+async def count_trailing_errors(
+    session: AsyncSession, rule_id: int, limit: int = 4
+) -> int:
+    """Сколько ошибок подряд в конце журнала: считаем от свежих, стоим на
+    первой не-ошибке. Нужно алертам: третья подряд — повод написать.
+    Читаем не больше ``limit`` строк: больше алерту всё равно не надо.
+    """
+    result = await session.execute(
+        select(ForwardLog.status)
+        .where(ForwardLog.rule_id == rule_id)
+        .order_by(ForwardLog.id.desc())
+        .limit(max(1, limit))
+    )
+    streak = 0
+    for (status,) in result.all():
+        if status != "error":
+            break
+        streak += 1
+    return streak
+
+
 async def task_health(
     session: AsyncSession, rule_ids: Sequence[int]
 ) -> dict[int, dict]:

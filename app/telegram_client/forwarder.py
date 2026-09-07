@@ -212,3 +212,6 @@ async def log_delivery_error(
             status="error",
             error=f"{type(error).__name__}: {error}",
         )
+    from app.task_alerts import maybe_alert_problem
+
+    await maybe_alert_problem(rule, f"{type(error).__name__}: {error}")
