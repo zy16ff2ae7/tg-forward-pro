@@ -693,6 +693,7 @@ button { border: none; background: none; cursor: pointer; }
   border-radius: 999px;
   color: var(--muted);
   white-space: nowrap;
+  transition: background 0.25s ease, color 0.25s ease, box-shadow 0.25s ease;
 }
 
 .seg.is-active { color: #fff; background: var(--accent-grad); box-shadow: 0 4px 14px rgba(255, 61, 154, 0.28); }
@@ -825,6 +826,22 @@ button { border: none; background: none; cursor: pointer; }
 }
 
 .task--archived { opacity: 0.6; }
+
+/* Список встаёт каскадом: карточки появляются по очереди, а не все разом.
+   backwards — чтобы после конца анимации карточка жила своими стилями
+   (иначе fill «both» перебивал бы :hover). Кому анимации мешают — общий
+   prefers-reduced-motion ниже всё равно всё гасит. */
+#taskList > .task { animation: cardIn 0.32s ease backwards; }
+#taskList > .task:nth-child(2) { animation-delay: 0.05s; }
+#taskList > .task:nth-child(3) { animation-delay: 0.10s; }
+#taskList > .task:nth-child(4) { animation-delay: 0.15s; }
+#taskList > .task:nth-child(5) { animation-delay: 0.20s; }
+#taskList > .task:nth-child(6) { animation-delay: 0.25s; }
+#taskList > .task:nth-child(7) { animation-delay: 0.30s; }
+#taskList > .task:nth-child(8) { animation-delay: 0.35s; }
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(10px); }
+}
 
 .task__top { display: flex; align-items: center; gap: 11px; }
 

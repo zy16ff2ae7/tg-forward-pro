@@ -189,6 +189,7 @@ def rule_card(
     kind = rule.kind or "forward"
     filters = rule.filters or {}
     health = health or {}
+    conf = FilterConfig.from_dict(filters)
     # Разовые задачи запускает кнопка, а её абонемент не сторожит (``run_oneshot``
     # проверки не делает) — писать им «нет абонемента» было бы неправдой.
     one_shot = kind in ONE_SHOT_KINDS
@@ -259,11 +260,32 @@ def rule_card(
             lines.append(f"Чат: <b>{rule.target_title or rule.target_id}</b>")
         else:
             lines.append(f"Чатов: <b>{len(chats)}</b>")
-    if kind in ("baiting", "mute"):
+        pruned = int(filters.get("chats_pruned") or 0)
+        if pruned:
+            lines.append(f"🧹 Мёртвых чатов вычищено: {pruned}")
+    if kind == "baiting":
         watched = int(filters.get("target_user_id") or 0)
         lines.append(f"Следим за: {watched or 'всеми подряд'}")
-        if kind == "baiting":
-            lines.append(f"Реакция: {filters.get('reaction') or '👍'}")
+        lines.append(f"Реакция: {filters.get('reaction') or '👍'}")
+    elif kind == "mute":
+        watched = int(filters.get("target_user_id") or 0)
+        if watched:
+            lines.append(f"Следим за: {watched}")
+        words = [str(w).strip() for w in (filters.get("banned_words") or [])]
+        words = [w for w in words if w]
+        if words:
+            shown = ", ".join(words[:5]) + ("…" if len(words) > 5 else "")
+            lines.append(f"🚫 Слова под запретом: {escape(shown, quote=False)}")
+        if filters.get("block_links"):
+            lines.append("🔗 Ссылки: удаляются")
+        max_warns = max(0, int(conf.max_warns or 0))
+        if max_warns:
+            lines.append(
+                f"🔇 Мут: после {max_warns}-го нарушения "
+                f"на {max(1, int(conf.mute_hours or 1))} ч"
+            )
+        else:
+            lines.append("🔇 Мут выключен — только удаляем")
     if kind == "parser":
         lines.append(f"Лимит за запуск: {filters.get('limit') or 200}")
     if kind == "autosubscribe":
@@ -280,12 +302,17 @@ def rule_card(
     # касается вовсе (её отрабатывает только путь входящего сообщения), а
     # настоящее расписание — интервал, окно, паузу и круги — в боте было не
     # видно: за ним приходилось идти в кабинет.
-    conf = FilterConfig.from_dict(filters)
     if kind == "poster":
         lines.append(f"Раз в {max(1, int(conf.interval_seconds) // 60)} мин")
         window = f"{conf.window_start}–{conf.window_end}"
         clock = "по часам сервера" if conf.window_tz is None else tz_suffix(conf.window_tz)
         lines.append(f"Окно: {window} {clock}")
+        slots = [s for s in (conf.scheduled_posts or []) if isinstance(s, dict)]
+        if slots:
+            sent = sum(1 for s in slots if s.get("sent"))
+            full = round(sent / len(slots) * 8)
+            bar = "▓" * full + "░" * (8 - full)
+            lines.append(f"Расписание: {bar} {sent}/{len(slots)}")
     elif kind == "mailing":
         lines.append(f"Пауза между чатами: {conf.gap_seconds} сек")
         lines.append(f"Кругов: {conf.repeats}" if conf.repeats else "Кругов: без конца")

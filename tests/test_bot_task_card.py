@@ -217,3 +217,62 @@ async def test_run_now_offers_the_file_right_away(create_user, create_account, m
     text, markup = callback.message.edits[-1]
     assert "<b>3</b>" in text
     assert any("Файлом" in label for label in button_labels(markup))
+
+
+# ───────────────────────── Модерация, слоты, чистка ───────────────────────────
+
+
+def test_mute_card_shows_moderation_summary():
+    """Карточка модератора: объект слежки, запреты и цена рецидива."""
+    text = card(
+        "mute",
+        filters={
+            "target_user_id": 11,
+            "banned_words": ["казино", "ставки", "а", "б", "в", "г"],
+            "block_links": True,
+            "max_warns": 2,
+            "mute_hours": 12,
+        },
+    )
+    assert "Следим за: 11" in text
+    assert "🚫 Слова под запретом: казино, ставки, а, б, в…" in text
+    assert "🔗 Ссылки: удаляются" in text
+    assert "🔇 Мут: после 2-го нарушения на 12 ч" in text
+
+
+def test_mute_card_legacy_filters_show_defaults():
+    """Старый мут без новых полей: лестница — по умолчаниям, запретов нет."""
+    text = card("mute", filters={"target_user_id": 11, "keywords": ["спам"]})
+    assert "Следим за: 11" in text
+    assert "🔇 Мут: после 3-го нарушения на 24 ч" in text
+    assert "🚫" not in text
+    assert "🔗" not in text
+
+
+def test_mute_card_zero_warns_says_delete_only():
+    """Мут выключен — карточка честно говорит «только удаляем»."""
+    text = card("mute", filters={"banned_words": ["казино"], "max_warns": 0})
+    assert "🔇 Мут выключен — только удаляем" in text
+    assert "Следим за" not in text
+
+
+def test_poster_card_shows_schedule_bar():
+    """Постинг с датами: полоса «ушло/всего» — как в кабинете."""
+    slots = [
+        {"id": "a", "at": "2030-01-01T10:00:00+00:00", "sent": True},
+        {"id": "b", "at": "2030-01-02T10:00:00+00:00", "sent": False},
+        {"id": "c", "at": "2030-01-03T10:00:00+00:00", "sent": False},
+        {"id": "d", "at": "2030-01-04T10:00:00+00:00", "sent": False},
+    ]
+    text = card("poster", filters={"scheduled_posts": slots})
+    assert "Расписание: ▓▓░░░░░░ 1/4" in text
+
+
+def test_broadcast_card_shows_pruned_chats():
+    """Чистка видна и в боте: сколько мёртвых чатов уже вычищено."""
+    text = card(
+        "broadcast",
+        target_title="Рассылочный куст",
+        filters={"targets": [1, 2, 3], "chats_pruned": 2},
+    )
+    assert "🧹 Мёртвых чатов вычищено: 2" in text
