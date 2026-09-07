@@ -196,6 +196,18 @@ class Report:
         return [row for row in self.rows if not row[1]]
 
 
+def reset_rate_limits() -> None:
+    """Между разделами smoke создаём больше задач, чем разрешает API за минуту.
+
+    Это не проверка самого rate-limit: она нужна, чтобы один длинный offline
+    прогон не зависел от порядка разделов и не превращал следующие проверки в
+    каскад ложных 429.
+    """
+    from app.webapp_api import _RATE_BUCKETS
+
+    _RATE_BUCKETS.clear()
+
+
 class Cabinet:
     """HTTP-клиент кабинета: подпись Telegram подставляется сама."""
 
@@ -432,11 +444,12 @@ async def check_auth(cab: Cabinet, rep: Report) -> None:
     status, _ = await cab.get("/api/me")
     rep.check("своя подпись — 200", status == 200, f"статус {status}")
 
-    # Тот же initData принимается и параметром запроса: так его передают
-    # страницы, куда заголовок не подставить.
+    # initData намеренно не принимается из query: подпись в URL попадает в
+    # историю браузера, access-лог и Referer. Единственный допустимый путь —
+    # заголовок X-Telegram-Init-Data.
     quoted = quote(cab.headers["X-Telegram-Init-Data"], safe="")
     status, _ = await cab.get(f"/api/me?initData={quoted}", auth=False)
-    rep.check("подпись в query-параметре — 200", status == 200, f"статус {status}")
+    rep.check("подпись в query-параметре отклоняется — 401", status == 401, f"статус {status}")
 
 
 async def check_profile(cab: Cabinet, rep: Report) -> dict:
@@ -2468,14 +2481,19 @@ async def check_account_login(cab: Cabinet, rep: Report) -> None:
 
     attempts = {"code": 0}
 
-    async def send_code(_phone: str) -> tuple[str, str, dict]:
+    async def send_code(_phone: str, _creds: Any = None) -> tuple[str, str, dict]:
         return (
             "smoke-temp-session",
             "smoke-code-hash",
             {"via": "app", "next": "sms", "timeout": 60},
         )
 
-    async def resend_code(phone: str, session_string: str, phone_code_hash: str) -> tuple[str, str, dict]:
+    async def resend_code(
+        phone: str,
+        session_string: str,
+        phone_code_hash: str,
+        creds: Any = None,
+    ) -> tuple[str, str, dict]:
         return (
             "smoke-temp-session",
             "smoke-code-hash-resend",
@@ -2489,10 +2507,12 @@ async def check_account_login(cab: Cabinet, rep: Report) -> None:
             raise PhoneCodeInvalidError(request=None)
         raise SessionPasswordNeededError(request=None)
 
-    async def sign_in_password(_password: str, _session: str) -> str:
+    async def sign_in_password(_password: str, _session: str, _creds: Any = None) -> str:
         return "smoke-session-after-2fa"
 
-    async def check_session(_session: str) -> tuple[bool, str | None, str | None]:
+    async def check_session(
+        _session: str, _creds: Any = None
+    ) -> tuple[bool, str | None, str | None]:
         return True, "Дымовой прогон", None
 
     async def start_account(_account: Any, _session: str) -> bool:
@@ -2951,14 +2971,20 @@ async def check_bot_entry(rep: Report) -> None:
 
     greeting = texts.welcome("Иван Петров")
     rep.check(
-        "приветствие длиннее подписи к фото — значит, делить его надо",
-        len(greeting) > CAPTION_LIMIT,
+        "текущее приветствие непустое",
+        bool(greeting),
         f"{len(greeting)} символов при пределе {CAPTION_LIMIT}",
     )
 
     message = FakeMessage()
     await cmd_start(message, state=None)
     kinds = [item["kind"] for item in message.sent]
+    expected_kinds = ["photo", "text"] if len(greeting) > CAPTION_LIMIT else ["photo"]
+    rep.check(
+        "баннер и приветствие разделяются только при превышении лимита",
+        kinds == expected_kinds,
+        f"получено {kinds}, ожидалось {expected_kinds}",
+    )
     rep.check("человек получил ответ", bool(message.sent), f"сообщений {len(kinds)}")
     long_caption = [
         len(item["text"] or "")
@@ -2974,10 +3000,11 @@ async def check_bot_entry(rep: Report) -> None:
     rep.check("приветствие дошло целиком, без обрезки", greeting in whole,
               f"порядок сообщений: {', '.join(kinds)}")
     menu = [item for item in message.sent if item["markup"] is not None]
+    expected_menu_kind = "text" if len(greeting) > CAPTION_LIMIT else "photo"
     rep.check(
-        "меню лежит на сообщении с текстом — его же правят кнопки",
-        len(menu) == 1 and menu[0]["kind"] == "text",
-        f"кнопки на «{menu[0]['kind'] if menu else 'нигде'}»",
+        "меню лежит на сообщении, которое правит smart_edit",
+        len(menu) == 1 and menu[0]["kind"] == expected_menu_kind,
+        f"кнопки на «{menu[0]['kind'] if menu else 'нигде'}», ожидалось «{expected_menu_kind}»",
     )
     rep.note("бота не трогаем: сообщения принимает подделка, Telegram в прогоне не участвует")
 
@@ -3043,7 +3070,7 @@ async def check_dead_session(cab: Cabinet, rep: Report) -> None:
 
     client = DeadClient()
     with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
-        _new_client=lambda session_string="": client
+        _new_client=lambda session_string="", creds=None: client
     ):
         started = await manager.start_account(row, "1AaBb-dead-session")
 
@@ -3137,7 +3164,7 @@ async def check_account_revive(cab: Cabinet, rep: Report) -> None:
 
     client = FlakyClient()
     with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
-        _new_client=lambda session_string="": client
+        _new_client=lambda session_string="", creds=None: client
     ):
         # Первый заход обрывается — так аккаунт и оказывался вне работы.
         status, body = await cab.post(f"/api/accounts/{revive_id}/retry")
@@ -3245,11 +3272,16 @@ async def run_all(rep: Report) -> None:
             await check_task_actions(cab, rep, rule_id)
             await check_mailing_and_library(cab, rep, account_id)
             await check_task_edit(cab, rep, account_id)
+            reset_rate_limits()
             await check_poster_window(cab, rep, account_id)
+            reset_rate_limits()
             await check_task_health(cab, rep, account_id)
+            reset_rate_limits()
             await check_task_cleanup(cab, rep, account_id)
+            reset_rate_limits()
             await check_collected_results(cab, rep, account_id)
             await check_chats_and_accounts(cab, rep, account_id)
+            reset_rate_limits()
             await check_account_login(cab, rep)
             await check_subscription(cab, rep, me)
             await check_bonus(cab, rep)

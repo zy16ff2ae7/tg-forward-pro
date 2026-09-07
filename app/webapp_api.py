@@ -50,7 +50,7 @@ from app.telegram_client.jobs import (
     window_tz_minutes,
 )
 from app.telegram_client.manager import HOPELESS_ERRORS, manager
-from app.telegram_client.filters import normalize_buttons
+from app.telegram_client.filters import URL_RE, normalize_buttons
 from app.translate import normalize_lang
 
 # initData считаем свежим в течение суток
@@ -307,10 +307,15 @@ def rate_limit(max_calls: int, period_seconds: int) -> Callable:
                 calls.pop(0)
             if len(calls) >= max_calls:
                 retry = int(calls[0] + period_seconds - now) + 1
-                return _json(
+                response = _json(
                     {"error": f"Слишком часто. Повторите через {retry} сек."},
                     status=429,
                 )
+                # Клиент Telegram и reverse proxy понимают стандартный заголовок
+                # лучше, чем текст ошибки: можно показать точный countdown и не
+                # повторять запрос раньше времени.
+                response.headers["Retry-After"] = str(retry)
+                return response
             calls.append(now)
             # Не даём словарю расти бесконечно (счётчики за прошлые периоды бесполезны)
             if len(_RATE_BUCKETS) > 10000:
@@ -921,7 +926,32 @@ async def _apply_task_settings(
         for field in ("typing", "random_pick", "link_preview"):
             if given(field):
                 filters[field] = _as_bool(payload.get(field))
+        # Бесконечная рассылка — осознанная настройка пользователя, а не
+        # скрытое значение «0» в поле кругов. При включении круги не ограничены;
+        # паузы и Telegram/service daily cap по-прежнему соблюдаются.
+        if given("repeat_forever"):
+            filters["repeat_forever"] = _as_bool(payload.get("repeat_forever"))
+            if filters["repeat_forever"]:
+                filters["repeats"] = 0
+            elif "repeats" not in payload and not int(filters.get("repeats") or 0):
+                # Сняли бесконечный режим, но число кругов не прислали:
+                # безопасный персональный выбор — один круг, а не скрытая
+                # бесконечность из старого значения 0.
+                filters["repeats"] = 1
+        elif given("repeats"):
+            filters["repeat_forever"] = False
         await _own_texts(payload, filters, user_id=user_id, partial=partial)
+        if "subscribe_links" in payload:
+            from app.telegram_client.jobs import explicit_join_target
+            filters["subscribe_to"] = [
+                raw for raw in _as_list(payload.get("subscribe_links"))
+                if explicit_join_target(raw)
+            ]
+            filters["subscribe_done"] = False
+        if given("join_gap"):
+            filters["join_gap"] = max(0, min(_as_int(payload.get("join_gap"), 2), 3600))
+        if given("daily_join_limit"):
+            filters["daily_join_limit"] = max(0, min(_as_int(payload.get("daily_join_limit"), 0), 1000))
 
     # Утреннее окно: постер и рассылка уже разобрали его в своих ветках
     # выше, остальным публикующим — тем же правилом и с теми же умолчаниями.
@@ -1002,6 +1032,8 @@ async def create_task(request: web.Request) -> web.Response:
         payload = await request.json()
     except Exception:  # noqa: BLE001
         return _json({"error": "Нужен JSON"}, status=400)
+    if not isinstance(payload, dict):
+        return _json({"error": "Нужен JSON-объект"}, status=400)
 
     command_id = str(payload.get("command") or "").strip()
     kind = str(payload.get("kind") or "").strip()
@@ -1032,6 +1064,22 @@ async def create_task(request: web.Request) -> web.Response:
     target = str(payload.get("target") or "").strip()
     target_user = str(payload.get("target_user") or "").strip()
     targets = _as_list(payload.get("targets"))
+    folder_ids = _as_ids(payload.get("folder_ids"))
+    folder_titles_raw = payload.get("folder_titles") if isinstance(payload.get("folder_titles"), dict) else {}
+    subscribe_links = _as_list(payload.get("subscribe_links")) if kind == "mailing" else []
+    # Папка — только способ выбрать чаты. До сохранения задачи раскрываем её в
+    # конкретные диалоги, а затем общий _split_chats уберёт повторы с ручным
+    # выбором. Никаких папок, созданных приложением, в БД не появляется.
+    folder_pairs: list[tuple[int, str]] = []
+    if folder_ids and account_id and kind in MULTI_CHAT_KINDS:
+        for folder_id in dict.fromkeys(folder_ids):
+            for row in await manager.list_dialogs(account_id, folder_id=folder_id):
+                folder_pairs.append((int(row["id"]), str(row.get("title") or row["id"])))
+        targets.extend(str(chat_id) for chat_id, _ in folder_pairs)
+    if subscribe_links:
+        targets.extend(subscribe_links)
+    # preserve order while deduplicating refs from folders, ручных чатов and links
+    targets = list(dict.fromkeys(targets))
 
     needs = set(command["needs"])
     # Задачи «в несколько чатов» просят список получателей, но одиночное поле
@@ -1050,7 +1098,9 @@ async def create_task(request: web.Request) -> web.Response:
         missing.append("приёмник")
     if "target_user" in needs and not target_user:
         missing.append("человека, за которым следим")
-    if "targets" in needs and not targets:
+    if "targets" in needs and not targets and not (
+        kind == "mailing" and (folder_ids or subscribe_links)
+    ):
         missing.append(TARGETS_LABEL.get(kind, "чаты"))
     if "message" in needs and not str(payload.get("message") or "").strip():
         # Рассылке и постингу текст в форме не нужен, если сообщения выбраны из
@@ -1091,6 +1141,28 @@ async def create_task(request: web.Request) -> web.Response:
 
     filters = default_filters()
     errors: list[str] = []
+    if folder_ids and kind in MULTI_CHAT_KINDS:
+        filters["folder_ids"] = list(dict.fromkeys(folder_ids))
+        filters["folder_titles"] = {
+            str(folder_id): str(folder_titles_raw.get(str(folder_id), folder_titles_raw.get(folder_id, "Папка Telegram")))
+            for folder_id in dict.fromkeys(folder_ids)
+        }
+    if kind == "mailing":
+        # Храним исходные ссылки, а не только найденные id: при рестарте задача
+        # повторит вступление/разрешение сама и пользователь не вводит их заново.
+        from app.telegram_client.jobs import explicit_join_target, _invite_targets
+        links: list[str] = []
+        # @username в обычном поле «Чаты» — это адрес уже известного
+        # получателя, а не команда вступить. Автовступление включается только
+        # отдельным полем ссылок или URL t.me, чтобы старые задачи не стали
+        # внезапно подписываться на незнакомые @username.
+        for raw in subscribe_links:
+            if explicit_join_target(raw) and raw not in links:
+                links.append(raw)
+        for raw in targets:
+            if _invite_targets(raw) and raw not in links:
+                links.append(raw)
+        filters["subscribe_to"] = links
 
     # Чаты ищем одним обходом диалогов на все ссылки сразу: чатов в задаче может
     # быть сколько угодно, а поиск каждого по отдельности означал бы столько же
@@ -1115,10 +1187,15 @@ async def create_task(request: web.Request) -> web.Response:
     # приёмником правила, и без названия карточка задачи была бы безымянной.
     missed: list[str] = []
     extra_pairs: list[tuple[int, str]] = []
+    join_links = set(filters.get("subscribe_to") or [])
     for raw in targets:
         ref = str(raw).strip()
         found = resolved.get(ref)
         if found is None:
+            # Invite-ссылка не разрешается до вступления — это ожидаемый
+            # pending-состояние, а не ошибка сохранения рассылки.
+            if kind == "mailing" and ref in join_links:
+                continue
             missed.append(ref)
             continue
         extra_pairs.append(found)
@@ -1169,10 +1246,11 @@ async def create_task(request: web.Request) -> web.Response:
     # его же чат незачем; у постинга и рассылки источника нет вовсе.
     if kind in MULTI_CHAT_KINDS:
         chats = _split_chats(chat_pairs, source_id if kind == "broadcast" else 0)
-        if not chats:
+        if not chats and not (kind == "mailing" and filters.get("subscribe_to")):
             return _json({"error": MULTI_CHAT_EMPTY[kind]}, status=400)
-        target_id, target_title = chats[0]
-        filters["targets"] = [pair[0] for pair in chats[1:]]
+        if chats:
+            target_id, target_title = chats[0]
+        filters["targets"] = [pair[0] for pair in chats[1:]] if chats else []
 
     if kind in NO_SOURCE_TITLE:
         source_id, source_title = 0, NO_SOURCE_TITLE[kind]
@@ -1246,6 +1324,8 @@ async def update_task(request: web.Request) -> web.Response:
         payload = await request.json()
     except Exception:  # noqa: BLE001
         return _json({"error": "Нужен JSON"}, status=400)
+    if not isinstance(payload, dict):
+        return _json({"error": "Нужен JSON-объект"}, status=400)
 
     async with SessionLocal() as session:
         rule = await repo.get_rule(session, task_id, user_id)
@@ -1275,6 +1355,16 @@ async def update_task(request: web.Request) -> web.Response:
     target = str(payload.get("target") or "").strip()
     target_user = str(payload.get("target_user") or "").strip()
     targets = _as_list(payload.get("targets")) if "targets" in payload else None
+    folder_ids = _as_ids(payload.get("folder_ids")) if "folder_ids" in payload else None
+    folder_titles_raw = payload.get("folder_titles") if isinstance(payload.get("folder_titles"), dict) else {}
+    subscribe_links = _as_list(payload.get("subscribe_links")) if "subscribe_links" in payload else None
+    if targets is not None and subscribe_links:
+        targets.extend(subscribe_links)
+    if targets is not None and folder_ids and kind in MULTI_CHAT_KINDS:
+        for folder_id in dict.fromkeys(folder_ids):
+            rows = await manager.list_dialogs(account_id, folder_id=folder_id)
+            targets.extend(str(row["id"]) for row in rows)
+        targets = list(dict.fromkeys(targets))
     # Одиночный «приёмник» у задач со списком чатов означает список из одного:
     # так присылают бот и формы, сделанные до списка чатов.
     if "targets" in needs and "target" not in needs and target and targets is None:
@@ -1289,7 +1379,9 @@ async def update_task(request: web.Request) -> web.Response:
         missing.append("приёмник")
     if "target_user" in payload and "target_user" in needs and not target_user:
         missing.append("человека, за которым следим")
-    if targets is not None and "targets" in needs and not targets:
+    if targets is not None and "targets" in needs and not targets and not (
+        kind == "mailing" and (folder_ids or subscribe_links)
+    ):
         missing.append(TARGETS_LABEL.get(kind, "чаты"))
     if "message" in payload and "message" in needs and not _split_messages(payload.get("message")):
         # Текст в поле не нужен, если сообщения взяты из библиотеки (рассылка,
@@ -1342,10 +1434,13 @@ async def update_task(request: web.Request) -> web.Response:
     if targets is None:
         chat_pairs = list(stored_chats)  # список чатов не правили — берём прежний
     else:
+        join_links = set(subscribe_links or (filters.get("subscribe_to") or []))
         for raw in targets:
             ref = str(raw).strip()
             found = known.get(ref) or resolved.get(ref)
             if found is None:
+                if kind == "mailing" and ref in join_links:
+                    continue
                 missed.append(ref)
             else:
                 chat_pairs.append(found)
@@ -1369,10 +1464,11 @@ async def update_task(request: web.Request) -> web.Response:
     # Дальше — та же геометрия чатов и те же колонки, что и при создании задачи.
     if kind in MULTI_CHAT_KINDS:
         chats = _split_chats(chat_pairs, source_id if kind == "broadcast" else 0)
-        if not chats:
+        if not chats and not (kind == "mailing" and filters.get("subscribe_to")):
             return _json({"error": MULTI_CHAT_EMPTY[kind]}, status=400)
-        target_id, target_title = chats[0]
-        filters["targets"] = [pair[0] for pair in chats[1:]]
+        if chats:
+            target_id, target_title = chats[0]
+        filters["targets"] = [pair[0] for pair in chats[1:]] if chats else []
     elif kind == "autosubscribe" and targets is not None:
         filters["targets"] = [pair[0] for pair in chat_pairs]
 
@@ -1394,6 +1490,18 @@ async def update_task(request: web.Request) -> web.Response:
         elif send_mode in ("schedule", "poster"):
             kind = "poster"
 
+    if folder_ids is not None and kind in MULTI_CHAT_KINDS:
+        filters["folder_ids"] = list(dict.fromkeys(folder_ids))
+        filters["folder_titles"] = {
+            str(folder_id): str(folder_titles_raw.get(str(folder_id), folder_titles_raw.get(folder_id, "Папка Telegram")))
+            for folder_id in dict.fromkeys(folder_ids)
+        }
+    if kind == "mailing" and subscribe_links is not None:
+        from app.telegram_client.jobs import explicit_join_target
+        filters["subscribe_to"] = [
+            raw for raw in subscribe_links if explicit_join_target(raw)
+        ]
+        filters["subscribe_done"] = False
     _remember_names(filters, [found_source, found_target, found_user, *chat_pairs])
     await _apply_task_settings(
         kind, payload, filters, user_id=user_id, targets=targets, partial=True
@@ -2132,6 +2240,7 @@ async def list_chats(request: web.Request) -> web.Response:
     user_id = request[USER_ID_KEY]
     account_id = int(request.query.get("account_id") or 0)
     query = (request.query.get("q") or "").strip().lower()
+    folder_id = _as_int(request.query.get("folder_id"), 0)
     # По умолчанию отдаём все чаты: постинг и рассылка ходят в любое их число,
     # и отрезанный список означал бы, что часть чатов просто не выбрать мышкой.
     # limit оставлен для случаев, когда нужна короткая витрина.
@@ -2155,7 +2264,26 @@ async def list_chats(request: web.Request) -> web.Response:
             }
         )
 
-    dialogs = list(await manager.list_dialogs(account_id, limit=limit))
+    if folder_id:
+        dialogs = list(await manager.list_dialogs(account_id, limit=limit, folder_id=folder_id))
+    else:
+        # Старые обёртки manager не знают новый keyword; «Все чаты» им полностью совместим.
+        dialogs = list(await manager.list_dialogs(account_id, limit=limit))
+    folders = await manager.list_dialog_folders(account_id)
+    # Счётчик папки нужен кабинету до поиска: «Работа · 18» не должен
+    # превращаться в «Работа · 0» только потому, что в поле набрали слово.
+    folder_counts: dict[int, int] = {int(item["id"]): 0 for item in folders}
+    all_dialogs = dialogs if folder_id == 0 and limit <= 0 else await manager.list_dialogs(account_id)
+    for item in folders:
+        fid = int(item["id"])
+        if fid == 0:
+            folder_counts[fid] = len(all_dialogs)
+        elif folder_id == fid:
+            folder_counts[fid] = len(dialogs)
+        else:
+            folder_counts[fid] = len(await manager.list_dialogs(account_id, folder_id=fid))
+    for item in folders:
+        item["count"] = folder_counts.get(int(item["id"]), 0)
     if query:
         # Ищем и по названию, и по нику: в кабинете поле так и подписано
         # («Название, тема или @username»), а раньше ник не искался вовсе.
@@ -2166,7 +2294,43 @@ async def list_chats(request: web.Request) -> web.Response:
             if needle in d["title"].lower() or needle in str(d.get("username") or "").lower()
         ]
 
-    return _json({"chats": dialogs, "total": len(dialogs), "online": manager.is_online(account_id)})
+    return _json({
+        "chats": dialogs,
+        "total": len(dialogs),
+        "online": manager.is_online(account_id),
+        "folder_id": folder_id,
+        "folders": folders,
+    })
+
+
+@routes.post("/api/message-preflight")
+@require_auth
+@rate_limit(30, 60)
+async def message_preflight(request: web.Request) -> web.Response:
+    """Показывает, что реально может выглядеть ссылкой до запуска рассылки."""
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        payload = {}
+    text = str(payload.get("text") or "") if isinstance(payload, dict) else ""
+    raw_entities = payload.get("entities") if isinstance(payload, dict) else []
+    entities = [item for item in (raw_entities or []) if isinstance(item, dict)]
+    links = list(dict.fromkeys(URL_RE.findall(text)))
+    entity_types = [str(item.get("type") or item.get("_") or "entity") for item in entities]
+    hidden = [
+        str(item.get("url")) for item in entities
+        if str(item.get("url") or "").lower().startswith("tg://")
+    ]
+    return _json({
+        "links": links,
+        "entities": entity_types,
+        "hidden_mentions": hidden,
+        "link_preview": False,
+        "warning": (
+            "В сообщении есть скрытые tg:// упоминания — они будут отправлены как обычные упоминания, не как URL."
+            if hidden else ("Найдены ссылки: предпросмотр выключен." if links else "Ссылок и URL-сущностей не найдено.")
+        ),
+    })
 
 
 @routes.get("/api/accounts")
@@ -2697,7 +2861,9 @@ async def bank_subscription(request: web.Request) -> web.Response:
         payload = await request.json()
     except Exception:  # noqa: BLE001
         payload = {}
-    days = _as_int((payload or {}).get("days"), 0)
+    if not isinstance(payload, dict):
+        raise ValidationError("Ожидается JSON-объект")
+    days = _as_int(payload.get("days"), 0)
 
     async with SessionLocal() as session:
         until = await repo.subscription_until(session, user_id)
@@ -2734,7 +2900,9 @@ async def distribute_subscription(request: web.Request) -> web.Response:
         payload = await request.json()
     except Exception:  # noqa: BLE001
         payload = {}
-    days = _as_int((payload or {}).get("days"), 0)
+    if not isinstance(payload, dict):
+        raise ValidationError("Ожидается JSON-объект")
+    days = _as_int(payload.get("days"), 0)
 
     async with SessionLocal() as session:
         moved = await repo.unbank_days(session, user_id, days)
@@ -2824,7 +2992,9 @@ async def redeem_promo(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:  # noqa: BLE001
         return _json({"error": "Нужен JSON"}, status=400)
-    code = str((body or {}).get("code") or "").strip()
+    if not isinstance(body, dict):
+        return _json({"error": "Нужен JSON-объект"}, status=400)
+    code = str(body.get("code") or "").strip()
     if not code:
         return _json({"error": "Пришлите код", "status": "unknown"}, status=400)
 
@@ -3024,8 +3194,20 @@ def _task_view(
             "gap_seconds": conf.gap_seconds,
             "cycle_seconds": conf.cycle_seconds,
             "repeats": conf.repeats,
+            "repeat_forever": bool(getattr(conf, "repeat_forever", False) or not conf.repeats),
             "typing": bool(conf.typing),
             "random_pick": bool(conf.random_pick),
+            "folders": [
+                {"id": int(folder_id), "title": str(title)}
+                for folder_id, title in (conf.folder_titles or {}).items()
+            ],
+            "subscribe": {
+                "links_count": len(conf.subscribe_to or []),
+                "status": (
+                    "done" if conf.subscribe_done else ("pending" if conf.subscribe_to else "off")
+                ),
+                **dict(conf.subscribe_report or {}),
+            },
         }
         if conf.repeats > 0 and recipients:
             total = recipients * int(conf.repeats)
@@ -3127,6 +3309,13 @@ def _edit_view(
     if kind in ("forward", "clone"):
         edit["delay_jitter"] = int(conf.delay_jitter or 0)
     if kind in ("poster", "mailing"):
+        # Общий слот формы показывает и блок ссылок/папок даже у постинга:
+        # переключение в очередь не должно пересобирать редактор с потерей полей.
+        edit["subscribe_links"] = list(conf.subscribe_to or [])
+        edit["join_gap"] = int(getattr(conf, "join_gap", 2) or 0)
+        edit["daily_join_limit"] = int(getattr(conf, "daily_join_limit", 0) or 0)
+        edit["folder_ids"] = list(getattr(conf, "folder_ids", []) or [])
+        edit["folder_titles"] = dict(getattr(conf, "folder_titles", {}) or {})
         # Форма у постинга и рассылки одна на двоих: разброс кругов постер
         # от сервера не примет, но показать умолчание обязан — как gap/cycle.
         edit["gap_jitter"] = int(conf.gap_jitter or 0)
@@ -3186,6 +3375,7 @@ def _edit_view(
         edit["gap"] = conf.gap_seconds
         edit["cycle"] = conf.cycle_seconds
         edit["repeats"] = conf.repeats
+        edit["repeat_forever"] = bool(getattr(conf, "repeat_forever", False) or not conf.repeats)
         edit["typing"] = bool(conf.typing)
         edit["random_pick"] = bool(conf.random_pick)
         edit["link_preview"] = bool(conf.link_preview)
@@ -3204,6 +3394,9 @@ def _edit_view(
             if isinstance(s, dict)
         ]
     elif kind == "mailing":
+        edit["subscribe_links"] = list(conf.subscribe_to or [])
+        edit["folder_ids"] = list(conf.folder_ids or [])
+        edit["folder_titles"] = dict(conf.folder_titles or {})
         # Текст рассылки лежит в библиотеке, но правят его здесь: поле показывает
         # то, что уйдёт, — как у постинга. Раньше поле стояло пустым, а набранный
         # в нём текст пропадал.
@@ -3211,6 +3404,7 @@ def _edit_view(
         edit["gap"] = conf.gap_seconds
         edit["cycle"] = conf.cycle_seconds
         edit["repeats"] = conf.repeats
+        edit["repeat_forever"] = bool(getattr(conf, "repeat_forever", False) or not conf.repeats)
         edit["typing"] = bool(conf.typing)
         edit["random_pick"] = bool(conf.random_pick)
         edit["link_preview"] = bool(conf.link_preview)
@@ -3260,8 +3454,8 @@ COMMANDS: list[dict] = [
         "description": "Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.",
         "status": "ready",
         "needs": ["account", "targets", "message"],
-        "optional": ["send_mode", "schedule_only", "scheduled_posts", "buttons", "interval", "start", "end", "gap", "cycle", "repeats", "typing", "random_pick", "link_preview", "pin_on_send", "topic", "autodelete_hours", "mention_all", "gap_jitter", "cycle_jitter", "daily_cap", "alerts"],
-        "hint": "Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.",
+        "optional": ["send_mode", "schedule_only", "scheduled_posts", "buttons", "interval", "start", "end", "gap", "cycle", "repeats", "repeat_forever", "typing", "random_pick", "link_preview", "pin_on_send", "topic", "autodelete_hours", "mention_all", "gap_jitter", "cycle_jitter", "daily_cap", "alerts", "subscribe_links", "join_gap", "daily_join_limit"],
+        "hint": "Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «без ограничений» — крутить до остановки.",
         "tags": ["ваш текст", "расписание или очередь"],
     },
     {

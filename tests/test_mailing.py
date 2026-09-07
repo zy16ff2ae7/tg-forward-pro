@@ -610,3 +610,29 @@ async def test_library_delete_rejects_foreign_item(client, auth_headers, create_
         item = await repo.add_saved_message(session, user_id=other, text="чужое")
 
     assert (await client.delete(f"/api/library/{item.id}", headers=auth_headers)).status == 404
+
+async def test_mailing_repeat_forever_is_an_explicit_user_setting(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Бесконечные круги включаются отдельной настройкой, а не магическим нулём."""
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+
+    response = await client.post(
+        "/api/tasks",
+        json={
+            "command": "mailing",
+            "account_id": account_id,
+            "targets": ["@a", "@b"],
+            "message": "одно сообщение",
+            "repeats": 1,
+            "repeat_forever": True,
+        },
+        headers=auth_headers,
+    )
+
+    assert response.status == 201, await response.text()
+    task = (await response.json())["task"]
+    assert task["mailing"]["repeat_forever"] is True
+    assert task["mailing"]["repeats"] == 0
+    assert task["progress"]["total"] is None

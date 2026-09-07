@@ -39,7 +39,7 @@ from telethon.tl.functions.channels import (
     GetFullChannelRequest,
     InviteToChannelRequest,
 )
-from telethon.tl.types import ChannelParticipantsAdmins, MessageEntityTextUrl
+from telethon.tl.types import ChannelParticipantsAdmins, MessageEntityMentionName, MessageEntityTextUrl
 
 from app.db import repo
 from app.errors import ValidationError
@@ -573,6 +573,27 @@ async def mention_suffix(
         return "", []
     suffix = "\n" + "\u2060" * len(ids)
     base = prefix_len + 1
+    # ``MessageEntityTextUrl(tg://user?id=...)`` looks invisible in Telegram,
+    # but anti-spam/moderation bots quite correctly see it as a URL. A real
+    # Telethon client can create a native mention entity, which notifies the
+    # person without adding a URL entity. The old fallback is kept for small test
+    # doubles and third-party client wrappers that cannot resolve InputUser.
+    if hasattr(client, "get_input_entity"):
+        native: list = []
+        for user in users:
+            if not getattr(user, "id", None) or getattr(user, "bot", False):
+                continue
+            try:
+                input_user = await client.get_input_entity(user)
+            except Exception as exc:  # noqa: BLE001 — don't lose the whole post
+                logger.debug("Не получили InputUser {}: {}", getattr(user, "id", 0), type(exc).__name__)
+                continue
+            pos = len(native)
+            native.append(MessageEntityMentionName(offset=base + pos, length=1, user_id=input_user))
+        # If none resolved, sending the plain message is safer than synthesizing
+        # hidden URLs. This is the exact guard for «ссылки нет, но Telegram её
+        # нашёл».
+        return (("\n" + "\u2060" * len(native)) if native else "", native)
     entities = [
         MessageEntityTextUrl(offset=base + pos, length=1, url=f"tg://user?id={uid}")
         for pos, uid in enumerate(ids)
@@ -1695,6 +1716,20 @@ async def _log_join(rule: RuleSnapshot) -> None:
     async with SessionLocal() as session:
         await repo.log_join(session, rule.id, rule.user_id)
         await session.commit()
+
+
+def explicit_join_target(value: Any) -> str | None:
+    """Нормализует только явно указанную пользователем ссылку на чат.
+
+    Текст сообщения рассылки сюда никогда не передаётся: это отдельный helper для
+    поля «ссылки на чаты». Поэтому обычное слово «работа» не превращается в
+    попытку вступить в произвольный username.
+    """
+    raw = str(value or "").strip()
+    if raw.startswith("@") and len(raw) > 1:
+        return raw[1:]
+    links = _invite_targets(raw)
+    return links[0] if links else None
 
 
 def _invite_targets(text: str) -> list[str]:

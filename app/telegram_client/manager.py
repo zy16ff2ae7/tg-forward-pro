@@ -10,7 +10,7 @@ from typing import Any, Iterable, Sequence
 from urllib.parse import urlparse
 
 from loguru import logger
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, utils
 from telethon.errors import (
     FloodWaitError,
     PhoneCodeExpiredError,
@@ -193,6 +193,54 @@ def _in_window(now_sec: int, start: int, end: int) -> bool:
     return in_window(now_sec, start, end)
 
 
+def _peer_id(peer: Any) -> int:
+    """Peer из DialogFilter → тот же signed id, что у Dialog.id."""
+    try:
+        return int(utils.get_peer_id(peer))
+    except Exception:  # noqa: BLE001 — тестовые peer-like объекты
+        for attr, sign in (("user_id", 1), ("chat_id", -1), ("channel_id", -100)):
+            value = getattr(peer, attr, None)
+            if value is not None:
+                value = int(value)
+                return value * sign if sign != -100 else -1000000000000 - value
+    return 0
+
+
+def _dialog_matches_folder(row: dict[str, Any], folder: dict[str, Any]) -> bool:
+    """Применяет флаги Telegram DialogFilter к уже прочитанному диалогу."""
+    chat_id = int(row.get("id") or 0)
+    included = {int(value) for value in folder.get("include_peers") or [] if value}
+    excluded = {int(value) for value in folder.get("exclude_peers") or [] if value}
+    if chat_id in excluded:
+        return False
+    category = False
+    if folder.get("contacts") and row.get("is_contact"):
+        category = True
+    if folder.get("non_contacts") and row.get("is_user") and not row.get("is_contact"):
+        category = True
+    if folder.get("groups") and row.get("is_group"):
+        category = True
+    if folder.get("broadcasts") and row.get("is_channel"):
+        category = True
+    if folder.get("bots") and row.get("is_bot"):
+        category = True
+    # Явно включённые peers и категории — объединение, как в MTProto. Если
+    # положительных флагов нет, Telegram трактует фильтр как «все диалоги с
+    # последующими исключениями» (например, системная папка «Непрочитанные»).
+    has_positive = bool(included) or any(
+        folder.get(name) for name in ("contacts", "non_contacts", "groups", "broadcasts", "bots")
+    )
+    if has_positive and chat_id not in included and not category:
+        return False
+    if folder.get("exclude_muted") and row.get("muted"):
+        return False
+    if folder.get("exclude_read") and not row.get("unread"):
+        return False
+    if folder.get("exclude_archived") and row.get("archived"):
+        return False
+    return True
+
+
 def _dialog_muted(dialog: Any) -> bool:
     """Чат заглушён: уведомления выключены до даты в будущем.
 
@@ -280,6 +328,9 @@ class ClientManager:
         # см. DIALOGS_CACHE_TTL — без него выбор чатов пачкой означал бы обход
         # диалогов на каждый отмеченный чат.
         self._dialogs_cache: dict[int, tuple[float, list[dict[str, Any]]]] = {}
+        # account_id -> (когда прочитали, Telegram DialogFilter). Папки читаем
+        # отдельно: список диалогов живёт своим кэшем и не зависит от поиска.
+        self._dialog_folders_cache: dict[int, tuple[float, list[dict[str, Any]]]] = {}
         self._lock = asyncio.Lock()
         self._refresh_task: asyncio.Task | None = None
         # Мьютексы разовых запусков (парсер/автоподписка): один запуск
@@ -561,6 +612,7 @@ class ClientManager:
             # Чаты остановленного аккаунта — уже не его чаты: следующий вход
             # должен увидеть свежий список, а не тот, что лежал в кэше.
             self._dialogs_cache.pop(account_id, None)
+            self._dialog_folders_cache.pop(account_id, None)
         if client is not None:
             try:
                 await client.disconnect()
@@ -787,16 +839,16 @@ class ClientManager:
         """
         return delivery_queue.stats()
 
-    async def list_dialogs(self, account_id: int, limit: int = 0) -> list[dict[str, Any]]:
-        """Чаты аккаунта: для выбора источника, приёмника и получателей.
+    async def list_dialogs(
+        self, account_id: int, limit: int = 0, folder_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Чаты аккаунта, при необходимости уже отфильтрованные папкой Telegram.
 
-        ``limit <= 0`` — отдать все чаты, сколько их у аккаунта есть. Именно это
-        нужно кабинету: постить и рассылать можно в любое число чатов, а список,
-        обрезанный на двухсотом, молча прятал бы остальные — человек не находил
-        чат поиском и считал, что задача его «не видит».
-
-        Полный обход кладём в кэш на ``DIALOGS_CACHE_TTL``: один обход — это
-        череда запросов к Telegram, а спрашивают список часто.
+        Папка не является сущностью приложения: ``folder_id`` читается из
+        ``messages.getDialogFilters`` и превращается здесь в конкретный список
+        диалогов. Это важно для рассылки — планировщик получает обычные chat id,
+        а не хрупкую ссылку на UI-папку, и смешанный выбор «папка + чат» можно
+        дедуплицировать одним и тем же кодом.
         """
         if not settings.mtproto_ready:
             return []
@@ -806,41 +858,93 @@ class ClientManager:
 
         cached = self._dialogs_cache.get(account_id)
         if cached is not None and time.time() - cached[0] < DIALOGS_CACHE_TTL:
-            return cached[1][:limit] if limit > 0 else list(cached[1])
+            result = list(cached[1])
+        else:
+            result = []
+            # Не передаём limit в Telegram: короткий ответ нельзя класть в общий
+            # кэш, иначе после поиска «все чаты» внезапно станут пятью чатами.
+            async for dialog in client.iter_dialogs(limit=None):
+                entity = dialog.entity
+                title = getattr(entity, "title", None) or getattr(entity, "first_name", None) or "Без имени"
+                result.append(
+                    {
+                        "id": dialog.id,
+                        "title": title,
+                        "username": getattr(entity, "username", None) or "",
+                        "is_channel": bool(getattr(entity, "broadcast", False)),
+                        "is_group": bool(getattr(entity, "megagroup", False)),
+                        "is_user": bool(getattr(entity, "id", None) and not getattr(entity, "megagroup", False) and not getattr(entity, "broadcast", False)),
+                        "is_contact": bool(getattr(entity, "contact", False)),
+                        "is_bot": bool(getattr(entity, "bot", False)),
+                        "archived": bool(getattr(dialog, "archived", False)),
+                        "muted": _dialog_muted(dialog),
+                        "unread": bool(getattr(dialog, "unread_count", 0)),
+                        "folder_id": int(getattr(dialog, "folder_id", 0) or 0),
+                    }
+                )
+            self._dialogs_cache[account_id] = (time.time(), list(result))
 
-        result: list[dict[str, Any]] = []
-        async for dialog in client.iter_dialogs(limit=limit if limit > 0 else None):
-            entity = dialog.entity
-            title = getattr(entity, "title", None) or getattr(entity, "first_name", None) or "Без имени"
+        if folder_id not in (None, 0):
+            folders = await self.list_dialog_folders(account_id)
+            folder = next((item for item in folders if int(item["id"]) == int(folder_id)), None)
+            if folder is None:
+                result = []
+            else:
+                result = [row for row in result if _dialog_matches_folder(row, folder)]
+        return result[:limit] if limit > 0 else result
+
+    async def list_dialog_folders(self, account_id: int) -> list[dict[str, Any]]:
+        """Возвращает уже существующие папки Telegram, без создания копий в БД."""
+        if not settings.mtproto_ready:
+            return []
+        client = self._clients.get(account_id)
+        if client is None:
+            return []
+        cached = self._dialog_folders_cache.get(account_id)
+        if cached is not None and time.time() - cached[0] < DIALOGS_CACHE_TTL:
+            return [dict(item) for item in cached[1]]
+        try:
+            response = await client(functions.messages.GetDialogFiltersRequest())
+            raw_filters = list(getattr(response, "filters", response) or [])
+        except Exception as exc:  # noqa: BLE001 — старые DC/моки могут не уметь папки
+            logger.info("Аккаунт #{}: папки Telegram не прочитались: {}", account_id, type(exc).__name__)
+            raw_filters = []
+        result: list[dict[str, Any]] = [
+            {"id": 0, "title": "Все чаты", "system": True, "include_peers": [], "exclude_peers": []}
+        ]
+        for item in raw_filters:
+            folder_id = int(getattr(item, "id", 0) or 0)
+            if not folder_id:
+                continue
+            title = getattr(getattr(item, "title", None), "text", None) or str(getattr(item, "title", "") or "Папка")
             result.append(
                 {
-                    "id": dialog.id,
+                    "id": folder_id,
                     "title": title,
-                    # Ник отдаём кабинету: по нему чат подписан в списке, и выбор
-                    # мышью уезжает в задачу как @username, а не «голым» id —
-                    # такую ссылку resolve_chat находит и без списка диалогов.
-                    "username": getattr(entity, "username", None) or "",
-                    "is_channel": bool(getattr(entity, "broadcast", False)),
-                    "is_group": bool(getattr(entity, "megagroup", False)),
-                    # Флаги для уведомлений из диалогов: задача читает их из
-                    # этого же кэша, а не ходит в Telegram ради каждого письма.
-                    "is_bot": bool(getattr(entity, "bot", False)),
-                    "archived": bool(getattr(dialog, "archived", False)),
-                    "muted": _dialog_muted(dialog),
+                    "system": False,
+                    "include_peers": [_peer_id(peer) for peer in (getattr(item, "include_peers", None) or [])],
+                    "exclude_peers": [_peer_id(peer) for peer in (getattr(item, "exclude_peers", None) or [])],
+                    "contacts": bool(getattr(item, "contacts", False)),
+                    "non_contacts": bool(getattr(item, "non_contacts", False)),
+                    "groups": bool(getattr(item, "groups", False)),
+                    "broadcasts": bool(getattr(item, "broadcasts", False)),
+                    "bots": bool(getattr(item, "bots", False)),
+                    "exclude_muted": bool(getattr(item, "exclude_muted", False)),
+                    "exclude_read": bool(getattr(item, "exclude_read", False)),
+                    "exclude_archived": bool(getattr(item, "exclude_archived", False)),
                 }
             )
-        # В кэш идёт только полный обход: обрезанным списком потом ответили бы на
-        # запрос «все чаты», и часть чатов пропала бы на целую минуту.
-        if limit <= 0:
-            self._dialogs_cache[account_id] = (time.time(), list(result))
-        return result
+        self._dialog_folders_cache[account_id] = (time.time(), result)
+        return [dict(item) for item in result]
 
     def forget_dialogs(self, account_id: int | None = None) -> None:
-        """Забыть кэш чатов: вступили в новый чат — он должен появиться сразу."""
+        """Забыть кэш чатов и папок: после вступления новый чат виден сразу."""
         if account_id is None:
             self._dialogs_cache.clear()
+            self._dialog_folders_cache.clear()
         else:
             self._dialogs_cache.pop(account_id, None)
+            self._dialog_folders_cache.pop(account_id, None)
 
     async def resolve_chat(self, account_id: int, query: str) -> tuple[int, str] | None:
         """Находит чат по @username, ссылке t.me, числовому id или названию.
@@ -1381,6 +1485,107 @@ class ClientManager:
             except Exception as exc:  # noqa: BLE001 — планировщик не должен падать
                 logger.exception("Планировщик рассылок упал: {}", exc)
 
+    async def _prepare_mailing_links(self, rule: RuleSnapshot, client: Any) -> bool:
+        """Вступает по сохранённым ссылкам перед первым сообщением рассылки.
+
+        Ссылки хранятся в задаче, поэтому рестарт не теряет их. Здесь же
+        раскрываем их в реальные chat id, обновляем кэш диалогов и сохраняем
+        результат. Отказ в доступе, приватность, заявка администратору и «уже
+        участник» — штатные результаты с понятным отчётом, а не падение задачи.
+        """
+        from app.telegram_client.jobs import (
+            JOIN_PAUSE_SECONDS,
+            JoinOutcome,
+            _join_all,
+            explicit_join_target,
+            _join_summary,
+        )
+
+        conf = rule.filters
+        links = [str(item).strip() for item in (getattr(conf, "subscribe_to", None) or []) if str(item).strip()]
+        if not links or getattr(conf, "subscribe_done", False):
+            return True
+        targets: list[str] = []
+        for link in links:
+            target = explicit_join_target(link)
+            if target and target not in targets:
+                targets.append(target)
+        if not targets:
+            conf.subscribe_done = True
+            return True
+
+        gap = max(0, int(getattr(conf, "join_gap", JOIN_PAUSE_SECONDS) or 0))
+        retries = max(0, int(getattr(conf, "join_retries", 0) or 0))
+        daily = max(0, int(getattr(conf, "daily_join_limit", 0) or 0))
+        stop_at: int | None = None
+        if daily > 0:
+            async with SessionLocal() as session:
+                already = await repo.count_joins_today(session, rule.id)
+            if already >= daily:
+                conf.subscribe_report = {"total": len(targets), "joined": 0, "already": 0,
+                                         "problems": [], "limited": True}
+                async with session_scope() as session:
+                    stored = await repo.get_rule(session, rule.id, rule.user_id)
+                    if stored is not None:
+                        raw = dict(stored.filters or {})
+                        raw.update(conf.to_dict())
+                        stored.filters = raw
+                        await session.commit()
+                # До завтра ссылки остаются pending, а не превращаются в ложный
+                # успех. Планировщик сам повторит подготовку после not_before.
+                return False
+            stop_at = daily - already
+
+        outcome = JoinOutcome()
+        await _join_all(
+            client, targets, outcome, rule=rule, gap=gap, retries=retries, stop_at=stop_at
+        )
+        if outcome.limited:
+            conf.subscribe_report = _join_summary(outcome, len(targets))
+            return False
+
+        # Вступление изменило диалоги аккаунта: старый кэш не должен скрыть новый
+        # канал от resolve_many.
+        self.forget_dialogs(rule.account_id)
+        found = await self.resolve_many(rule.account_id, targets)
+        current = set()
+        try:
+            from app.telegram_client.jobs import mailing_recipients
+            current = set(mailing_recipients(rule))
+        except Exception:  # pragma: no cover - защитный путь для старых снимков
+            current = set()
+        names: dict[str, str] = {}
+        added: list[int] = []
+        for target in targets:
+            pair = found.get(target)
+            if not pair or pair[0] in current:
+                continue
+            chat_id, title = pair
+            if not rule.target_id:
+                rule.target_id, rule.target_title = int(chat_id), str(title)
+            else:
+                conf.targets = [*list(conf.targets or []), int(chat_id)]
+            current.add(int(chat_id))
+            added.append(int(chat_id))
+            names[str(chat_id)] = str(title)
+        conf.subscribe_report = {**_join_summary(outcome, len(targets)), "added": len(added)}
+        conf.subscribe_done = True
+        # FilterConfig deliberately contains only stable settings; chat_titles is
+        # an older free-form JSON key, so preserve it through the database merge.
+        async with session_scope() as session:
+            stored = await repo.get_rule(session, rule.id, rule.user_id)
+            if stored is not None:
+                stored.target_id = int(rule.target_id or 0)
+                stored.target_title = rule.target_title or ""
+                raw = dict(stored.filters or {})
+                raw.update(conf.to_dict())
+                titles = dict(raw.get("chat_titles") or {})
+                titles.update(names)
+                raw["chat_titles"] = titles
+                stored.filters = raw
+                await session.commit()
+        return bool(current)
+
     async def _mailing_tick(self) -> None:
         """Один проход: каждой рассылке, которой пора, — по одному сообщению.
 
@@ -1420,25 +1625,32 @@ class ClientManager:
             if client is None or not client.is_connected():
                 continue
 
+            # Тихие часы проверяем до создания состояния: рассылка вне окна
+            # действительно ничего не меняет и после рестарта не оставляет пустой
+            # служебный хвост в памяти.
+            if not window_allows(rule.filters):
+                continue
+            st = self._mailing_state.setdefault(
+                rule.id,
+                {"pos": None, "cycle": 0, "due": 0.0, "not_before": 0.0,
+                 "checked": 0.0, "allowed": False},
+            )
+            # Явные ссылки из формы — единственный источник автоподписки. До
+            # этой точки ничего из текста сообщений не разбираем как ссылку.
+            if getattr(rule.filters, "subscribe_to", None) and not getattr(rule.filters, "subscribe_done", False):
+                try:
+                    ready = await self._prepare_mailing_links(rule, client)
+                except FloodWaitError as exc:
+                    wait = int(getattr(exc, "seconds", 60)) + 1
+                    st["not_before"] = time.time() + wait
+                    logger.warning("Рассылка #{}: вступление просит подождать {} сек", rule.id, wait)
+                    continue
+                if not ready:
+                    st["not_before"] = tomorrow_ts()
+                    continue
             recipients = mailing_recipients(rule)
             if not recipients:
                 continue
-            # Тихие часы: круг не бросаем, а ждём — позиция живёт в счётчике
-            # и никуда не денется, следующий тик в окне продолжит с того же чата.
-            if not window_allows(rule.filters):
-                continue
-
-            st = self._mailing_state.setdefault(
-                rule.id,
-                {
-                    "pos": None,
-                    "cycle": 0,
-                    "due": 0.0,
-                    "not_before": 0.0,
-                    "checked": 0.0,
-                    "allowed": False,
-                },
-            )
             # not_before — пауза после FloodWait или сбоя; due — плановое время
             # следующей отправки (0 означает «ещё не отправляли»).
             if now < st["not_before"] or (st["due"] and now < st["due"]):
@@ -1455,7 +1667,10 @@ class ClientManager:
                     rule.forwarded_count, len(recipients)
                 )
 
-            repeats = max(0, int(rule.filters.repeats or 0))
+            repeat_forever = bool(getattr(rule.filters, "repeat_forever", False))
+            # Старые задачи с repeats=0 уже означали бесконечный режим. Новая
+            # галочка делает это намерение явным, но не ломает совместимость.
+            repeats = 0 if repeat_forever else max(0, int(rule.filters.repeats or 0))
             if repeats and st["cycle"] >= repeats:
                 await self._finish_mailing(rule, st["cycle"])
                 continue

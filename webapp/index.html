@@ -3,7 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#0A0510">
+  <meta name="theme-color" content="#080A12">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="ДОЧА — спокойный кабинет автоматизаций Telegram">
   <title>ДОЧА · Кабинет автоматизаций</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link rel="stylesheet" href="styles.css">
@@ -207,6 +209,7 @@
                autocomplete="off" aria-label="Поиск чата">
       </div>
       <div class="chips" id="chatTags"></div>
+      <div class="folder-chips" id="chatFolders" hidden aria-label="Папки Telegram"></div>
       <div class="chats-hint">
         Нажмите на чаты, чтобы выбрать — снизу появится панель действий.
       </div>
@@ -339,7 +342,7 @@
          свои сообщения обеих задач лежат здесь, а не в настройках задачи. -->
     <section class="tab hidden" id="tab-library" aria-label="Библиотека сообщений">
       <div class="screen__title">Библиотека сообщений</div>
-      <div class="screen__sub">Тексты, которые шлют «Рассылка по очереди» и «Постинг по расписанию». Сохранили один раз — дальше выбираете мышкой в любой задаче.</div>
+      <div class="screen__sub">Тексты для рассылки и постинга. Добавляйте их здесь или просто напишите сообщение в задаче — кабинет сохранит его сюда автоматически.</div>
 
       <div class="card">
         <label class="field">
@@ -425,6 +428,13 @@
       </div>
       <div class="form">
         <div class="sheet__lead" id="taskSheetLead"></div>
+        <div class="task-draft" id="taskDraftBar" hidden>
+          <div class="task-draft__copy"><span class="task-draft__dot"></span><span id="taskDraftText">Найден черновик</span></div>
+          <div class="task-draft__actions">
+            <button class="btn btn--sm btn--primary" type="button" id="taskDraftRestore">Восстановить</button>
+            <button class="btn btn--sm btn--ghost" type="button" id="taskDraftDiscard">Удалить</button>
+          </div>
+        </div>
         <div id="taskFields"></div>
         <div class="hint" id="taskHint"></div>
         <!-- Лучшее время для постинга: пик активности ленты за 14 дней.
@@ -505,6 +515,7 @@
           <input type="text" id="pickerSearch" placeholder="Название или @username"
                  autocomplete="off" aria-label="Поиск чата">
         </div>
+        <div class="folder-chips" id="pickerFolders" hidden aria-label="Папки Telegram"></div>
         <div class="sheet__lead" id="pickerLead"></div>
         <!-- Отметить весь список сразу: постить и рассылать можно в любое число
              чатов, и на сотне чатов «выбрать все» — единственный разумный путь.
@@ -530,6 +541,13 @@
       <div class="sheet__head">
         <div class="sheet__title" id="loginTitle">Подключение аккаунта</div>
         <button class="icon-btn" data-close aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="login__hero" aria-hidden="true">
+        <div class="login__hero-icon"><svg class="ic"><use href="#i-shield"/></svg></div>
+        <div>
+          <div class="login__hero-title">Безопасное подключение</div>
+          <div class="login__hero-sub">номер <span>→</span> код <span>→</span> аккаунт</div>
+        </div>
       </div>
       <div class="form">
         <ol class="steps" id="loginSteps">
@@ -584,6 +602,21 @@
         <div class="login__aside">
           <button class="btn" id="qrToPhone">Войти по номеру</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sheet sheet--over" id="confirmSheet" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <div class="sheet__backdrop" data-confirm-close></div>
+    <div class="sheet__panel confirm__panel">
+      <div class="sheet__head">
+        <div class="sheet__title" id="confirmTitle">Подтвердите действие</div>
+        <button class="icon-btn" type="button" data-confirm-close aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="confirm__text" id="confirmText"></div>
+      <div class="confirm__actions">
+        <button class="btn" type="button" id="confirmCancel">Отмена</button>
+        <button class="btn btn--danger" type="button" id="confirmOk">Удалить</button>
       </div>
     </div>
   </div>

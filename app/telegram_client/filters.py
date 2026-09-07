@@ -32,6 +32,10 @@ def default_filters() -> dict:
         # ── Ниже — настройки задач из app.telegram_client.jobs ──
         "targets": [],          # рассылка: доп. получатели (кроме rule.target_id)
         "subscribe_to": [],     # автоподписка: @username или ссылки, куда вступаем
+        "subscribe_done": False, # mailing: явные ссылки уже обработаны перед первым кругом
+        "subscribe_report": {},  # mailing/autosubscribe: понятный итог вступления
+        "folder_ids": [],        # папки Telegram, раскрытые в конкретные chat id
+        "folder_titles": {},     # названия папок для карточки задачи
         "reaction": "👍",       # байтинг: чем реагируем
         "target_user_id": 0,    # байтинг/мут: за кем следим (0 — за всеми)
         "keywords": [],         # ловец чеков и уведомления: слова-триггеры
@@ -42,6 +46,7 @@ def default_filters() -> dict:
         "cycle_seconds": 10,    # пауза перед следующим кругом рассылки
         "cycle_jitter": 0,      # к паузе между кругами добавляем 0..N секунд
         "repeats": 0,           # сколько кругов сделать (0 — без лимита)
+        "repeat_forever": False, # пользователь явно включил бесконечный режим
         "typing": False,        # показывать «печатает» перед отправкой
         "link_preview": False,  # оставлять блок предпросмотра ссылки
         "random_pick": False,   # брать из набора случайное сообщение, а не по кругу
@@ -90,6 +95,10 @@ class FilterConfig:
     # Настройки задач из app.telegram_client.jobs
     targets: list[int] = field(default_factory=list)
     subscribe_to: list[str] = field(default_factory=list)
+    subscribe_done: bool = False
+    subscribe_report: dict = field(default_factory=dict)
+    folder_ids: list[int] = field(default_factory=list)
+    folder_titles: dict = field(default_factory=dict)
     reaction: str = "👍"
     target_user_id: int = 0
     keywords: list[str] = field(default_factory=list)
@@ -135,6 +144,7 @@ class FilterConfig:
     # Кругов по умолчанию нет предела: настройка не задана — значит рассылка
     # крутится, пока её не остановят. Число кругов приходит из кабинета явно.
     repeats: int = 0  # сколько кругов (0 — без лимита)
+    repeat_forever: bool = False  # явный переключатель бесконечного режима
     typing: bool = False  # показывать «печатает»
     link_preview: bool = False  # оставлять предпросмотр ссылки
     random_pick: bool = False  # случайное сообщение из набора
@@ -188,6 +198,10 @@ class FilterConfig:
             "mod_strikes": self.mod_strikes,
             "targets": self.targets,
             "subscribe_to": self.subscribe_to,
+            "subscribe_done": self.subscribe_done,
+            "subscribe_report": self.subscribe_report,
+            "folder_ids": self.folder_ids,
+            "folder_titles": self.folder_titles,
             "reaction": self.reaction,
             "target_user_id": self.target_user_id,
             "keywords": self.keywords,
@@ -220,6 +234,7 @@ class FilterConfig:
             "cycle_seconds": self.cycle_seconds,
             "cycle_jitter": self.cycle_jitter,
             "repeats": self.repeats,
+            "repeat_forever": self.repeat_forever,
             "typing": self.typing,
             "link_preview": self.link_preview,
             "random_pick": self.random_pick,

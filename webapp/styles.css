@@ -1996,3 +1996,706 @@ button { border: none; background: none; cursor: pointer; }
 /* В шторке входа теперь четыре боковые кнопки — в ряд не влезут. */
 .login__aside { flex-wrap: wrap; }
 .login__aside .btn { flex: 1 1 40%; }
+
+/* Telegram folders: fetched from the account, never hand-maintained in the app. */
+.folder-chips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 0 10px;
+  scrollbar-width: none;
+}
+.folder-chips::-webkit-scrollbar { display: none; }
+.folder-chip {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--line, #e5e7eb);
+  border-radius: 999px;
+  padding: 8px 11px;
+  background: var(--surface, #fff);
+  color: var(--muted, #6b7280);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: .16s ease;
+}
+.folder-chip span { color: var(--accent, #6d5dfc); font-size: 14px; }
+.folder-chip b { color: var(--text, #111827); font-size: 11px; font-weight: 700; }
+.folder-chip.is-active,
+.folder-chip.is-picked {
+  color: var(--text, #111827);
+  border-color: color-mix(in srgb, var(--accent, #6d5dfc) 55%, white);
+  background: color-mix(in srgb, var(--accent, #6d5dfc) 10%, white);
+}
+.folder-chip.is-picked::after { content: '✓'; color: var(--accent, #6d5dfc); font-weight: 800; }
+
+
+.preflight {
+  display: flex; align-items: center; gap: 7px; margin-top: 7px;
+  color: var(--muted, #6b7280); font-size: 11px; line-height: 1.35;
+}
+.preflight.is-warning { color: #9a6400; }
+.preflight__dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #39a96b; }
+.preflight.is-warning .preflight__dot { background: #d99520; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   VISUAL POLISH · DОЧА 2.0
+   Спокойнее, чище и дороже: единый ритм, более матовые поверхности,
+   аккуратные состояния наведения и нормальная desktop-композиция.
+   Всё ниже — слой оформления поверх функциональных правил выше.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --bg: #080a12;
+  --bg-soft: #0e1220;
+  --card: #121726;
+  --card-hi: #182036;
+  --glass: rgba(255, 255, 255, 0.055);
+  --text: #f7f8fc;
+  --muted: #9ca7bd;
+  --line: rgba(197, 210, 241, 0.13);
+  --line-hi: rgba(239, 112, 177, 0.46);
+  --accent: #f06cad;
+  --accent-2: #9a78ff;
+  --accent-soft: rgba(240, 108, 173, 0.13);
+  --accent-grad: linear-gradient(135deg, #f47bb8 0%, #9a78ff 100%);
+  --violet: #9a78ff;
+  --blue: #6c9cff;
+  --cyan: #55d8ef;
+  --teal: #49d8bf;
+  --green: #4ed7a1;
+  --orange: #f5bd62;
+  --red: #ff718a;
+  --radius: 18px;
+  --radius-sm: 13px;
+  --radius-lg: 26px;
+  --glow: 0 12px 32px rgba(240, 108, 173, 0.22);
+  --glow-soft: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+html { background: var(--bg); }
+
+body {
+  background:
+    radial-gradient(90% 48% at 50% -8%, rgba(154, 120, 255, 0.17), transparent 68%),
+    radial-gradient(68% 42% at 100% 20%, rgba(240, 108, 173, 0.10), transparent 72%),
+    linear-gradient(180deg, #0c0e19 0%, #080a12 58%, #06070d 100%);
+  letter-spacing: 0.002em;
+}
+
+body::before {
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.014) 1px, transparent 1px),
+    radial-gradient(65% 35% at 4% 92%, rgba(154, 120, 255, 0.10), transparent 72%),
+    radial-gradient(58% 34% at 100% 92%, rgba(240, 108, 173, 0.08), transparent 72%);
+  background-size: 32px 32px, 32px 32px, auto, auto;
+  opacity: 0.52;
+}
+
+/* На широком экране кабинет не растягивается в пустоту, а остаётся аккуратной
+   рабочей колонкой. На телефоне эти ограничения не меняют поведение. */
+.header,
+.content {
+  width: 100%;
+  max-width: 760px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.header {
+  padding: 13px 18px;
+  background: rgba(10, 12, 22, 0.78);
+  border-bottom-color: rgba(197, 210, 241, 0.10);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+}
+
+.header__left { gap: 11px; }
+.header__title { letter-spacing: 0.19em; }
+.header__sub { color: #8f9ab2; }
+.header .avatar {
+  width: 36px;
+  height: 36px;
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.28);
+}
+
+.icon-btn {
+  width: 40px;
+  height: 40px;
+  border-color: rgba(197, 210, 241, 0.16);
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.icon-btn:hover { border-color: var(--line-hi); background: rgba(240, 108, 173, 0.12); }
+
+.content { padding-left: 18px; padding-right: 18px; }
+.content--float { padding-left: 18px; padding-right: 18px; }
+
+.screen__title { font-size: 28px; letter-spacing: -0.025em; }
+.screen__sub { max-width: 620px; color: #96a1b8; line-height: 1.52; }
+.section-label { margin-top: 24px; color: #8f9bb4; letter-spacing: 0.20em; }
+.section-label::before { color: var(--accent); text-shadow: 0 0 10px rgba(240, 108, 173, 0.65); }
+
+/* Герой стал заголовком раздела, а не отдельным рекламным экраном. */
+.hero {
+  --hero-h: 286px;
+  margin: -14px -18px 18px;
+  padding: 24px 22px 22px;
+  background:
+    radial-gradient(72% 75% at 76% 22%, rgba(240, 108, 173, 0.26), transparent 70%),
+    linear-gradient(165deg, #24213b 0%, #151525 56%, #0b0d17 100%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.hero__art { opacity: 0.80; filter: saturate(0.88) contrast(1.03); }
+.hero::after {
+  background:
+    linear-gradient(90deg, rgba(8, 10, 18, 0.76) 0%, rgba(8, 10, 18, 0.18) 64%, rgba(8, 10, 18, 0.08) 100%),
+    linear-gradient(180deg, rgba(8, 10, 18, 0.04) 0%, rgba(8, 10, 18, 0.68) 70%, #080a12 100%);
+}
+.hero__mark svg { filter: drop-shadow(0 8px 22px rgba(240, 108, 173, 0.34)); }
+.hero__name { font-size: 32px; letter-spacing: 0.12em; }
+.hero__tag { color: #d7c3d7; text-shadow: none; }
+.hero__online {
+  margin-top: 14px;
+  border-color: rgba(78, 215, 161, 0.32);
+  background: rgba(7, 12, 16, 0.48);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+
+.stats { gap: 10px; margin-bottom: 18px; }
+.stat {
+  min-height: 66px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 11px 8px;
+  border-color: rgba(197, 210, 241, 0.14);
+  background: linear-gradient(180deg, rgba(24, 32, 54, 0.86), rgba(15, 20, 34, 0.86));
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+.stat__value { font-size: 19px; }
+.stat__label { color: #8f9bb3; }
+
+.prompt,
+.search {
+  min-height: 50px;
+  border-color: rgba(197, 210, 241, 0.15);
+  background: rgba(17, 22, 38, 0.86);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+.prompt:focus-within,
+.search:focus-within {
+  border-color: rgba(240, 108, 173, 0.62);
+  box-shadow: 0 0 0 4px rgba(240, 108, 173, 0.10), 0 10px 24px rgba(0, 0, 0, 0.20);
+}
+.prompt__go { box-shadow: 0 8px 22px rgba(240, 108, 173, 0.26); }
+
+.tile,
+.card,
+.card--cmd,
+.task,
+.chat,
+.lib,
+.account,
+.setting,
+.template,
+.wizard,
+.chart,
+.empty,
+.state {
+  border-color: rgba(197, 210, 241, 0.13);
+  background: linear-gradient(180deg, rgba(24, 32, 54, 0.88), rgba(15, 20, 34, 0.88));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.20), inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+.tile:hover,
+.card--cmd:hover,
+.template:hover,
+.setting:hover,
+.chat:hover,
+.account:hover,
+.lib:hover {
+  border-color: rgba(240, 108, 173, 0.42);
+  background: linear-gradient(180deg, rgba(31, 40, 67, 0.92), rgba(17, 23, 40, 0.92));
+  transform: translateY(-1px);
+}
+
+.tile:active,
+.card--cmd:active,
+.template:active,
+.setting:active,
+.chat:active,
+.account:active,
+.lib:active { transform: translateY(0) scale(0.985); }
+
+.tile { min-height: 96px; padding: 14px 5px 12px; }
+.tile__ico { box-shadow: 0 7px 16px rgba(0, 0, 0, 0.18); }
+.tile__name { color: #b7c0d2; }
+.tile--hit { box-shadow: 0 0 0 1px rgba(240, 108, 173, 0.18), 0 10px 28px rgba(240, 108, 173, 0.16); }
+
+.chips { gap: 7px; margin-top: 14px; }
+.chip {
+  padding: 8px 14px;
+  border-color: rgba(197, 210, 241, 0.14);
+  background: rgba(18, 23, 39, 0.82);
+}
+.chip:hover { border-color: rgba(240, 108, 173, 0.42); color: var(--text); }
+.chip.is-active { box-shadow: 0 7px 18px rgba(240, 108, 173, 0.22); }
+
+.segmented {
+  gap: 5px;
+  border-color: rgba(197, 210, 241, 0.14);
+  background: rgba(13, 17, 29, 0.86);
+}
+.seg.is-active { box-shadow: 0 6px 18px rgba(240, 108, 173, 0.22); }
+
+/* Кнопки воспринимаются как один язык: высота, радиус и hover одинаковы. */
+.btn {
+  min-height: 42px;
+  padding: 10px 15px;
+  border-color: rgba(197, 210, 241, 0.15);
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+.btn:hover { border-color: rgba(240, 108, 173, 0.50); background: rgba(240, 108, 173, 0.10); }
+.btn--primary:hover { border-color: transparent; background: linear-gradient(135deg, #fb86c0 0%, #aa8aff 100%); box-shadow: 0 10px 26px rgba(240, 108, 173, 0.30); }
+.btn--danger:hover { background: rgba(255, 113, 138, 0.16); }
+.btn--block { min-height: 46px; }
+.btn--big { min-height: 50px; letter-spacing: 0.08em; }
+
+.cta {
+  box-shadow: 0 14px 32px rgba(240, 108, 173, 0.20);
+}
+
+.task { padding: 14px 15px 13px; }
+.task__ico { box-shadow: 0 7px 17px rgba(0, 0, 0, 0.18); }
+.task__title, .cmd__title, .card__title { letter-spacing: -0.005em; }
+.task__actions { padding-top: 2px; border-top: 1px solid rgba(197, 210, 241, 0.08); }
+
+.chat { padding: 12px 13px; }
+.chat.is-selected { border-color: rgba(240, 108, 173, 0.66); background: linear-gradient(90deg, rgba(240, 108, 173, 0.13), rgba(154, 120, 255, 0.08)); box-shadow: inset 0 0 0 1px rgba(240, 108, 173, 0.12); }
+.chat__check { border-color: rgba(197, 210, 241, 0.34); }
+
+.folder-chips { padding-top: 4px; padding-bottom: 12px; }
+.folder-chip {
+  padding: 8px 12px;
+  border-color: rgba(197, 210, 241, 0.15);
+  background: rgba(18, 23, 39, 0.82);
+  color: #9ca7bd;
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.14);
+}
+.folder-chip span { color: #f08cbd; }
+.folder-chip b { color: #dbe1ee; }
+.folder-chip:hover { border-color: rgba(240, 108, 173, 0.45); color: var(--text); }
+.folder-chip.is-active,
+.folder-chip.is-picked {
+  color: #fff;
+  border-color: rgba(240, 108, 173, 0.62);
+  background: linear-gradient(135deg, rgba(240, 108, 173, 0.18), rgba(154, 120, 255, 0.14));
+  box-shadow: 0 7px 18px rgba(240, 108, 173, 0.14);
+}
+.folder-chip.is-picked::after { color: #ffc4df; }
+
+.chat-bar {
+  max-width: 740px;
+  margin: 0 auto;
+  border-color: rgba(240, 108, 173, 0.42);
+  background: rgba(16, 20, 34, 0.94);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.46), 0 0 0 1px rgba(154, 120, 255, 0.08);
+}
+
+.fab { box-shadow: 0 12px 28px rgba(240, 108, 173, 0.30); }
+
+/* Поля стали похожи на настоящую форму, а не на голые строки текста. */
+.field input,
+.field textarea,
+.field select,
+.creds input,
+.sched__at,
+.sched__text,
+.promo__input {
+  border-color: rgba(197, 210, 241, 0.16);
+  background: rgba(8, 11, 20, 0.42);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+.field input:hover,
+.field textarea:hover,
+.field select:hover,
+.creds input:hover { border-color: rgba(240, 108, 173, 0.34); }
+.field input:focus,
+.field textarea:focus,
+.field select:focus,
+.creds input:focus { border-color: rgba(240, 108, 173, 0.75); box-shadow: 0 0 0 4px rgba(240, 108, 173, 0.09); }
+.field__note { color: #8995ad; }
+.field--check { padding: 10px 12px; border: 1px solid rgba(197, 210, 241, 0.12); border-radius: var(--radius-sm); background: rgba(255, 255, 255, 0.035); }
+.field--check .field__note { padding-left: 30px; }
+.btn--pick { background: rgba(240, 108, 173, 0.10); }
+
+.sheet__backdrop { background: rgba(3, 5, 11, 0.78); backdrop-filter: blur(8px); }
+.sheet__panel {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 18px 18px calc(24px + env(safe-area-inset-bottom));
+  border-top-color: rgba(240, 108, 173, 0.40);
+  background: linear-gradient(180deg, #171d31 0%, #0d111d 100%);
+  box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.58);
+}
+.sheet__panel::before {
+  content: "";
+  display: block;
+  width: 42px;
+  height: 4px;
+  margin: -4px auto 16px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.20);
+}
+.sheet__title { font-size: 18px; letter-spacing: -0.01em; }
+.sheet__lead { color: #9ca7bd; line-height: 1.5; }
+
+.steps__item { color: #7f8ba3; }
+.steps__item.is-current { color: var(--text); }
+.steps__item.is-current::before { box-shadow: 0 0 0 4px rgba(240, 108, 173, 0.10), 0 0 18px rgba(240, 108, 173, 0.30); }
+
+.mode {
+  border-color: rgba(197, 210, 241, 0.14);
+  background: rgba(255, 255, 255, 0.045);
+}
+.mode:hover { border-color: rgba(240, 108, 173, 0.45); }
+.mode.is-active { border-color: rgba(240, 108, 173, 0.62); box-shadow: 0 10px 28px rgba(240, 108, 173, 0.16); }
+
+.picks .pick { background: linear-gradient(135deg, rgba(240, 108, 173, 0.16), rgba(154, 120, 255, 0.12)); }
+.preflight { color: #96a1b8; }
+.preflight.is-warning { color: #f2c16b; }
+.preflight__dot { background: var(--green); box-shadow: 0 0 8px rgba(78, 215, 161, 0.55); }
+.preflight.is-warning .preflight__dot { background: var(--orange); }
+
+.nav {
+  max-width: 760px;
+  left: 50%;
+  right: auto;
+  width: 100%;
+  transform: translateX(-50%);
+  background: rgba(10, 13, 23, 0.88);
+  border-top-color: rgba(197, 210, 241, 0.12);
+  box-shadow: 0 -12px 34px rgba(0, 0, 0, 0.24);
+}
+.nav__item:hover { color: #e7b2d0; }
+.nav__item.is-active { color: #f47bb8; }
+.nav__crown button { box-shadow: 0 0 0 5px rgba(8, 10, 18, 0.96), 0 12px 30px rgba(240, 108, 173, 0.34); }
+
+.toast {
+  border-color: rgba(240, 108, 173, 0.46);
+  background: rgba(20, 26, 43, 0.96);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+}
+
+.empty,
+.state { padding: 36px 22px; }
+.empty__ico { box-shadow: 0 10px 28px rgba(240, 108, 173, 0.18); }
+
+/* Больше воздуха на планшете и десктопе, но без потери плотности на телефоне. */
+@media (min-width: 700px) {
+  .content { padding-top: 22px; padding-bottom: calc(var(--nav-h) + 38px); }
+  .content--float { padding-bottom: calc(var(--nav-h) + 38px + var(--float-h, 0px)); }
+  .hero { margin-top: -22px; }
+  .tiles { gap: 12px; }
+  .cards, .list { gap: 12px; }
+  .sheet__panel { left: 50%; right: auto; width: min(760px, 100%); transform: translateX(-50%); border-left: 1px solid rgba(197, 210, 241, 0.08); border-right: 1px solid rgba(197, 210, 241, 0.08); }
+}
+
+@media (max-width: 520px) {
+  .content { padding-left: 14px; padding-right: 14px; }
+  .content--float { padding-left: 14px; padding-right: 14px; }
+  .hero { margin-left: -14px; margin-right: -14px; padding-left: 18px; padding-right: 18px; }
+  .header { padding-left: 14px; padding-right: 14px; }
+  .sheet__panel { padding-left: 14px; padding-right: 14px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile:hover, .card--cmd:hover, .template:hover, .setting:hover, .chat:hover, .account:hover, .lib:hover { transform: none; }
+}
+
+@media (min-width: 700px) {
+  /* У шторки есть своя анимация подъёма, поэтому центрирование задаём и в
+     keyframes, иначе transform анимации временно сбрасывает translateX. */
+  .sheet__panel { animation-name: sheetUpDesktop; }
+}
+
+@keyframes sheetUpDesktop {
+  from { transform: translateX(-50%) translateY(14%); opacity: 0.4; }
+  to { transform: translateX(-50%) translateY(0); opacity: 1; }
+}
+
+/* ═════════════════════════ Подключение аккаунта ═════════════════════════ */
+
+/* На первом шаге мастера это уже не «ссылка в профиль», а явная кнопка
+   запуска входа: справа сразу виден следующий шаг. */
+.wizard__step[data-auth-start] {
+  border-color: rgba(240, 108, 173, 0.56);
+  background:
+    linear-gradient(90deg, rgba(240, 108, 173, 0.13), rgba(154, 120, 255, 0.09)),
+    rgba(255, 255, 255, 0.035);
+  box-shadow: 0 10px 26px rgba(240, 108, 173, 0.11), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.wizard__step[data-auth-start]::after {
+  content: 'Открыть вход  →';
+  flex: none;
+  margin-left: auto;
+  padding: 7px 9px;
+  border-radius: 999px;
+  color: #ffd0e6;
+  background: rgba(240, 108, 173, 0.14);
+  border: 1px solid rgba(240, 108, 173, 0.24);
+  font-size: 10.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.wizard__step[data-auth-start]:hover {
+  border-color: rgba(240, 108, 173, 0.82);
+  transform: translateY(-1px);
+}
+
+.login__hero {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: -2px 0 16px;
+  padding: 12px 13px;
+  border-radius: 16px;
+  border: 1px solid rgba(197, 210, 241, 0.12);
+  background: linear-gradient(100deg, rgba(240, 108, 173, 0.10), rgba(154, 120, 255, 0.08));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.login__hero-icon {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 13px;
+  color: #ffe5f2;
+  background: var(--accent-grad);
+  box-shadow: 0 8px 20px rgba(240, 108, 173, 0.24);
+}
+.login__hero-icon .ic { width: 21px; height: 21px; }
+.login__hero-title { font-size: 14px; font-weight: 700; color: var(--text); }
+.login__hero-sub { margin-top: 3px; font-size: 11.5px; color: #aeb8cb; }
+.login__hero-sub span { margin: 0 4px; color: #f39bc4; }
+
+#loginSheet .form { gap: 14px; }
+#loginSheet .sheet__lead { margin: -2px 0 0; line-height: 1.52; }
+#loginSheet .field > span {
+  color: #c6cede;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+#loginSheet #loginInput {
+  min-height: 56px;
+  font-size: 18px;
+  letter-spacing: 0.025em;
+  background: rgba(7, 10, 18, 0.54);
+}
+#loginSheet[data-login-stage="phone"] #loginInput { font-variant-numeric: tabular-nums; }
+#loginSheet[data-login-stage="code"] #loginInput {
+  text-align: center;
+  font-size: 24px;
+  font-weight: 750;
+  letter-spacing: 0.34em;
+  padding-left: 0.34em;
+  font-variant-numeric: tabular-nums;
+}
+#loginSheet[data-login-stage="password"] #loginInput { letter-spacing: 0.08em; }
+#loginSheet #loginNote {
+  display: block;
+  margin-top: 2px;
+  padding: 9px 10px;
+  border-radius: 11px;
+  color: #aeb8cb;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(197, 210, 241, 0.10);
+  line-height: 1.42;
+}
+#loginSheet #loginError:not(:empty) {
+  min-height: auto;
+  padding: 10px 11px;
+  border-radius: 11px;
+  color: #ffbdc8;
+  background: rgba(255, 113, 138, 0.10);
+  border: 1px solid rgba(255, 113, 138, 0.28);
+}
+#loginSheet #loginSubmit {
+  min-height: 52px;
+  font-size: 14.5px;
+  box-shadow: 0 12px 28px rgba(240, 108, 173, 0.24);
+}
+#loginSheet .login__aside { margin-top: 1px; }
+#loginSheet .login__aside .btn { min-height: 38px; padding: 8px 10px; font-size: 11.5px; }
+#loginSheet .creds {
+  padding: 10px 11px;
+  border-radius: 12px;
+  border: 1px solid rgba(197, 210, 241, 0.10);
+  background: rgba(255, 255, 255, 0.025);
+}
+#loginSheet .creds summary { color: #aeb8cb; }
+
+@media (max-width: 460px) {
+  .wizard__step[data-auth-start]::after { padding: 6px 7px; font-size: 9.5px; }
+  .wizard__step[data-auth-start] { gap: 8px; }
+  .login__hero { padding: 11px; }
+  #loginSheet .login__aside .btn { flex-basis: 46%; }
+}
+
+/* ═════════════════════ Библиотека сообщений · polish ═════════════════════ */
+#tab-library > .screen__sub { max-width: 650px; }
+#tab-library > .card {
+  padding: 16px;
+  border-color: rgba(240, 108, 173, 0.22);
+  background:
+    radial-gradient(90% 90% at 100% 0%, rgba(154, 120, 255, 0.10), transparent 60%),
+    linear-gradient(180deg, rgba(24, 32, 54, 0.92), rgba(15, 20, 34, 0.92));
+}
+#tab-library #libraryText {
+  min-height: 132px;
+  padding: 14px;
+  font-size: 15px;
+  line-height: 1.55;
+}
+#tab-library #libraryAdd { margin-top: 2px; }
+#tab-library #libraryList { gap: 10px; }
+#tab-library .lib {
+  min-width: 0;
+  padding: 14px;
+  align-items: center;
+}
+#tab-library .lib__body { min-width: 0; }
+#tab-library .lib__title { font-size: 14px; line-height: 1.35; white-space: normal; }
+#tab-library .lib__text { margin-top: 5px; color: #aab5c9; }
+#tab-library .lib__acts { gap: 6px; }
+#tab-library .lib__del {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(197, 210, 241, 0.15);
+  border-radius: 11px;
+  color: #aab5c9;
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.045);
+}
+#tab-library .lib__del:hover { color: var(--text); border-color: rgba(240, 108, 173, 0.48); background: rgba(240, 108, 173, 0.12); }
+#tab-library .lib__del[data-action="delete-library"] { color: #ff9aaa; border-color: rgba(255, 113, 138, 0.22); }
+#tab-library .lib__del[data-action="delete-library"]:hover { color: #ffd2d9; border-color: rgba(255, 113, 138, 0.60); background: rgba(255, 113, 138, 0.14); }
+#tab-library .lib__use { color: #e9a9cd; }
+#tab-library .lib__cancel { margin-top: 9px; }
+#tab-library .empty { padding-top: 42px; padding-bottom: 42px; }
+
+@media (max-width: 390px) {
+  #tab-library .lib { align-items: flex-start; }
+  #tab-library .lib__acts { flex-direction: column; }
+  #tab-library .lib__del { width: 36px; height: 36px; }
+}
+
+/* Подтверждение удаления/отключения — собственная компактная шторка. */
+#confirmSheet { z-index: 95; }
+#confirmSheet .confirm__panel {
+  max-width: 520px;
+  border-top-color: rgba(255, 113, 138, 0.42);
+  background: linear-gradient(180deg, #1b2034 0%, #0f131f 100%);
+}
+.confirm__text {
+  margin: 2px 0 18px;
+  color: #b8c2d4;
+  font-size: 13.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.confirm__actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 9px; }
+.confirm__actions .btn { min-height: 46px; }
+.confirm__actions .btn--danger { color: #ffd0d7; border-color: rgba(255, 113, 138, 0.42); background: rgba(255, 113, 138, 0.14); }
+.confirm__actions .btn--danger:hover { color: #fff; border-color: rgba(255, 113, 138, 0.74); background: rgba(255, 113, 138, 0.24); }
+
+/* Персональные функции выглядят как отдельные переключатели, а не как набор
+   браузерных галочек. Это особенно важно для «без ограничений»: пользователь
+   видит, что сам управляет режимом, а не получает его скрытым значением. */
+#taskFields .field--check {
+  position: relative;
+  min-height: 54px;
+  padding: 11px 12px;
+  border-color: rgba(197, 210, 241, 0.13);
+  background: linear-gradient(100deg, rgba(255, 255, 255, 0.045), rgba(154, 120, 255, 0.035));
+}
+#taskFields .field--check:hover { border-color: rgba(240, 108, 173, 0.42); }
+#taskFields .field--check input {
+  appearance: none;
+  position: relative;
+  width: 42px;
+  height: 24px;
+  margin: 0;
+  flex: none;
+  border: 1px solid rgba(197, 210, 241, 0.28);
+  border-radius: 999px;
+  background: rgba(7, 10, 18, 0.60);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.22);
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+#taskFields .field--check input::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #aab5c9;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.28);
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+#taskFields .field--check input:checked {
+  border-color: transparent;
+  background: var(--accent-grad);
+  box-shadow: 0 5px 14px rgba(240, 108, 173, 0.22);
+}
+#taskFields .field--check input:checked::after {
+  transform: translateX(18px);
+  background: #fff;
+}
+#taskFields .field--check input:focus-visible { outline: 2px solid #f5a0c8; outline-offset: 3px; }
+#taskFields .field--check input:disabled { opacity: 0.45; }
+#taskFields .field--check:has(#task_repeat_forever) {
+  border-color: rgba(240, 108, 173, 0.34);
+  background: linear-gradient(100deg, rgba(240, 108, 173, 0.11), rgba(154, 120, 255, 0.07));
+}
+#taskFields .field--check:has(#task_repeat_forever) .field__note { color: #c3cada; }
+#taskFields #task_repeats:disabled {
+  opacity: 0.55;
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+/* Черновик формы: не теряем длинный текст, но и не навязываем восстановление. */
+.task-draft {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: -2px 0 2px;
+  padding: 10px 11px;
+  border-radius: 13px;
+  border: 1px solid rgba(240, 108, 173, 0.32);
+  background: linear-gradient(100deg, rgba(240, 108, 173, 0.11), rgba(154, 120, 255, 0.08));
+}
+.task-draft__copy { display: flex; align-items: center; gap: 8px; min-width: 0; color: #c9d0df; font-size: 12px; }
+.task-draft__dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: #f4a3c9; box-shadow: 0 0 10px rgba(240, 108, 173, 0.75); }
+.task-draft__actions { display: flex; gap: 6px; flex: none; }
+.task-draft__actions .btn { min-height: 34px; padding: 6px 9px; font-size: 11px; }
+@media (max-width: 390px) {
+  .task-draft { align-items: flex-start; flex-direction: column; }
+  .task-draft__actions { width: 100%; }
+  .task-draft__actions .btn { flex: 1; }
+}

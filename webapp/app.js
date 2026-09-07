@@ -9,6 +9,8 @@ const initData = tg ? tg.initData || '' : '';
    запросы на сервер не уходят, но переключатели и списки работают по-настоящему. */
 const DEMO = new URLSearchParams(location.search).has('demo') || !tg;
 
+let pendingConfirm = null;
+
 const state = {
   me: null,
   accounts: [],
@@ -36,6 +38,9 @@ const state = {
   botUrl: '',
   activeCommand: null, // команда, под которую сейчас собрана шторка
   editTask: null,      // задача, которую правит открытая шторка (null — создаём новую)
+  pendingDraft: null,   // черновик новой задачи, который можно восстановить вручную
+  draftTimer: null,
+  pendingAfterLogin: null, // действие, с которого пользователь начал вход
   // Ссылка на чат → его название. Форма и её итоги показывают имена, а в поле
   // лежат ссылки: у готовой задачи это числовые id, и без этой карты правка
   // предлагала бы выбирать «-1001234567890».
@@ -48,13 +53,16 @@ const state = {
   resultsTotal: 0,
   bankedDays: 0,
   chats: [],                // последний список чатов с бэка
+  chatFolderId: 0,
+  chatFolders: [],
   selectedChats: [],       // объекты выбранных чатов (полные, не только id) —
                            // иначе при поиске выборка «исчезает» с экрана,
                            // и действия над выбранным работать перестают.
   // Шторка выбора: чаты для поля формы (mode 'chats') или сохранённые
   // сообщения для рассылки (mode 'library'). Одна шторка на оба случая —
   // список с отметками и поиском у них одинаковый.
-  picker: { mode: 'chats', key: null, multi: false, chosen: [], chats: [] },
+  pickerGeneration: 0,
+  picker: { mode: 'chats', key: null, multi: false, chosen: [], chats: [], folderId: 0, folders: [], selectedFolders: [], generation: 0 },
   library: [],             // сохранённые сообщения (/api/library)
   libraryPick: [],         // id сообщений, выбранных в форме рассылки
   // Запись библиотеки, которую правят прямо сейчас: {id, post}. Правка идёт тем
@@ -64,6 +72,9 @@ const state = {
     account_login_enabled: true,
     account_login_status: 'ready',
   },
+  // Последний запрос каждого списка. Быстрый поиск и переходы по вкладкам могут
+  // дать ответы не по порядку: старый ответ не должен перезаписать свежий.
+  loadGeneration: { tasks: { active: 0, paused: 0, done: 0 }, chats: 0, library: 0, accounts: 0 },
 };
 
 /* Ключ поля из needs/optional (приходит из /api/commands) → как его нарисовать.
@@ -85,11 +96,19 @@ const FIELD_SPEC = {
     pick: 'one',
   },
   targets: {
-    label: 'Чаты',
-    placeholder: '@chan1, @chan2, t.me/+invite',
-    note: 'кнопка «выбрать» умеет отметить все чаты сразу',
+    label: 'Чаты и папки',
+    placeholder: '@chan1, @chan2 — или выберите папки ниже',
+    note: 'папки Telegram раскрываются в реальные чаты и объединяются без дублей',
     pick: 'many',
   },
+  subscribe_links: {
+    label: 'Ссылки на чаты/каналы',
+    placeholder: 'https://t.me/channel или https://t.me/+invite',
+    note: 'вступим перед первым кругом; приватные заявки и отсутствие доступа покажем как статус, не как падение',
+    control: 'textarea',
+  },
+  join_gap: { label: 'Пауза между вступлениями (сек)', control: 'number', placeholder: '2', note: 'защита Telegram, минимум не навязываем' },
+  daily_join_limit: { label: 'Лимит вступлений в сутки', control: 'number', placeholder: '0', note: '0 — без дополнительного лимита задачи; штатная защита всё равно действует' },
   target_user: { label: 'За кем следим', placeholder: '@username или ссылка на профиль' },
   keywords: {
     label: 'Ключевые слова',
@@ -144,7 +163,8 @@ const FIELD_SPEC = {
   end: { label: 'Конец (ЧЧ:ММ)', placeholder: '23:59', note: 'после этого времени круги ждут до утра' },
   gap: { label: 'Пауза между чатами (сек)', control: 'number', placeholder: '5', note: 'быстрее секунды Telegram всё равно не даст' },
   cycle: { label: 'Пауза перед новым кругом (сек)', control: 'number', placeholder: '10' },
-  repeats: { label: 'Сколько кругов', control: 'number', placeholder: '1', note: '0 — крутить без конца' },
+  repeats: { label: 'Сколько кругов', control: 'number', placeholder: '1', note: 'можно задать свой предел отправок' },
+  repeat_forever: { label: 'Без ограничений: продолжать до остановки', control: 'check', note: 'Паузы, дневной лимит и ограничения Telegram всё равно действуют.' },
   typing: { label: 'Показывать «печатает» перед отправкой', control: 'check' },
   random_pick: { label: 'Брать сообщение наугад, а не по очереди', control: 'check' },
   link_preview: { label: 'Оставлять предпросмотр ссылок', control: 'check' },
@@ -597,7 +617,7 @@ const DEMO_COMMAND_GROUPS = [
 const DEMO_COMMANDS = [
   { id: 'sender', group: 'own', kind: 'poster', kinds: ['poster', 'mailing'], emoji: '📤', title: 'Постинг и рассылка', status: 'ready',
     needs: ['account', 'targets', 'message'],
-    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview', 'pin_on_send', 'topic', 'autodelete_hours', 'mention_all', 'gap_jitter', 'cycle_jitter', 'daily_cap', 'alerts'],
+    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'pin_on_send', 'topic', 'autodelete_hours', 'mention_all', 'gap_jitter', 'cycle_jitter', 'daily_cap', 'alerts', 'subscribe_links', 'join_gap', 'daily_join_limit'],
     description: 'Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.',
     hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
     tags: ['ваш текст', 'расписание или очередь'] },
@@ -1573,14 +1593,31 @@ function demoApi(path, options = {}) {
 async function api(path, options = {}) {
   if (DEMO) return demoApi(path, options);
 
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      'X-Telegram-Init-Data': initData,
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
-  });
+  // Ни один список не должен оставаться со скелетоном навсегда при обрыве
+  // мобильной сети. Таймаут относится только к этому запросу и не мешает
+  // свежему повтору: generation guards выше отбросят устаревший ответ.
+  const { timeout = 20000, signal, ...fetchOptions } = options;
+  const controller = signal ? null : new AbortController();
+  const timer = controller ? setTimeout(() => controller.abort(), timeout) : null;
+  let response;
+  try {
+    response = await fetch(path, {
+      ...fetchOptions,
+      signal: signal || controller.signal,
+      headers: {
+        'X-Telegram-Init-Data': initData,
+        'Content-Type': 'application/json',
+        ...(fetchOptions.headers || {}),
+      },
+    });
+  } catch (requestError) {
+    if (requestError && requestError.name === 'AbortError' && controller) {
+      throw new Error('Сервер не ответил вовремя. Проверьте сеть и повторите.');
+    }
+    throw new Error('Не удалось связаться с сервером. Проверьте сеть и повторите.');
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   let data = {};
   try {
     data = await response.json();
@@ -1593,6 +1630,12 @@ async function api(path, options = {}) {
     // Тело отказа несёт машиночитаемые поля (например, attempts_left) — они
     // нужны обработчику, а вытаскивать их из текста сообщения нельзя.
     error.data = data;
+    const retryAfter = Number(response.headers.get('Retry-After') || 0);
+    if (retryAfter > 0) error.retryAfter = retryAfter;
+    if (response.status === 401) {
+      error.authExpired = true;
+      error.message = 'Сессия Telegram устарела. Закройте и снова откройте кабинет.';
+    }
     throw error;
   }
   return data;
@@ -1817,15 +1860,18 @@ function renderHomeWizard() {
     holder.innerHTML = '';
     return;
   }
-  const hasAccount = Number(stats.accounts || 0) > 0;
-  const step = (done, current, num, title, desc, goto) => `
-    <button class="wizard__step${done ? ' is-done' : ''}${current ? ' is-current' : ''}" data-goto="${goto}">
+  const hasAccount = state.accounts.length > 0 || Number(stats.accounts || 0) > 0;
+  const step = (done, current, num, title, desc, goto) => {
+    const action = goto === 'accounts' && !done ? 'data-auth-start' : `data-goto="${goto}"`;
+    return `
+    <button class="wizard__step${done ? ' is-done' : ''}${current ? ' is-current' : ''}" ${action}>
       <span class="wizard__num">${done ? '✓' : num}</span>
       <span class="wizard__main">
         <span class="wizard__title">${esc(title)}</span>
         <span class="wizard__desc">${esc(desc)}</span>
       </span>
     </button>`;
+  };
   holder.hidden = false;
   holder.innerHTML = `
     <div class="wizard__head">🧭 мастер · два шага до первой задачи</div>
@@ -1842,7 +1888,7 @@ function renderHomeWizard() {
    откуда пришёл POST: строится обычная пересылка copy_channel. */
 const wizard = {
   step: 1, accountId: 0, source: '', target: '',
-  chats: [], online: true, query: '',
+  chats: [], online: true, query: '', generation: 0,
 };
 
 async function openWizard() {
@@ -1858,12 +1904,15 @@ async function openWizard() {
   const account = state.accounts.find((item) => item.online) || state.accounts[0];
   if (!account) {
     toast('Сначала подключите аккаунт');
-    switchTab('accounts');
+    // После номера → кода → 2FA возвращаем человека именно в мастер, а не
+    // оставляем его искать начатый сценарий во вкладке аккаунтов.
+    state.pendingAfterLogin = { type: 'wizard' };
+    openLoginSheet('', true);
     return;
   }
   Object.assign(wizard, {
     step: 1, accountId: account.id, source: '', target: '',
-    chats: [], online: true, query: '',
+    chats: [], online: true, query: '', generation: 0,
   });
   $('wizardError').textContent = '';
   $('wizardSheet').classList.add('is-open');
@@ -1928,17 +1977,20 @@ function renderWizardReview(body) {
 
 async function loadWizardChats() {
   const query = wizard.query;
+  const generation = ++wizard.generation;
+  const accountId = wizard.accountId;
   try {
-    const data = await api(`/api/chats?account_id=${wizard.accountId}&q=${encodeURIComponent(query)}`);
-    if (query !== wizard.query) return;
+    const data = await api(`/api/chats?account_id=${accountId}&q=${encodeURIComponent(query)}`);
+    if (generation !== wizard.generation || query !== wizard.query || accountId !== wizard.accountId) return;
     wizard.chats = data.chats || [];
     wizard.online = data.online !== false;
     rememberChatNames(wizard.chats);
   } catch (error) {
+    if (generation !== wizard.generation || query !== wizard.query || accountId !== wizard.accountId) return;
     wizard.chats = [];
     wizard.online = true;
   }
-  if (wizard.step === 1 || wizard.step === 2) renderWizardChats();
+  if (generation === wizard.generation && (wizard.step === 1 || wizard.step === 2)) renderWizardChats();
 }
 
 function renderWizardChats() {
@@ -2514,6 +2566,7 @@ function openTemplate(id) {
 
 async function loadTasks(targetStatus) {
   const status = targetStatus || state.taskStatus;
+  const generation = ++state.loadGeneration.tasks[status];
   const holder = $('taskList');
   // Скелетон рисуем только когда это активная вкладка и в ней ещё нет данных.
   if (status === state.taskStatus && !state.tasksByStatus[status].length) {
@@ -2521,6 +2574,7 @@ async function loadTasks(targetStatus) {
   }
   try {
     const data = await api(`/api/tasks?status=${status}`);
+    if (generation !== state.loadGeneration.tasks[status]) return;
     state.tasksByStatus[status] = data.tasks || [];
     if (status === state.taskStatus) state.tasks = state.tasksByStatus[status];
     // Все списки под рукой — пересчитываем агрегат по командам.
@@ -2533,7 +2587,9 @@ async function loadTasks(targetStatus) {
     if (status === 'active') renderHomeTasks();
     renderCommands();
   } catch (error) {
-    if (status === state.taskStatus) failLoad(holder, error, 'loadTasks');
+    if (generation === state.loadGeneration.tasks[status] && status === state.taskStatus) {
+      failLoad(holder, error, 'loadTasks');
+    }
   }
 }
 
@@ -2849,7 +2905,25 @@ function taskMetaLines(task) {
     // Сообщения удалили из библиотеки, а рассылка на них ссылается: без этой
     // строки карточка бодро «работает», а в чаты ничего не уходит.
     else if (info.messages_gone) lines.push('рассылать нечего');
-    lines.push(info.repeats ? `${info.repeats} круг(ов)` : 'круги без конца');
+    lines.push(info.repeat_forever || !info.repeats
+      ? 'без ограничений'
+      : `${info.repeats} круг(ов)`);
+    if (Array.isArray(info.folders) && info.folders.length) {
+      lines.push(`📁 ${info.folders.map((folder) => folder.title).join(', ')}`);
+    }
+    const subscribe = info.subscribe || {};
+    if (subscribe.links_count) {
+      const joinStatus = subscribe.status === 'done' ? 'автоподписка обработана'
+        : subscribe.status === 'pending' ? 'вступление перед первым кругом' : 'автоподписка';
+      lines.push(`🔗 ${joinStatus}`);
+      if (subscribe.joined || subscribe.already) {
+        lines.push(`вступили ${subscribe.joined || 0}, уже были ${subscribe.already || 0}`);
+      }
+      if (subscribe.limited) lines.push('лимит вступлений — продолжим завтра');
+      if (Array.isArray(subscribe.problems) && subscribe.problems.length) {
+        lines.push(`⚠️ ${subscribe.problems[0]}${subscribe.problems.length > 1 ? ` · ещё ${subscribe.problems.length - 1}` : ''}`);
+      }
+    }
   } else if (task.oneshot) {
     lines.push('запуск по кнопке');
   } else {
@@ -3311,6 +3385,7 @@ function chatKind(chat) {
 }
 
 async function loadChats() {
+  const generation = ++state.loadGeneration.chats;
   const holder = $('chatList');
   const account = state.accounts[0];
 
@@ -3329,9 +3404,12 @@ async function loadChats() {
   const query = encodeURIComponent($('chatSearch').value || '');
   beginLoad(holder, 'plain', 5);
   try {
-    const data = await api(`/api/chats?account_id=${account.id}&q=${query}`);
+    const data = await api(`/api/chats?account_id=${account.id}&q=${query}&folder_id=${state.chatFolderId || 0}`);
+    if (generation !== state.loadGeneration.chats) return;
     endLoad(holder);
     state.chats = data.chats || [];
+    state.chatFolders = data.folders || [];
+    renderFolderChips('chatFolders', state.chatFolders, state.chatFolderId, false);
     rememberChatNames(state.chats);
     if (!data.online) {
       holder.innerHTML = emptyHtml('i-off', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте.');
@@ -3362,8 +3440,10 @@ async function loadChats() {
     }).join('');
     updateChatBar();
   } catch (error) {
-    failLoad(holder, error, 'loadChats');
-    updateChatBar();
+    if (generation === state.loadGeneration.chats) {
+      failLoad(holder, error, 'loadChats');
+      updateChatBar();
+    }
   }
 }
 
@@ -3405,6 +3485,7 @@ function openTaskForSelection(kind) {
     // Парсер собирает участников ВЫБРАННОГО чата — он и есть источник.
     prefill.source = refs[0];
   }
+  if (kind === 'sender') prefill.send_mode = 'queue';
   openTaskSheet(command, prefill);
 }
 
@@ -3421,15 +3502,17 @@ function renderChatTags() {
    открывали бота и читались как одно и то же. */
 
 async function loadLibrary() {
+  const generation = ++state.loadGeneration.library;
   const holder = $('libraryList');
   beginLoad(holder, 'plain', 3);
   try {
     const data = await api('/api/library');
+    if (generation !== state.loadGeneration.library) return;
     endLoad(holder);
     state.library = data.items || [];
     renderLibrary();
   } catch (error) {
-    failLoad(holder, error, 'loadLibrary');
+    if (generation === state.loadGeneration.library) failLoad(holder, error, 'loadLibrary');
   }
 }
 
@@ -3665,15 +3748,22 @@ async function deleteLibraryItem(id, button) {
 /* ─────────────────────────────── Аккаунты ────────────────────────────── */
 
 async function loadAccounts() {
+  const generation = ++state.loadGeneration.accounts;
   const holder = $('accountList');
   beginLoad(holder, 'plain', 2);
   try {
     const data = await api('/api/accounts');
+    if (generation !== state.loadGeneration.accounts) return;
     endLoad(holder);
     state.accounts = data.accounts || [];
     state.pendingLogin = data.pending_login || null;
     state.botUrl = data.bot_url || '';
     state.features = data.features || state.features;
+    // /api/me загружается раньше аккаунтов, поэтому его старый счётчик не
+    // должен оставлять мастер на шаге «Подключите аккаунт» после успешного входа.
+    if (state.me) {
+      state.me.stats = { ...(state.me.stats || {}), accounts: state.accounts.length };
+    }
 
     const sub = data.subscription || {};
     renderPiggyBank(sub.piggy_bank_days, sub.days_left);
@@ -3703,7 +3793,7 @@ async function loadAccounts() {
     renderAccountList();
     fillTaskAccounts();
   } catch (error) {
-    failLoad(holder, error, 'loadAccounts');
+    if (generation === state.loadGeneration.accounts) failLoad(holder, error, 'loadAccounts');
   }
 }
 
@@ -3827,7 +3917,8 @@ function deliveryHint(delivery) {
   return 'Код пришёл в чат «Telegram» в приложении, а не по SMS.';
 }
 
-function openLoginSheet(phone) {
+function openLoginSheet(phone, keepPendingAction = false) {
+  if (!keepPendingAction) state.pendingAfterLogin = null;
   if (!state.features.account_login_enabled) {
     toast('Вход аккаунтов пока на настройке');
     return;
@@ -3855,6 +3946,7 @@ function openLoginSheet(phone) {
 
 function renderLoginStage(message) {
   const { stage, phone, attemptsLeft, delivery } = state.login;
+  $('loginSheet').dataset.loginStage = stage;
   const spec = LOGIN_STEPS[stage] || LOGIN_STEPS.phone;
   const lead = stage !== 'phone' && phone ? `Номер ${phone}. ${spec.lead}` : spec.lead;
   const notes = [stage === 'code' && delivery ? deliveryHint(delivery) : spec.note];
@@ -3924,6 +4016,30 @@ async function submitLogin() {
   }
 }
 
+/* После успешного входа продолжаем исходное действие. Иначе пользователь,
+   который нажал «создать задачу» без аккаунта, получал только тост «подключён»
+   и должен был заново вспоминать, что именно хотел настроить. */
+async function resumeAfterLogin() {
+  const pending = state.pendingAfterLogin;
+  state.pendingAfterLogin = null;
+  if (!pending) {
+    renderHome();
+    return;
+  }
+  if (pending.type === 'wizard') {
+    await openWizard();
+    return;
+  }
+  if (pending.type === 'task') {
+    const command = state.commands.find((item) => item.id === pending.commandId);
+    if (command) openTaskSheet(command, pending.prefill, pending.task);
+    else {
+      renderHome();
+      toast('Аккаунт подключён. Откройте каталог и выберите сценарий.');
+    }
+  }
+}
+
 /* Ответ сервера — это и есть следующий вопрос: code → password → done. */
 async function applyLoginStep(step) {
   if (!step || !step.stage) return;
@@ -3932,6 +4048,9 @@ async function applyLoginStep(step) {
     loginReset();
     toast(`Аккаунт ${step.phone || ''} подключён`.replace('  ', ' '), 'ok');
     await loadAccounts();
+    // После успешного входа продолжаем начатое действие: мастер или форма
+    // задачи. В профиль аккаунтов пользователя не отправляем.
+    await resumeAfterLogin();
     return;
   }
   const wasStage = state.login.stage;
@@ -4218,11 +4337,29 @@ async function deleteAccount(id, button) {
   }
 }
 
+function resolveConfirm(value) {
+  const resolve = pendingConfirm;
+  pendingConfirm = null;
+  const sheet = $('confirmSheet');
+  if (sheet) sheet.classList.remove('is-open');
+  if (resolve) resolve(Boolean(value));
+}
+
+/* Свой confirm вместо window.confirm/Tg.showConfirm: он одинаково работает в
+   Telegram, в обычном браузере и в preview, не теряется за клавиатурой и не
+   выглядит как чужое системное окно. */
 function confirmAction(question) {
-  if (tg && tg.showConfirm) {
-    return new Promise((resolve) => tg.showConfirm(question, (ok) => resolve(Boolean(ok))));
+  if (pendingConfirm) resolveConfirm(false);
+  const sheet = $('confirmSheet');
+  const text = $('confirmText');
+  const ok = $('confirmOk');
+  if (!sheet || !text || !ok) {
+    try { return Promise.resolve(window.confirm(question)); } catch (_) { return Promise.resolve(false); }
   }
-  return Promise.resolve(window.confirm(question));
+  text.textContent = question;
+  ok.textContent = question.startsWith('Отключить аккаунт') ? 'Отключить' : 'Удалить';
+  sheet.classList.add('is-open');
+  return new Promise((resolve) => { pendingConfirm = resolve; });
 }
 
 /* ─────────────────────────── Шторка задачи ───────────────────────────── */
@@ -4305,6 +4442,7 @@ function fieldHtml(key) {
       <textarea id="task_${key}" rows="4" placeholder="${esc(spec.placeholder || '')}"></textarea>
       ${counter}
       ${spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : ''}
+      ${key === 'message' ? '<div class="preflight" id="messagePreflight" hidden aria-live="polite"></div>' : ''}
       ${fromLibrary ? `<div class="field__aside">
         <button type="button" class="btn btn--pick" data-pick-library="1">${icon('i-book')} из библиотеки</button>
       </div>
@@ -4469,6 +4607,109 @@ function renderFieldCounts() {
   });
 }
 
+const TASK_DRAFT_KEY = 'docha.task-drafts.v1';
+
+function readTaskDrafts() {
+  try {
+    const raw = localStorage.getItem(TASK_DRAFT_KEY);
+    const data = raw ? JSON.parse(raw) : {};
+    return data && typeof data === 'object' ? data : {};
+  } catch (_) { return {}; }
+}
+
+function writeTaskDrafts(data) {
+  try { localStorage.setItem(TASK_DRAFT_KEY, JSON.stringify(data)); } catch (_) { /* storage may be disabled */ }
+}
+
+function taskDraftKey(command) {
+  return `${command.id}:${state.sendMode || 'schedule'}`;
+}
+
+function taskDraftSnapshot() {
+  const command = state.activeCommand;
+  if (!command || state.editTask) return null;
+  const fields = [
+    'targets', 'message', 'subscribe_links', 'gap', 'cycle', 'repeats',
+    'repeat_forever', 'typing', 'random_pick', 'link_preview', 'cycle_jitter',
+    'join_gap', 'daily_join_limit', 'daily_cap', 'mention_all', 'alerts',
+  ];
+  const draft = { command: command.id, send_mode: state.sendMode || 'schedule', saved_at: Date.now() };
+  let meaningful = false;
+  fields.forEach((key) => {
+    const node = $(`task_${key}`);
+    if (!node) return;
+    const value = node.type === 'checkbox' ? Boolean(node.checked) : String(node.value || '');
+    draft[key] = value;
+    if (node.type === 'checkbox' ? value : String(value).trim()) meaningful = true;
+  });
+  // Сегменты и динамические строки не являются task_* полями, но это такая же
+  // часть черновика: иначе выбор «очередь» или добавленная дата исчезал бы при
+  // закрытии формы, хотя текст оставался.
+  draft.mode = state.mode || 'copy';
+  draft.send_mode = state.sendMode || 'schedule';
+  draft.parser_mode = state.parserMode || 'participants';
+  if (document.querySelector('#scheduleList')) {
+    draft.scheduled_posts = collectScheduleSlots();
+    if (draft.scheduled_posts.length) meaningful = true;
+  }
+  if (state.libraryPick.length) {
+    draft.library_ids = [...state.libraryPick];
+    meaningful = true;
+  }
+  if (state.pickerFolderSelection.length) {
+    draft.folder_ids = [...state.pickerFolderSelection];
+    draft.folder_titles = Object.fromEntries((state.pickerFolders || []).map((row) => [String(row.id), row.title]));
+    meaningful = true;
+  }
+  return meaningful ? draft : null;
+}
+
+function saveTaskDraft() {
+  if (state.editTask || !state.activeCommand) return;
+  const draft = taskDraftSnapshot();
+  const drafts = readTaskDrafts();
+  const key = taskDraftKey(state.activeCommand);
+  if (draft) drafts[key] = draft;
+  else delete drafts[key];
+  writeTaskDrafts(drafts);
+}
+
+function scheduleTaskDraftSave() {
+  clearTimeout(state.draftTimer);
+  state.draftTimer = setTimeout(saveTaskDraft, 220);
+}
+
+function getTaskDraft(command) {
+  if (!command || state.editTask) return null;
+  const draft = readTaskDrafts()[`${command.id}:${state.sendMode || 'schedule'}`];
+  if (!draft || Date.now() - Number(draft.saved_at || 0) > 1000 * 60 * 60 * 24 * 14) return null;
+  return draft;
+}
+
+function discardTaskDraft(command = state.activeCommand) {
+  if (!command) return;
+  const drafts = readTaskDrafts();
+  delete drafts[`${command.id}:${state.sendMode || 'schedule'}`];
+  writeTaskDrafts(drafts);
+  state.pendingDraft = null;
+  const bar = $('taskDraftBar');
+  if (bar) bar.hidden = true;
+}
+
+function renderTaskDraftBar() {
+  const bar = $('taskDraftBar');
+  const text = $('taskDraftText');
+  if (!bar || !text) return;
+  const draft = state.pendingDraft;
+  if (!draft || state.editTask) { bar.hidden = true; return; }
+  const bits = [];
+  if (draft.message) bits.push('текст');
+  if (draft.targets) bits.push('чаты');
+  if (draft.subscribe_links) bits.push('ссылки');
+  text.textContent = `Найден черновик${bits.length ? `: ${bits.join(', ')}` : ''}`;
+  bar.hidden = false;
+}
+
 function openTaskSheet(command, prefill, task) {
   if (!state.features.account_login_enabled) {
     toast('Вход аккаунтов пока на настройке');
@@ -4477,8 +4718,16 @@ function openTaskSheet(command, prefill, task) {
   }
   if (!state.accounts.length) {
     toast('Сначала подключите аккаунт');
-    switchTab('accounts');
-    openLoginSheet();
+    // Не уводим человека в профиль: авторизация — следующий шаг сценария,
+    // поэтому открываем её сразу поверх текущего действия. После успешного
+    // номера → кода → 2FA форма откроется сама, с тем же сценарием и prefill.
+    state.pendingAfterLogin = {
+      type: 'task',
+      commandId: command && command.id,
+      prefill: { ...(prefill || {}) },
+      task: task || null,
+    };
+    openLoginSheet('', true);
     return;
   }
 
@@ -4489,16 +4738,20 @@ function openTaskSheet(command, prefill, task) {
   // полей, и второй такой набор разошёлся бы с первым на первой же настройке.
   state.editTask = task && task.edit ? task : null;
   state.mode = 'copy';
-  state.sendMode = 'schedule';
+  state.sendMode = prefill && prefill.send_mode === 'queue' ? 'queue' : 'schedule';
   state.parserMode = 'participants';
   // Выбор из библиотеки живёт ровно одну форму: чужой выбор в новой задаче
   // молча отправил бы не те сообщения.
   state.libraryPick = [];
+  state.pickerFolderSelection = [];
+  state.pickerFolders = [];
 
   const editing = Boolean(state.editTask);
   $('taskSheetTitle').innerHTML = editing
     ? `${icon('i-sliders')} Настройка задачи`
-    : `${icon(kindIcon(state.activeCommand.kind))} ${esc(state.activeCommand.title)}`;
+    : (state.activeCommand.id === 'sender' && state.sendMode === 'queue'
+      ? `${icon('i-send')} Рассылка по чатам`
+      : `${icon(kindIcon(state.activeCommand.kind))} ${esc(state.activeCommand.title)}`);
   $('taskSheet').setAttribute('aria-label', editing ? 'Настройка задачи' : 'Новая задача');
   const canSwitchMode = editing && state.activeCommand.id === 'sender';
   $('taskSheetLead').textContent = editing
@@ -4529,6 +4782,11 @@ function openTaskSheet(command, prefill, task) {
   fillTaskAccounts();
   bindSheetFields();
   applyTaskPrefill(prefill || {});
+  const hasIncomingData = Boolean(
+    prefill && (prefill.message || prefill.targets || prefill.subscribe_links || prefill.library_ids)
+  );
+  state.pendingDraft = !editing && !hasIncomingData ? getTaskDraft(state.activeCommand) : null;
+  renderTaskDraftBar();
   maybeRenderActivityHint(editing ? task : null);
   $('taskSheet').classList.add('is-open');
 }
@@ -4591,9 +4849,9 @@ function applyTaskPrefill(prefill) {
   ['keywords', 'reaction', 'limit', 'scan', 'online_within_hours', 'api_delay',
     'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'translate_to', 'history', 'invite_to',
     'banned_words', 'max_warns', 'mute_hours', 'topic', 'autodelete_hours',
-    'delay_jitter', 'gap_jitter', 'cycle_jitter', 'daily_cap']
+    'delay_jitter', 'gap_jitter', 'cycle_jitter', 'daily_cap', 'subscribe_links', 'join_gap', 'daily_join_limit']
     .forEach((key) => setValue(key, prefill[key]));
-  ['typing', 'random_pick', 'link_preview', 'schedule_only', 'uniquify', 'alerts', 'block_links',
+  ['typing', 'random_pick', 'link_preview', 'repeat_forever', 'schedule_only', 'uniquify', 'alerts', 'block_links',
     'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only',
     'ignore_bots', 'ignore_archived', 'ignore_muted', 'pin_on_send', 'mention_all']
     .forEach((key) => {
@@ -4625,6 +4883,7 @@ function applyTaskPrefill(prefill) {
     });
   }
   applySendModeVisibility();
+  applyRepeatForeverVisibility();
   // Кнопки сервер отдаёт списком — форма показывает их строками «текст | ссылка».
   if (Array.isArray(prefill.buttons)) {
     setValue('buttons', prefill.buttons
@@ -4644,6 +4903,10 @@ function applyTaskPrefill(prefill) {
   } else if (account) {
     account.disabled = false;
   }
+  if (Array.isArray(prefill.folder_ids)) {
+    state.pickerFolderSelection = prefill.folder_ids.map(Number).filter((value) => Number.isFinite(value) && value >= 0);
+    state.pickerFolders = Object.entries(prefill.folder_titles || {}).map(([id, title]) => ({ id: Number(id), title }));
+  }
   if (Array.isArray(prefill.library_ids) && prefill.library_ids.length) {
     state.libraryPick = prefill.library_ids.map(Number).filter(Boolean);
     renderLibraryPicks();
@@ -4652,6 +4915,7 @@ function applyTaskPrefill(prefill) {
     if (!state.library.length) loadLibrary().then(renderLibraryPicks).catch(() => {});
   }
   renderFieldCounts();
+  preflightMessage();
 }
 
 /* Какие поля какому режиму единого слота: расписание живёт интервалом и
@@ -4660,7 +4924,7 @@ function applyTaskPrefill(prefill) {
    переключения режима обратно. */
 const SEND_MODE_FIELDS = {
   schedule: ['schedule_only', 'interval', 'start', 'end'],
-  queue: ['gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview', 'cycle_jitter'],
+  queue: ['gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'cycle_jitter', 'subscribe_links', 'join_gap', 'daily_join_limit'],
 };
 
 /* ─────────────── Редактор дат постинга ─────────────── */
@@ -4739,6 +5003,21 @@ function applyScheduleVisibility() {
 }
 
 
+function applyRepeatForeverVisibility() {
+  const toggle = $('task_repeat_forever');
+  const repeats = $('task_repeats');
+  if (!toggle || !repeats) return;
+  repeats.disabled = Boolean(toggle.checked);
+  repeats.setAttribute('aria-disabled', toggle.checked ? 'true' : 'false');
+  if (toggle.checked) {
+    repeats.value = '0';
+    repeats.placeholder = 'без ограничений';
+  } else {
+    if (repeats.value === '0') repeats.value = '1';
+    repeats.placeholder = '1';
+  }
+}
+
 function applySendModeVisibility() {
   const holder = $('taskFields');
   if (!holder || !$('taskSendMode')) return;
@@ -4751,7 +5030,50 @@ function applySendModeVisibility() {
   });
 }
 
+function renderMessagePreflight(data) {
+  const holder = $('messagePreflight');
+  if (!holder) return;
+  const links = (data && data.links) || [];
+  const entities = (data && data.entities) || [];
+  const mention = $('task_mention_all') && $('task_mention_all').checked;
+  const parts = [];
+  if (links.length) parts.push(`URL: ${links.length} · предпросмотр выключен`);
+  else parts.push('URL в тексте не найден');
+  if (entities.length) parts.push(`сущности: ${entities.join(', ')}`);
+  if (mention) parts.push('упоминания: нативные Telegram-сущности, не ссылки');
+  holder.hidden = false;
+  holder.innerHTML = `<span class="preflight__dot"></span>${esc(parts.join(' · '))}`;
+  holder.classList.toggle('is-warning', Boolean(links.length || entities.length));
+}
+
+async function preflightMessage() {
+  const node = $('task_message');
+  const holder = $('messagePreflight');
+  if (!node || !holder) return;
+  const text = String(node.value || '');
+  if (!text.trim()) { holder.hidden = true; holder.innerHTML = ''; return; }
+  // Локальная часть появляется без задержки даже в демо-режиме.
+  const links = [...new Set(text.match(/(?:https?:\/\/|t\.me\/|telegram\.me\/)\S+/gi) || [])];
+  renderMessagePreflight({ links, entities: [] });
+  if (DEMO) return;
+  try {
+    const data = await api('/api/message-preflight', {
+      method: 'POST', body: JSON.stringify({ text }),
+    });
+    renderMessagePreflight(data);
+  } catch (_) { /* диагностика не должна мешать сохранить задачу */ }
+}
+
 function bindSheetFields() {
+  const message = $('task_message');
+  if (message) {
+    let timer = null;
+    message.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(preflightMessage, 240);
+      renderFieldCount('message');
+    });
+  }
   document.querySelectorAll('#taskMode .seg').forEach((seg) => {
     seg.addEventListener('click', () => {
       state.mode = seg.dataset.mode;
@@ -4768,6 +5090,8 @@ function bindSheetFields() {
         item.classList.toggle('is-active', item === seg);
       });
       applySendModeVisibility();
+      applyRepeatForeverVisibility();
+      scheduleTaskDraftSave();
       maybeRenderActivityHint(state.editTask || null);
     });
   });
@@ -4776,6 +5100,13 @@ function bindSheetFields() {
     schedBox.addEventListener('change', () => {
       buzz('light');
       applyScheduleVisibility();
+    });
+  }
+  const repeatForever = $('task_repeat_forever');
+  if (repeatForever) {
+    repeatForever.addEventListener('change', () => {
+      buzz('light');
+      applyRepeatForeverVisibility();
     });
   }
   const schedAdd = $('scheduleAdd');
@@ -4812,6 +5143,43 @@ function bindSheetFields() {
 
 /* Аккаунт для списка чатов: тот, что стоит в форме. Селект может быть ещё
    пустым (аккаунт один и не онлайн) — тогда берём первый известный. */
+function renderFolderChips(holderId, folders, activeId, pickerMode) {
+  const holder = $(holderId);
+  if (!holder) return;
+  const rows = Array.isArray(folders) ? folders : [];
+  holder.innerHTML = rows.map((folder) => {
+    const id = Number(folder.id || 0);
+    const active = id === Number(activeId || 0);
+    const picked = pickerMode && state.picker.selectedFolders.includes(id);
+    return `<button type="button" class="folder-chip${active ? ' is-active' : ''}${picked ? ' is-picked' : ''}"
+      data-folder-id="${id}" data-folder-picker="${pickerMode ? '1' : ''}">
+      <span>${id === 0 ? '▦' : '▤'}</span>${esc(folder.title || 'Папка')}<b>${Number(folder.count || 0)}</b></button>`;
+  }).join('');
+  holder.hidden = !rows.length;
+}
+
+function selectFolder(folderId, pickerMode) {
+  const id = Number(folderId || 0);
+  if (pickerMode) {
+    const picker = state.picker;
+    picker.folderId = id;
+    // Папка — выбор, а не только фильтр: добавляем её фактические чаты к
+    // отмеченным. Загрузка идёт тем же API, поэтому папка и ручные чаты
+    // дедуплицируются в одном Set.
+    if (picker.multi) {
+      picker.selectedFolders = picker.selectedFolders.includes(id)
+        ? picker.selectedFolders.filter((value) => value !== id)
+        : [...picker.selectedFolders, id];
+      loadPickerChats();
+    } else {
+      loadPickerChats();
+    }
+    return;
+  }
+  state.chatFolderId = id;
+  loadChats();
+}
+
 function pickerAccount() {
   const select = $('taskAccount');
   const id = select ? Number(select.value) : 0;
@@ -4825,12 +5193,16 @@ function openFieldPicker(key, multi) {
   }
   // Уже вписанное руками не теряем: разбираем поле на ссылки и отмечаем их.
   const current = splitList(fieldValue(key));
+  const generation = ++state.pickerGeneration;
   state.picker = {
     mode: 'chats',
     key,
     multi: Boolean(multi),
     chosen: multi ? current : current.slice(0, 1),
-    chats: [],
+    chats: [], folderId: (key === 'targets' && state.pickerFolderSelection && state.pickerFolderSelection.length)
+      ? Number(state.pickerFolderSelection[0]) : 0, folders: [],
+    selectedFolders: key === 'targets' ? [...(state.pickerFolderSelection || [])] : [],
+    generation,
   };
   $('pickerTitle').textContent = multi ? 'Выбор чатов' : 'Выбор чата';
   $('pickerSearch').value = '';
@@ -4843,12 +5215,13 @@ function openFieldPicker(key, multi) {
    видно и можно поправить, — а готовый пост уходит в задачу ссылкой: своего
    текста у него нет. */
 function openLibraryPicker() {
+  const generation = ++state.pickerGeneration;
   state.picker = {
     mode: 'library',
     key: 'message',
     multi: true,
     chosen: state.libraryPick.map(String),
-    chats: [],
+    chats: [], folderId: 0, folders: [], selectedFolders: [], generation,
   };
   $('pickerTitle').textContent = 'Сообщения из библиотеки';
   $('pickerSearch').value = '';
@@ -4868,7 +5241,7 @@ function renderPickerFooter() {
       `Отметьте сообщения — текст встанет в поле, готовый пост уйдёт ссылкой. Отмечено: ${chosen.length}.`;
   } else {
     $('pickerLead').textContent = multi
-      ? `${label}: отмечайте — уйдут в поле через запятую. Чатов можно сколько угодно.`
+      ? `${label}: отмечайте чаты или папки Telegram — выбранных чатов: ${chosen.length}, папок: ${(state.picker.selectedFolders || []).length}.`
       : `${label}: нажмите чат — он встанет в поле, шторка закроется.`;
   }
   apply.hidden = !multi;
@@ -4918,6 +5291,7 @@ function pickerReload() {
 }
 
 async function loadPickerChats() {
+  const generation = state.picker.generation;
   const holder = $('pickerList');
   const account = pickerAccount();
   if (!account) {
@@ -4927,32 +5301,48 @@ async function loadPickerChats() {
   const query = encodeURIComponent($('pickerSearch').value || '');
   beginLoad(holder, 'plain', 4);
   try {
-    const data = await api(`/api/chats?account_id=${account.id}&q=${query}`);
+    const data = await api(`/api/chats?account_id=${account.id}&q=${query}&folder_id=${state.picker.folderId || 0}`);
+    if (generation !== state.picker.generation || state.picker.mode !== 'chats') return;
     endLoad(holder);
     state.picker.chats = data.chats || [];
+    state.picker.folders = data.folders || [];
+    renderFolderChips('pickerFolders', state.picker.folders, state.picker.folderId, true);
     rememberChatNames(state.picker.chats);
+    if (state.picker.selectedFolders.length && state.picker.multi) {
+      state.picker.chats.forEach((chat) => {
+        const ref = chatToRef(chat);
+        if (ref && !state.picker.chosen.includes(ref)) state.picker.chosen.push(ref);
+      });
+      renderPickerFooter();
+    }
     if (!data.online) {
       holder.innerHTML = emptyHtml('i-off', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте — список чатов читает он.');
       return;
     }
     renderPickerList();
   } catch (error) {
-    failLoad(holder, error, 'loadPickerChats');
+    if (generation === state.picker.generation && state.picker.mode === 'chats') {
+      failLoad(holder, error, 'loadPickerChats');
+    }
   }
 }
 
 async function loadPickerLibrary() {
+  const generation = state.picker.generation;
   const holder = $('pickerList');
   beginLoad(holder, 'plain', 3);
   try {
     const data = await api('/api/library');
+    if (generation !== state.picker.generation || state.picker.mode !== 'library') return;
     endLoad(holder);
     state.library = data.items || [];
     // Отметки ставим по тому, что уже уйдёт: тексты видно в поле, посты — в чипсах.
     if (state.picker.mode === 'library') syncLibraryChosen();
     renderPickerList();
   } catch (error) {
-    failLoad(holder, error, 'loadPickerLibrary');
+    if (generation === state.picker.generation && state.picker.mode === 'library') {
+      failLoad(holder, error, 'loadPickerLibrary');
+    }
   }
 }
 
@@ -5055,6 +5445,10 @@ function applyPicker() {
     closePicker();
     return;
   }
+  if (key === 'targets') {
+    state.pickerFolderSelection = [...(state.picker.selectedFolders || [])];
+    state.pickerFolders = [...(state.picker.folders || [])];
+  }
   const node = key ? $(`task_${key}`) : null;
   if (node) node.value = chosen.join(', ');
   renderFieldCount(key);
@@ -5131,17 +5525,20 @@ function renderLibraryPicks() {
    и увёл бы вместе с выбором саму форму задачи. */
 function closePicker() {
   $('pickerSheet').classList.remove('is-open');
-  state.picker = { mode: 'chats', key: null, multi: false, chosen: [], chats: [] };
+  state.pickerGeneration += 1;
+  state.picker = { mode: 'chats', key: null, multi: false, chosen: [], chats: [], folderId: 0, folders: [], selectedFolders: [], generation: state.pickerGeneration };
 }
 
 function closeSheets() {
+  if ($('confirmSheet') && $('confirmSheet').classList.contains('is-open')) resolveConfirm(false);
   const loginWasOpen = $('loginSheet').classList.contains('is-open');
   const qrWasOpen = $('qrSheet').classList.contains('is-open');
   document.querySelectorAll('.sheet').forEach((sheet) => sheet.classList.remove('is-open'));
   if (qrWasOpen) qrTeardown();
   state.activeCommand = null;
   state.editTask = null;
-  state.picker = { mode: 'chats', key: null, multi: false, chosen: [], chats: [] };
+  state.pickerGeneration += 1;
+  state.picker = { mode: 'chats', key: null, multi: false, chosen: [], chats: [], folderId: 0, folders: [], selectedFolders: [], generation: state.pickerGeneration };
   // Закрыли шторку на середине входа — в списке должна появиться карточка
   // «Продолжить вход»: шаг никуда не делся, он лежит в БД на сервере.
   if (loginWasOpen && state.login.stage !== 'phone') loadAccounts();
@@ -5174,6 +5571,9 @@ function collectTaskPayload() {
     // постинг возьмут тексты оттуда, и требовать копию того же текста в поле
     // незачем.
     .filter((key) => !values[key]
+      && !(key === 'targets'
+        && state.sendMode === 'queue'
+        && splitList(values.subscribe_links).length)
       && !(key === 'message'
         && (state.libraryPick.length
           || (values.schedule_only && (values.scheduled_posts || []).length))))
@@ -5215,6 +5615,7 @@ function collectTaskPayload() {
   text('send_mode', values.send_mode);
   text('parser_mode', values.parser_mode);
   text('message', values.message);
+  text('subscribe_links', values.subscribe_links);
   if (values.buttons !== undefined && (values.buttons || editing)) {
     body.buttons = String(values.buttons || '').split('\n').map((line) => line.trim()).filter(Boolean);
   }
@@ -5233,6 +5634,15 @@ function collectTaskPayload() {
   if (values.targets !== undefined && (values.targets || editing)) {
     body.targets = splitList(values.targets);
   }
+  if (state.pickerFolderSelection && state.pickerFolderSelection.length && (command.kind === 'mailing' || values.send_mode === 'queue' || (state.editTask && state.editTask.kind === 'mailing'))) {
+    body.folder_ids = state.pickerFolderSelection.map(Number).filter((value) => Number.isFinite(value) && value >= 0);
+    body.folder_titles = Object.fromEntries(state.pickerFolderSelection.map((id) => {
+      const row = (state.pickerFolders || []).find((folder) => Number(folder.id) === Number(id));
+      return [String(id), row ? row.title : 'Папка Telegram'];
+    }));
+  } else if (editing && (command.kind === 'mailing' || values.send_mode === 'queue' || (state.editTask && state.editTask.kind === 'mailing'))) {
+    body.folder_ids = [];
+  }
   number('limit', values.limit);
   number('scan', values.scan);
   number('online_within_hours', values.online_within_hours);
@@ -5241,6 +5651,7 @@ function collectTaskPayload() {
   number('gap', values.gap);
   number('cycle', values.cycle);
   number('repeats', values.repeats);
+  flag('repeat_forever', values.repeat_forever);
   number('history', values.history);
   number('topic', values.topic);
   number('autodelete_hours', values.autodelete_hours);
@@ -5286,11 +5697,13 @@ async function submitTask() {
   }
 
   const editing = state.editTask;
+  const submittedKind = state.activeCommand.kind;
   const button = $('taskSubmit');
   try {
     const data = await withLoading(button, () => (editing
       ? api(`/api/tasks/${editing.id}`, { method: 'PATCH', body: JSON.stringify(body) })
       : api('/api/tasks', { method: 'POST', body: JSON.stringify(body) })));
+    if (!editing) discardTaskDraft(state.activeCommand);
     closeSheets();
 
     // Правка ничего не запускает и не переносит задачу между списками: она
@@ -5298,6 +5711,7 @@ async function submitTask() {
     if (editing) {
       toast('Настройки сохранены', 'ok');
       await refreshAllTaskLists();
+      if (OWN_TEXT_KINDS.includes(submittedKind)) loadLibrary().catch(() => {});
       return;
     }
 
@@ -5311,6 +5725,10 @@ async function submitTask() {
       seg.classList.toggle('is-active', seg.dataset.status === state.taskStatus);
     });
     await refreshAllTaskLists();
+    // Текст постинга/рассылки сервер сохраняет в библиотеку автоматически.
+    // Обновляем локальный список сразу, чтобы при следующем открытии picker не
+    // приходилось сначала заходить во вкладку «Библиотека».
+    if (OWN_TEXT_KINDS.includes(submittedKind)) loadLibrary().catch(() => {});
     switchTab('tasks');
   } catch (requestError) {
     if (requestError.status === 402) {
@@ -5810,6 +6228,13 @@ async function withLoading(button, action) {
 /* ───────────────────────────────── Старт ─────────────────────────────── */
 
 function bindEvents() {
+  // Последние символы могли попасть в форму меньше чем за debounce-таймер до
+  // сворачивания Mini App. Сохраняем их при уходе со страницы, не отправляя
+  // ничего на сервер.
+  window.addEventListener('pagehide', () => {
+    clearTimeout(state.draftTimer);
+    saveTaskDraft();
+  });
   // нижняя навигация
   document.querySelectorAll('.nav__item').forEach((item) => {
     item.addEventListener('click', () => switchTab(item.dataset.tab));
@@ -5873,13 +6298,19 @@ function bindEvents() {
       openWizard();
       return;
     }
+    const authStart = event.target.closest('[data-auth-start]');
+    if (authStart) {
+      buzz('light');
+      openLoginSheet();
+      return;
+    }
     const step = event.target.closest('[data-goto]');
     if (!step) return;
     switchTab(step.dataset.goto);
   });
   // «смотреть все» и прочие ссылки-переходы по кабинету
   document.querySelectorAll('[data-goto]').forEach((node) => {
-    if (node.closest('#homeTiles, #promptHits, #homeTasks')) return; // у них свой делегат
+    if (node.closest('#homeTiles, #promptHits, #homeTasks, #homeWizard')) return; // у них свой делегат
     node.addEventListener('click', () => switchTab(node.dataset.goto));
   });
 
@@ -5948,6 +6379,10 @@ function bindEvents() {
   $('chatSearch').addEventListener('input', () => {
     clearTimeout(chatTimer);
     chatTimer = setTimeout(loadChats, 350);
+  });
+  $('chatFolders').addEventListener('click', (event) => {
+    const chip = event.target.closest('[data-folder-id]');
+    if (chip) selectFolder(chip.dataset.folderId, false);
   });
   // Один делегированный слушатель: чаты перерисовываются при каждом поиске,
   // поэтому вешать обработчик на каждый .chat бессмысленно.
@@ -6109,6 +6544,11 @@ function bindEvents() {
     inviteResults(event.currentTarget);
   });
   $('settingsBtn').addEventListener('click', () => $('settingsSheet').classList.add('is-open'));
+  $('confirmOk').addEventListener('click', () => resolveConfirm(true));
+  $('confirmCancel').addEventListener('click', () => resolveConfirm(false));
+  document.querySelectorAll('[data-confirm-close]').forEach((node) => {
+    node.addEventListener('click', () => resolveConfirm(false));
+  });
   $('settingsList').addEventListener('click', (event) => {
     const item = event.target.closest('[data-start]');
     if (!item) return;
@@ -6121,6 +6561,18 @@ function bindEvents() {
   // форма задачи: поля и переключатель режима собираются при каждом открытии
   // шторки (у каждой команды свой набор), поэтому слушатели вешаются в bindSheetFields
   $('taskSubmit').addEventListener('click', submitTask);
+  $('taskDraftRestore').addEventListener('click', () => {
+    if (!state.pendingDraft) return;
+    const draft = { ...state.pendingDraft };
+    state.pendingDraft = null;
+    applyTaskPrefill(draft);
+    renderTaskDraftBar();
+    toast('Черновик восстановлен', 'ok');
+  });
+  $('taskDraftDiscard').addEventListener('click', () => {
+    discardTaskDraft();
+    toast('Черновик удалён');
+  });
   bindWizard();
   $('paywallPay').addEventListener('click', (event) => payWithStars(event.currentTarget, 1));
 
@@ -6170,6 +6622,12 @@ function bindEvents() {
   $('taskFields').addEventListener('input', (event) => {
     const key = String(event.target.id || '').replace(/^task_/, '');
     if (key && $(`count_${key}`)) renderFieldCount(key);
+    scheduleTaskDraftSave();
+  });
+  $('taskFields').addEventListener('change', scheduleTaskDraftSave);
+  $('pickerFolders').addEventListener('click', (event) => {
+    const chip = event.target.closest('[data-folder-id]');
+    if (chip) selectFolder(chip.dataset.folderId, true);
   });
   $('pickerList').addEventListener('click', (event) => {
     const item = event.target.closest('[data-pick-ref]');

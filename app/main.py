@@ -417,8 +417,11 @@ _watch_last: dict[str, float] = {}
 def _watch_due(kind: str) -> bool:
     """Прошёл ли кулдаун по виду тревоги. Прошёл — взводим заново."""
     now = time.monotonic()
-    last = _watch_last.get(kind, 0.0)
-    if now - last < settings.watch_cooldown_min * 60:
+    last = _watch_last.get(kind)
+    # Нулевой/отсутствующий timestamp означает «тревогу ещё не отправляли».
+    # Сравнивать его с monotonic() нельзя: на свежем процессе uptime может быть
+    # меньше часа, и первая авария ошибочно попадёт под кулдаун.
+    if last is not None and now - last < settings.watch_cooldown_min * 60:
         return False
     _watch_last[kind] = now
     return True

@@ -159,6 +159,22 @@ async def test_test_post_requires_subscription(client, create_user, create_accou
 # ─────────────────────────── rate-limit и заголовки ──────────────────────────
 
 
+async def test_mutating_endpoints_reject_json_arrays(client, create_user):
+    """JSON-массив не должен превращаться в 500 при обращении к dict-полю."""
+    await create_user(id=OV_USER)
+    checks = [
+        ("/api/tasks", "POST"),
+        ("/api/tasks/999999", "PATCH"),
+        ("/api/subscription/bank", "POST"),
+        ("/api/subscription/distribute", "POST"),
+        ("/api/subscription/promo", "POST"),
+    ]
+    for path, method in checks:
+        response = await client.request(method, path, json=[], headers=_headers(OV_USER))
+        assert response.status == 400, (path, await response.text())
+        assert "JSON-объект" in (await response.json())["error"]
+
+
 async def test_rate_limit_returns_429(client, create_user):
     await create_user(id=OV_USER)
     statuses = []
@@ -167,6 +183,7 @@ async def test_rate_limit_returns_429(client, create_user):
         statuses.append(response.status)
     assert statuses == [404] * 6 + [429]
     assert "Слишком часто" in (await response.json())["error"]
+    assert int(response.headers["Retry-After"]) >= 1
 
 
 async def test_security_headers_present():
