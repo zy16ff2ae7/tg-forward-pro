@@ -1412,7 +1412,7 @@ button { border: none; background: none; cursor: pointer; }
 
 .field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; font-size: 12px; color: var(--muted); }
 
-.field input, .field textarea, .field select {
+.field input, .field textarea, .field select, .creds input {
   width: 100%;
   padding: 12px 13px;
   font-size: 14.5px;
@@ -1424,7 +1424,7 @@ button { border: none; background: none; cursor: pointer; }
   transition: border-color 0.16s ease;
 }
 
-.field input:focus, .field textarea:focus { border-color: var(--accent); }
+.field input:focus, .field textarea:focus, .creds input:focus { border-color: var(--accent); }
 .field textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 /* Запертое поле должно выглядеть запертым. В форме настройки задачи так стоит
    аккаунт: сменить его нельзя (другой аккаунт — другие чаты и другая задача), и
@@ -1951,3 +1951,25 @@ button { border: none; background: none; cursor: pointer; }
   .header__title { font-size: 16px; }
   .hero__name { font-size: 22px; }
 }
+
+/* QR-вход: белое поле — тихая зона, без неё камера код не возьмёт. */
+.qr {
+  display: block;
+  width: 220px;
+  height: 220px;
+  margin: 4px auto;
+  padding: 10px;
+  background: #fff;
+  border-radius: 14px;
+}
+/* Свои ключи — складной блок: большинству не нужен, глаза не мозолит. */
+.creds { margin: 2px 0; }
+.creds summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--muted);
+}
+.creds input { margin-top: 8px; }
+/* В шторке входа теперь четыре боковые кнопки — в ряд не влезут. */
+.login__aside { flex-wrap: wrap; }
+.login__aside .btn { flex: 1 1 40%; }

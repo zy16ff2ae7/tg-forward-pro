@@ -2190,10 +2190,16 @@ async def login_start(request: web.Request) -> web.Response:
     {"phone": ..., "resend": true} — «код не пришёл»: повтор тем же способом,
     каким Telegram шлёт дальше (приложение → SMS → звонок). Код из прошлого
     сообщения после повтора мёртв.
+
+    Свои ключи — полями "api_id"/"api_hash": оба или ни одного, иначе 400.
     """
     body = await _login_body(request)
     step = await accounts_login.start(
-        request[USER_ID_KEY], body.get("phone"), resend=bool(body.get("resend"))
+        request[USER_ID_KEY],
+        body.get("phone"),
+        resend=bool(body.get("resend")),
+        api_id=body.get("api_id"),
+        api_hash=body.get("api_hash"),
     )
     return _json(step.as_dict())
 
@@ -2221,6 +2227,50 @@ async def login_password(request: web.Request) -> web.Response:
 async def login_cancel(request: web.Request) -> web.Response:
     """Забыть незавершённый вход (кнопка «Отмена» на любом шаге)."""
     dropped = await accounts_login.cancel(request[USER_ID_KEY])
+    return _json({"ok": True, "dropped": dropped})
+
+
+@routes.post("/api/accounts/login/qr/start")
+@require_auth
+async def login_qr_start(request: web.Request) -> web.Response:
+    """QR-вход: {"api_id"?, "api_hash"?} → {url, image, expires_in}.
+
+    Картинка — data URI: кабинет показывает как есть. Дальше кабинет
+    опрашивает статус, пока человек сканирует код приложением Telegram.
+    """
+    body = await _login_body(request)
+    begun = await accounts_login.qr_start(
+        request[USER_ID_KEY],
+        api_id=body.get("api_id"),
+        api_hash=body.get("api_hash"),
+    )
+    return _json(begun)
+
+
+@routes.get("/api/accounts/login/qr/status")
+@require_auth
+async def login_qr_status(request: web.Request) -> web.Response:
+    """Что с QR-входом: {stage: waiting|password} либо готовый шаг done."""
+    status = await accounts_login.qr_status(request[USER_ID_KEY])
+    if isinstance(status, accounts_login.LoginStep):
+        return _json(status.as_dict())
+    return _json(status)
+
+
+@routes.post("/api/accounts/login/qr/password")
+@require_auth
+async def login_qr_password(request: web.Request) -> web.Response:
+    """Облачный пароль после сканирования QR (у кого включён 2FA)."""
+    body = await _login_body(request)
+    step = await accounts_login.qr_password(request[USER_ID_KEY], body.get("password"))
+    return _json(step.as_dict())
+
+
+@routes.post("/api/accounts/login/qr/cancel")
+@require_auth
+async def login_qr_cancel(request: web.Request) -> web.Response:
+    """Забыть QR-вход: соединение закрывается, сканировать нечего."""
+    dropped = await accounts_login.qr_cancel(request[USER_ID_KEY])
     return _json({"ok": True, "dropped": dropped})
 
 

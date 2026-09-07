@@ -680,6 +680,22 @@ const DEMO_LOGIN = { pending: null, nextId: 3, sent: {} };
 const DEMO_MAX_ATTEMPTS = 5;
 const DEMO_CODE = '11111';
 const DEMO_PASSWORD = 'doca';
+/* Демо-QR: настоящий код ведёт в Telegram, а этот — никуда. Сканировать его
+   не нужно: демо само «дождётся сканирования» на втором опросе статуса. */
+const DEMO_QR_IMAGE =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 25 25">' +
+      '<rect width="25" height="25" fill="white"/>' +
+      '<g fill="black">' +
+      '<rect x="2" y="2" width="7" height="7"/><rect x="4" y="4" width="3" height="3" fill="white"/>' +
+      '<rect x="16" y="2" width="7" height="7"/><rect x="18" y="4" width="3" height="3" fill="white"/>' +
+      '<rect x="2" y="16" width="7" height="7"/><rect x="4" y="18" width="3" height="3" fill="white"/>' +
+      '<rect x="11" y="2" width="3" height="2"/><rect x="11" y="11" width="3" height="3"/>' +
+      '<rect x="16" y="12" width="2" height="3"/><rect x="11" y="16" width="2" height="2"/>' +
+      '<rect x="20" y="16" width="3" height="2"/><rect x="12" y="21" width="4" height="2"/>' +
+      '</g></svg>'
+  );
 // Пауза перед новым кодом на тот же номер — как на сервере: она принадлежит
 // номеру, поэтому «Отмена» и «Другой номер» её не снимают.
 const DEMO_RESEND_PAUSE_MS = 60000;
@@ -1178,6 +1194,49 @@ function demoLogin(clean, options) {
   if (clean === '/api/accounts/login/cancel') {
     DEMO_LOGIN.pending = null;
     return { ok: true, dropped: Boolean(pending) };
+  }
+
+  // QR-ветка демо: старт → waiting → password → done. Код из DEMO_CODE тут
+  // не участвует: сканирование изображает второй опрос статуса.
+  if (clean === '/api/accounts/login/qr/start') {
+    DEMO_LOGIN.pending = null;
+    DEMO_LOGIN.qr = { polls: 0 };
+    return { url: 'demo-qr', image: DEMO_QR_IMAGE, expires_in: 300 };
+  }
+  if (clean === '/api/accounts/login/qr/cancel') {
+    const had = Boolean(DEMO_LOGIN.qr);
+    DEMO_LOGIN.qr = null;
+    // Отмена гасит и телефонный вход тоже — как на сервере.
+    DEMO_LOGIN.pending = null;
+    return { ok: true, dropped: had };
+  }
+  if (clean === '/api/accounts/login/qr/status') {
+    if (!DEMO_LOGIN.qr) demoFail(409, 'QR-вход не начинали. Покажите код заново.');
+    DEMO_LOGIN.qr.polls += 1;
+    if (DEMO_LOGIN.qr.polls < 2) return { stage: 'waiting' };
+    DEMO_LOGIN.qr = null;
+    DEMO_LOGIN.pending = { phone: '+79990001122', stage: 'password', attempts: 0 };
+    return { stage: 'password', phone: '+79990001122' };
+  }
+  if (clean === '/api/accounts/login/qr/password') {
+    if (!pending || pending.stage !== 'password') {
+      demoFail(409, 'QR-вход не начинали. Покажите код заново.');
+    }
+    if (String(body.password || '') !== DEMO_PASSWORD) {
+      demoFail(400, 'Пароль не подошёл (PasswordHashInvalidError). Попробуйте снова.');
+    }
+    const account = {
+      id: DEMO_LOGIN.nextId++,
+      phone: pending.phone,
+      is_active: true,
+      online: true,
+      last_error: null,
+      needs_login: false,
+      created_at: new Date().toISOString(),
+    };
+    DEMO_ACCOUNTS.push(account);
+    DEMO_LOGIN.pending = null;
+    return { stage: 'done', phone: account.phone, account_id: account.id, name: 'Демо-аккаунт' };
   }
 
   if (clean === '/api/accounts/login/start') {
@@ -3699,7 +3758,9 @@ const LOGIN_PATHS = { phone: 'start', code: 'code', password: 'password' };
 const LOGIN_FIELDS = { phone: 'phone', code: 'code', password: 'password' };
 
 function loginReset() {
-  state.login = { stage: 'phone', phone: '', attemptsLeft: null, delivery: null };
+  // method: каким путём человек идёт — 'phone' или 'qr'. От него зависит, куда
+  // уйдёт облачный пароль: пароль после сканирования принимает другой адрес.
+  state.login = { stage: 'phone', phone: '', attemptsLeft: null, delivery: null, method: 'phone' };
 }
 
 /* Куда Telegram положил код — словами. Ключи — delivery.via с сервера. */
@@ -3724,6 +3785,7 @@ function openLoginSheet(phone) {
       phone: pending.phone || '',
       attemptsLeft: pending.attempts_left != null ? pending.attempts_left : null,
       delivery: null,
+      method: 'phone',
     };
   } else {
     loginReset();
@@ -3755,6 +3817,7 @@ function renderLoginStage(message) {
   $('loginNote').textContent = notes.filter(Boolean).join(' ');
   $('loginError').textContent = message || '';
   $('loginRestart').hidden = stage === 'phone';
+  $('loginCreds').hidden = stage !== 'phone';
   $('loginResend').hidden = stage !== 'code';
 
   const input = $('loginInput');
@@ -3771,6 +3834,15 @@ function renderLoginStage(message) {
   });
 }
 
+/* Свои ключи из складного блока. Оба пустые — входа ключами сервиса, тело
+   без них. Заполнено одно — сервер скажет 400: пара или ничего. */
+function loginCreds(prefix) {
+  const id = ($(prefix + 'ApiId').value || '').trim();
+  const hash = ($(prefix + 'ApiHash').value || '').trim();
+  if (!id && !hash) return {};
+  return { api_id: id, api_hash: hash };
+}
+
 async function submitLogin() {
   const stage = state.login.stage;
   const value = ($('loginInput').value || '').trim();
@@ -3780,11 +3852,16 @@ async function submitLogin() {
   }
   if (stage === 'phone') state.login.phone = value;
 
+  const path =
+    stage === 'password' && state.login.method === 'qr' ? 'qr/password' : LOGIN_PATHS[stage];
+  const payload = { [LOGIN_FIELDS[stage]]: value };
+  if (stage === 'phone') Object.assign(payload, loginCreds('login'));
+
   try {
     const step = await withLoading($('loginSubmit'), () =>
-      api(`/api/accounts/login/${LOGIN_PATHS[stage]}`, {
+      api(`/api/accounts/login/${path}`, {
         method: 'POST',
-        body: JSON.stringify({ [LOGIN_FIELDS[stage]]: value }),
+        body: JSON.stringify(payload),
       })
     );
     await applyLoginStep(step);
@@ -3809,6 +3886,7 @@ async function applyLoginStep(step) {
     phone: step.phone || state.login.phone,
     attemptsLeft: step.attempts_left != null ? step.attempts_left : null,
     delivery: step.delivery || null,
+    method: state.login.method,
   };
   renderLoginStage();
   if (step.stage === 'code' && wasStage === 'phone') toast(deliveryHint(step.delivery));
@@ -3848,6 +3926,7 @@ async function loginFailed(error) {
       phone: step.phone || state.login.phone,
       attemptsLeft: step.attempts_left != null ? step.attempts_left : state.login.attemptsLeft,
       delivery: state.login.delivery,
+      method: state.login.method,
     };
     renderLoginStage(error.message);
     $('loginInput').focus();
@@ -3881,6 +3960,7 @@ async function resendLogin() {
 
 /* «Другой номер» — забыть незавершённый вход и начать с первого шага. */
 async function restartLogin() {
+  await qrTeardown();
   try {
     await withLoading($('loginRestart'), () =>
       api('/api/accounts/login/cancel', { method: 'POST' })
@@ -3893,6 +3973,151 @@ async function restartLogin() {
   renderLoginStage();
   $('loginInput').focus();
   await loadAccounts();
+}
+
+/* QR-вход: кабинет показывает код и опрашивает статус, пока человек
+   сканирует. Таймеры живут здесь, серверное ожидание — в app/accounts_login. */
+const QR_POLL_MS = 2500;
+const qrCtl = { started: false, finished: true, pollId: 0, tickId: 0, deadline: 0 };
+
+function openQrSheet() {
+  if (!state.features.account_login_enabled) {
+    toast('Вход аккаунтов пока на настройке');
+    return;
+  }
+  closeSheets();
+  $('qrImage').removeAttribute('src');
+  $('qrError').textContent = '';
+  $('qrHint').textContent = 'Готовим код…';
+  $('qrRefresh').hidden = true;
+  $('qrCreds').hidden = false;
+  $('qrCreds').open = false;
+  $('qrSheet').classList.add('is-open');
+  qrBegin();
+}
+
+/* Просьба кода. Ключи читаем из своего складного блока — у QR он свой. */
+async function qrBegin() {
+  await qrTeardown();
+  $('qrError').textContent = '';
+  $('qrRefresh').hidden = true;
+  $('qrHint').textContent = 'Готовим код…';
+  try {
+    const begun = await api('/api/accounts/login/qr/start', {
+      method: 'POST',
+      body: JSON.stringify(loginCreds('qr')),
+    });
+    $('qrImage').src = begun.image;
+    $('qrCreds').hidden = true;
+    qrCtl.started = true;
+    qrCtl.finished = false;
+    qrCtl.deadline = Date.now() + (begun.expires_in || 300) * 1000;
+    qrTick();
+    qrCtl.tickId = setInterval(qrTick, 1000);
+    qrSchedule();
+  } catch (error) {
+    // Плохие ключи — тоже сюда: блок с ними на виду, поправить рядом.
+    $('qrHint').textContent = '';
+    $('qrError').textContent = error.message;
+  }
+}
+
+/* Обратный отсчёт. Код протух — опрос дальше бессмысленен, жмём «Обновить». */
+function qrTick() {
+  const left = Math.max(0, Math.round((qrCtl.deadline - Date.now()) / 1000));
+  if (left <= 0) {
+    qrFinish();
+    $('qrHint').textContent = 'Код протух — обновите его кнопкой ниже.';
+    $('qrRefresh').hidden = false;
+    return;
+  }
+  const mm = String(Math.floor(left / 60));
+  const ss = String(left % 60).padStart(2, '0');
+  $('qrHint').textContent = `Код протухнет через ${mm}:${ss} — успейте навести камеру.`;
+}
+
+function qrSchedule() {
+  qrStopPoll();
+  qrCtl.pollId = setTimeout(qrPoll, QR_POLL_MS);
+}
+
+function qrStopPoll() {
+  clearTimeout(qrCtl.pollId);
+  qrCtl.pollId = 0;
+}
+
+function qrFinish() {
+  qrStopPoll();
+  clearInterval(qrCtl.tickId);
+  qrCtl.tickId = 0;
+  qrCtl.finished = true;
+}
+
+/* Опрос статуса: waiting — ждём дальше, password — шторка пароля (адрес свой),
+   done — общий финиш. 409 — код протух или вход не начинали: только обновить. */
+async function qrPoll() {
+  try {
+    const status = await api('/api/accounts/login/qr/status');
+    if (!status || status.stage === 'waiting') {
+      qrSchedule();
+      return;
+    }
+    if (status.stage === 'password') {
+      // Сервер перевёл вход в ожидание пароля: соединение живое и чужое —
+      // разбирать его отменой уже нельзя, дальше только таймеры.
+      qrCtl.started = false;
+      qrFinish();
+      openQrPassword(status.phone);
+      return;
+    }
+    if (status.stage === 'done') {
+      qrCtl.started = false;
+      qrFinish();
+      await applyLoginStep(status);
+      return;
+    }
+    qrSchedule();
+  } catch (error) {
+    qrFinish();
+    if (error.status === 503) {
+      closeSheets();
+      toast(error.message, 'error');
+      await loadAccounts();
+      return;
+    }
+    $('qrHint').textContent = '';
+    $('qrError').textContent = error.message;
+    $('qrRefresh').hidden = false;
+  }
+}
+
+/* Пароль после сканирования: та же шторка, но уйдёт он адресом QR-ветки. */
+function openQrPassword(phone) {
+  closeSheets();
+  state.login = {
+    stage: 'password',
+    phone: phone || '',
+    attemptsLeft: null,
+    delivery: null,
+    method: 'qr',
+  };
+  renderLoginStage();
+  $('loginSheet').classList.add('is-open');
+  toast('Код отсканирован. Остался облачный пароль.');
+  setTimeout(() => $('loginInput').focus(), 220);
+}
+
+/* Разбор QR-входа: таймеры — всегда, сервер — если ожидание ещё живо.
+   Молчаливый: на закрытой шторке жаловаться некому. */
+async function qrTeardown() {
+  qrFinish();
+  if (!qrCtl.started) return;
+  qrCtl.started = false;
+  try {
+    await api('/api/accounts/login/qr/cancel', { method: 'POST' });
+  } catch (error) {
+    /* Вход уже могли доесть с другого конца — это не ошибка. */
+  }
 }
 
 /* «Попробовать снова» под офлайн-аккаунтом: одна осечка не приговор, но и
@@ -4853,7 +5078,9 @@ function closePicker() {
 
 function closeSheets() {
   const loginWasOpen = $('loginSheet').classList.contains('is-open');
+  const qrWasOpen = $('qrSheet').classList.contains('is-open');
   document.querySelectorAll('.sheet').forEach((sheet) => sheet.classList.remove('is-open'));
+  if (qrWasOpen) qrTeardown();
   state.activeCommand = null;
   state.editTask = null;
   state.picker = { mode: 'chats', key: null, multi: false, chosen: [], chats: [] };
@@ -5750,6 +5977,16 @@ function bindEvents() {
   $('loginRestart').addEventListener('click', restartLogin);
   $('loginResend').addEventListener('click', resendLogin);
   $('loginInBot').addEventListener('click', () => openBot('add_account'));
+  $('loginToQr').addEventListener('click', () => {
+    // Вход один на двоих: телефонный шаг сервер забудет сам при старте QR.
+    loginReset();
+    openQrSheet();
+  });
+  $('qrRefresh').addEventListener('click', qrBegin);
+  $('qrToPhone').addEventListener('click', () => {
+    closeSheets();
+    openLoginSheet();
+  });
   $('topUpBtn').addEventListener('click', (event) => {
     // currentTarget, а не target: внутри кнопки может лежать <span>, и тогда
     // индикатор загрузки (withLoading) повесился бы не на ту кнопку.

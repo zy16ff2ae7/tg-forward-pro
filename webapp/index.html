@@ -545,12 +545,45 @@
           <i class="field__note" id="loginNote"></i>
         </label>
         <button class="btn btn--primary btn--block" id="loginSubmit">Получить код</button>
+        <details class="creds" id="loginCreds">
+          <summary>Свои ключи API (необязательно)</summary>
+          <input id="loginApiId" inputmode="numeric" placeholder="API ID — цифры" autocomplete="off">
+          <input id="loginApiHash" placeholder="API Hash — 32 знака" autocomplete="off">
+          <i class="field__note">Берутся на my.telegram.org/apps. Поля пустые — вход ключами сервиса.</i>
+        </details>
         <div class="login__aside">
           <button class="btn" id="loginResend">Прислать ещё раз</button>
           <button class="btn" id="loginRestart">Другой номер</button>
+          <button class="btn" id="loginToQr">Войти по QR-коду</button>
           <button class="btn" id="loginInBot">Продолжить в боте</button>
         </div>
         <div class="error" id="loginError" role="alert"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sheet" id="qrSheet" role="dialog" aria-modal="true" aria-label="Вход по QR-коду">
+    <div class="sheet__backdrop" data-close></div>
+    <div class="sheet__panel">
+      <div class="sheet__head">
+        <div class="sheet__title">Вход по QR-коду</div>
+        <button class="icon-btn" data-close aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="form">
+        <div class="sheet__lead">В приложении Telegram: Настройки → Устройства → Связать устройство — и наведите камеру на код. Номер набирать не нужно.</div>
+        <img id="qrImage" class="qr" alt="QR-код для входа в Telegram">
+        <div class="hint" id="qrHint"></div>
+        <details class="creds" id="qrCreds">
+          <summary>Свои ключи API (необязательно)</summary>
+          <input id="qrApiId" inputmode="numeric" placeholder="API ID — цифры" autocomplete="off">
+          <input id="qrApiHash" placeholder="API Hash — 32 знака" autocomplete="off">
+          <i class="field__note">Берутся на my.telegram.org/apps. Поля пустые — вход ключами сервиса.</i>
+        </details>
+        <div class="error" id="qrError" role="alert"></div>
+        <button class="btn btn--primary btn--block" id="qrRefresh" hidden>Обновить код</button>
+        <div class="login__aside">
+          <button class="btn" id="qrToPhone">Войти по номеру</button>
+        </div>
       </div>
     </div>
   </div>
