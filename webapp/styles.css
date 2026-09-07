@@ -828,6 +828,13 @@ button { border: none; background: none; cursor: pointer; }
 .task--archived { opacity: 0.6; }
 
 /* Массовые действия под сегментом: тихие кнопки второго ряда. */
+/* Мастер первой задачи: три чёрточки-шага. Текущий светится, пройденные
+   залиты: где находишься — видно без подписей. */
+.wsteps { display: flex; gap: 6px; margin-bottom: 12px; }
+.wsteps span { flex: 1; height: 4px; border-radius: 2px; background: var(--line); }
+.wsteps span.is-done { background: var(--accent); }
+.wsteps span.is-current { background: var(--accent-2); box-shadow: 0 0 8px var(--accent); }
+.wiz-list { display: flex; flex-direction: column; gap: 8px; max-height: 38vh; overflow-y: auto; }
 .bulk { display: flex; gap: 8px; margin: 10px 0 2px; flex-wrap: wrap; }
 .bulk[hidden] { display: none; }
 

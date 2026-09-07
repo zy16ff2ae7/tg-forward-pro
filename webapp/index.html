@@ -454,6 +454,23 @@
     </div>
   </div>
 
+  <!-- Мастер первой задачи: откуда → куда → запуск вместо шторки с формой.
+       Живёт только при нуле задач (кнопка на главной), шаги рисует renderWizard. -->
+  <div class="sheet" id="wizardSheet" role="dialog" aria-modal="true" aria-label="Первая задача">
+    <div class="sheet__backdrop" data-close></div>
+    <div class="sheet__panel">
+      <div class="sheet__head">
+        <div class="sheet__title">Первая задача</div>
+        <button class="icon-btn" data-close aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="form">
+        <div class="wsteps" id="wizardSteps"></div>
+        <div id="wizardBody"></div>
+        <div class="error" id="wizardError" role="alert"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Модалка результатов задачи. Кнопка выгрузки стоит в шапке, а не под
        списком: список бывает на сотню строк, и внизу её пришлось бы искать
        прокруткой. «Показать ещё» наоборот живёт под списком — там, где

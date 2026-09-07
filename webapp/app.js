@@ -1719,7 +1719,261 @@ function renderHomeWizard() {
     <div class="wizard__head">🧭 мастер · два шага до первой задачи</div>
     ${step(hasAccount, !hasAccount, '1', 'Подключите аккаунт', 'Telegram-аккаунт, глазами которого смотрит дочка', 'accounts')}
     ${step(false, hasAccount, '2', 'Выберите сценарий', 'или возьмите готовый шаблон из каталога', 'commands')}
+    ${hasAccount ? '<button class="btn btn--primary btn--block" type="button" data-wizard>⚡ Собрать первую задачу за минуту</button>' : ''}
     <div class="wizard__foot">старт — с пробного абонемента: /bonus в боте за подписку на канал</div>`;
+}
+
+/* Мастер первой задачи: откуда → куда → запуск. Три шага вместо шторки
+   с пятнадцатью полями: чат-источник, чат-приёмник, проверка и пуск.
+   Окна «когда» у пересылки нет осознанно: зеркало идёт в реальном времени,
+   а не по расписанию, — рисовать время было бы враньём. Серверу всё равно,
+   откуда пришёл POST: строится обычная пересылка copy_channel. */
+const wizard = {
+  step: 1, accountId: 0, source: '', target: '',
+  chats: [], online: true, query: '',
+};
+
+async function openWizard() {
+  if (DEMO) {
+    toast('Демо: мастер доступен в боевом кабинете');
+    return;
+  }
+  if (!state.accounts.length) {
+    try {
+      await loadAccounts();
+    } catch (error) { /* пустой список скажет сам */ }
+  }
+  const account = state.accounts.find((item) => item.online) || state.accounts[0];
+  if (!account) {
+    toast('Сначала подключите аккаунт');
+    switchTab('accounts');
+    return;
+  }
+  Object.assign(wizard, {
+    step: 1, accountId: account.id, source: '', target: '',
+    chats: [], online: true, query: '',
+  });
+  $('wizardError').textContent = '';
+  $('wizardSheet').classList.add('is-open');
+  renderWizard();
+  loadWizardChats();
+}
+
+function wizardSelected() {
+  return wizard.step === 1 ? wizard.source : wizard.target;
+}
+
+function renderWizard() {
+  const dots = [1, 2, 3].map((num) => {
+    const cls = num < wizard.step || wizard.step > 3 ? 'is-done' : (num === wizard.step ? 'is-current' : '');
+    return `<span class="${cls}"></span>`;
+  }).join('');
+  $('wizardSteps').innerHTML = dots;
+  $('wizardError').textContent = '';
+  const body = $('wizardBody');
+  if (wizard.step === 4) {
+    body.innerHTML = `
+      <div class="sheet__lead">🎉 Задача запущена: посты текут из источника в приёмник.</div>
+      <button class="btn btn--primary btn--block" type="button" data-wiz-done>К задачам</button>`;
+    return;
+  }
+  if (wizard.step === 3) {
+    renderWizardReview(body);
+    return;
+  }
+  const first = wizard.step === 1;
+  const options = state.accounts.map((item) =>
+    `<option value="${item.id}"${item.id === wizard.accountId ? ' selected' : ''}>${esc(item.phone || chatTitle(item))}</option>`
+  ).join('');
+  body.innerHTML = `
+    <div class="sheet__lead">${first ? 'Откуда забирать посты?' : 'Куда их складывать?'}</div>
+    ${first ? `<select id="wizardAccount" class="input" data-wiz-account>${options}</select>` : ''}
+    <input id="wizardSearch" class="input" placeholder="Найти чат…" value="${esc(wizard.query)}">
+    <div class="wiz-list" id="wizardChats"></div>
+    <input id="wizardManual" class="input" placeholder="или вставьте @username / ссылку" value="${esc(wizardSelected())}">
+    <div class="row">
+      ${first ? '' : '<button class="btn" type="button" data-wiz-back>Назад</button>'}
+      <button class="btn btn--primary" type="button" data-wiz-next>Далее</button>
+    </div>`;
+  renderWizardChats();
+}
+
+/* Шаг «запуск»: проверка глазами перед пуском. Источник, приёмник, чей
+   глазами смотрит аккаунт — и честное «заработает сразу»: пересылка идёт
+   в реальном времени, ждать расписания нечего. */
+function renderWizardReview(body) {
+  const account = state.accounts.find((item) => item.id === wizard.accountId);
+  body.innerHTML = `
+    <div class="sheet__lead">Всё верно?</div>
+    <div class="hint">📡 ${esc(wizard.source)} → ${esc(wizard.target)}</div>
+    <div class="hint">👁 Глазами: ${esc(account ? (account.phone || ('#' + account.id)) : '—')}</div>
+    <div class="hint">⚡ Заработает сразу и круглосуточно — расписание пересылке ни к чему.</div>
+    <div class="row">
+      <button class="btn" type="button" data-wiz-back>Назад</button>
+      <button class="btn btn--primary" type="button" data-wiz-submit>Запустить задачу</button>
+    </div>`;
+}
+
+async function loadWizardChats() {
+  const query = wizard.query;
+  try {
+    const data = await api(`/api/chats?account_id=${wizard.accountId}&q=${encodeURIComponent(query)}`);
+    if (query !== wizard.query) return;
+    wizard.chats = data.chats || [];
+    wizard.online = data.online !== false;
+    rememberChatNames(wizard.chats);
+  } catch (error) {
+    wizard.chats = [];
+    wizard.online = true;
+  }
+  if (wizard.step === 1 || wizard.step === 2) renderWizardChats();
+}
+
+function renderWizardChats() {
+  const holder = $('wizardChats');
+  if (!holder) return;
+  if (!wizard.online) {
+    holder.innerHTML = emptyHtml('i-off', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте — список чатов читает он.');
+    return;
+  }
+  if (!wizard.chats.length) {
+    holder.innerHTML = emptyHtml('i-search', 'Ничего не найдено', 'Измените запрос — или впишите @username ниже.');
+    return;
+  }
+  const selected = wizardSelected();
+  holder.innerHTML = wizard.chats.map((chat) => {
+    const ref = chatToRef(chat);
+    const kind = chatKind(chat);
+    const on = selected === ref;
+    return `
+      <button type="button" class="chat${on ? ' is-selected' : ''}" data-wiz-pick="${esc(ref)}">
+        <div class="chat__ico">${icon(kind.icon)}</div>
+        <div class="chat__body">
+          <div class="chat__title">${esc(chatTitle(chat))}</div>
+          <div class="chat__sub"><code>${esc(ref)}</code></div>
+        </div>
+      </button>`;
+  }).join('');
+}
+
+function wizardPick(ref) {
+  if (wizard.step === 1) wizard.source = ref;
+  else wizard.target = ref;
+  const manual = $('wizardManual');
+  if (manual) manual.value = ref;
+  renderWizardChats();
+  wizardNext();
+}
+
+function wizardNext() {
+  const manual = $('wizardManual');
+  const value = manual ? manual.value.trim() : '';
+  if (wizard.step === 1) {
+    if (value) wizard.source = value;
+    if (!wizard.source) {
+      $('wizardError').textContent = 'Выберите чат-источник или вставьте ссылку.';
+      return;
+    }
+    wizard.step = 2;
+  } else if (wizard.step === 2) {
+    if (value) wizard.target = value;
+    if (!wizard.target) {
+      $('wizardError').textContent = 'Выберите приёмник или вставьте ссылку.';
+      return;
+    }
+    if (wizard.target === wizard.source) {
+      $('wizardError').textContent = 'Приёмник совпадает с источником — пересылать будет некуда.';
+      return;
+    }
+    wizard.step = 3;
+  }
+  renderWizard();
+  if (wizard.step <= 2) loadWizardChats();
+}
+
+async function submitWizard(button) {
+  try {
+    await withLoading(button, () => api('/api/tasks', {
+      method: 'POST',
+      body: JSON.stringify({
+        command: 'copy_channel',
+        account_id: wizard.accountId,
+        source: wizard.source,
+        target: wizard.target,
+      }),
+    }));
+    wizard.step = 4;
+    renderWizard();
+  } catch (requestError) {
+    if (requestError.status === 402) {
+      closeSheets();
+      openPaywall();
+    } else {
+      $('wizardError').textContent = requestError.message;
+    }
+  }
+}
+
+function bindWizard() {
+  const body = $('wizardBody');
+  body.addEventListener('click', (event) => {
+    const pick = event.target.closest('[data-wiz-pick]');
+    if (pick) {
+      buzz('light');
+      wizardPick(pick.dataset.wizPick);
+      return;
+    }
+    if (event.target.closest('[data-wiz-next]')) {
+      buzz('light');
+      wizardNext();
+      return;
+    }
+    if (event.target.closest('[data-wiz-back]')) {
+      buzz('light');
+      wizard.step = Math.max(1, wizard.step - 1);
+      renderWizard();
+      loadWizardChats();
+      return;
+    }
+    if (event.target.closest('[data-wiz-submit]')) {
+      buzz('medium');
+      submitWizard(event.target.closest('[data-wiz-submit]'));
+      return;
+    }
+    if (event.target.closest('[data-wiz-done]')) {
+      buzz('light');
+      closeSheets();
+      finishWizard();
+      return;
+    }
+  });
+  body.addEventListener('change', (event) => {
+    if (event.target.matches('[data-wiz-account]')) {
+      wizard.accountId = Number(event.target.value);
+      wizard.source = '';
+      wizard.target = '';
+      loadWizardChats();
+    }
+  });
+  let timer = null;
+  body.addEventListener('input', (event) => {
+    if (!event.target.matches('#wizardSearch')) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      wizard.query = event.target.value;
+      loadWizardChats();
+    }, 350);
+  });
+}
+
+async function finishWizard() {
+  try {
+    state.me = await api('/api/me');
+    renderHomeWizard();
+  } catch (error) { /* главная переживёт */ }
+  await refreshAllTaskLists();
+  switchTab('tasks');
+  toast('Первая задача запущена', 'ok');
 }
 
 /* График пересылок за две недели: столбики SVG без библиотек. Ошибки —
@@ -5321,6 +5575,11 @@ function bindEvents() {
   });
   // Мастер новичка перерисовывается — слушатель делегирован.
   $('homeWizard').addEventListener('click', (event) => {
+    if (event.target.closest('[data-wizard]')) {
+      buzz('light');
+      openWizard();
+      return;
+    }
     const step = event.target.closest('[data-goto]');
     if (!step) return;
     switchTab(step.dataset.goto);
@@ -5559,6 +5818,7 @@ function bindEvents() {
   // форма задачи: поля и переключатель режима собираются при каждом открытии
   // шторки (у каждой команды свой набор), поэтому слушатели вешаются в bindSheetFields
   $('taskSubmit').addEventListener('click', submitTask);
+  bindWizard();
   $('paywallPay').addEventListener('click', (event) => payWithStars(event.currentTarget, 1));
 
   // выбор чата мышкой: кнопка «💬 выбрать» живёт в пересобираемой разметке
