@@ -143,3 +143,20 @@ async def test_mailing_tick_pins_when_enabled(create_user, create_account):
     assert client.sent == [(-1001, "всем привет")]
     assert client.pins == [(-1001, 101)]
 
+
+
+async def test_broadcast_pins_each_chat(create_user, create_account):
+    """Веер с галочкой: ушло в два чата — закрепилось в обоих."""
+    from tests.test_delivery_fixes import _db_rule, _snapshot
+
+    rule = await _db_rule(create_user, create_account, kind="broadcast")
+    snapshot = _snapshot(
+        rule,
+        filters=FilterConfig(targets=[-300], pin_on_send=True),
+    )
+    client = PinClient()
+
+    await jobs._broadcast(client, _message(), snapshot)
+
+    assert [chat for chat, _ in client.sent] == [-100200, -300]
+    assert client.pins == [(-100200, 101), (-300, 102)]

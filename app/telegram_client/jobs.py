@@ -45,7 +45,7 @@ from app.db import repo
 from app.errors import ValidationError
 from app.db.database import SessionLocal
 from app.telegram_client.filters import URL_RE, FilterConfig, message_text, transform_text
-from app.telegram_client.forwarder import send_copy, subscription_active
+from app.telegram_client.forwarder import pin_sent, send_copy, subscription_active
 from app.telegram_client.types import RuleSnapshot
 from app.translate import maybe_translate
 
@@ -771,15 +771,21 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
     sent = 0
     struck: dict[int, str] = {}
     delivered: list[int] = []
+    pin = bool(getattr(rule.filters, "pin_on_send", False))
     for target in targets:
         try:
-            await send_copy(
+            posted = await send_copy(
                 client, target, message, text,
                 buttons=getattr(rule.filters, "buttons", None),
                 topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
             )
             sent += 1
             delivered.append(target)
+            posted_id = getattr(posted, "id", None)
+            if posted_id:
+                if pin:
+                    await pin_sent(client, target, int(posted_id), rule_id=rule.id)
+                await schedule_autodelete(rule, target, int(posted_id))
         except FloodWaitError:
             # «Подождите» — не отказ чата, а пауза всего задания: отдаём её
             # наверх очереди, она подождёт вне слота отправки и повторит всё

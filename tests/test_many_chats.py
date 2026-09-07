@@ -21,12 +21,21 @@ from telethon.errors import FloodWaitError
 
 from app.db import repo
 from app.db.database import session_scope
-from app.db.models import Rule, Subscription
+from app.db.models import Rule, Subscription, TelegramAccount
 from app.telegram_client import jobs
 from app.telegram_client.manager import manager
 from tests.helpers import TEST_USER_ID
 
 MANY = 250
+
+
+async def _mature(account_id: int) -> None:
+    """Старит аккаунт на месяц: прогрев новичка (50/сутки) тест порций не касается."""
+    async with session_scope() as session:
+        account = await session.get(TelegramAccount, account_id)
+        assert account is not None
+        account.created_at = repo.utcnow() - timedelta(days=30)
+        await session.commit()
 # Ключи-заглушки: настоящие не нужны, но плейсхолдеры из .env.example менеджер
 # сам считает «шлюз не настроен» и честно отвечает пустотой.
 FAKE_API_ID = 1_234_567
@@ -242,6 +251,7 @@ async def test_poster_walks_all_chats_over_consecutive_ticks(
     _, _, account_id = await make_poster(
         create_user, create_account, chats=chats, messages=["раз"]
     )
+    await _mature(account_id)
     client = FakeClient()
     manager._clients[account_id] = client
 
