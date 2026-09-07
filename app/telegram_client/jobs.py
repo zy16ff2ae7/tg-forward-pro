@@ -39,7 +39,7 @@ from telethon.tl.functions.channels import (
     GetFullChannelRequest,
     InviteToChannelRequest,
 )
-from telethon.tl.types import ChannelParticipantsAdmins
+from telethon.tl.types import ChannelParticipantsAdmins, MessageEntityTextUrl
 
 from app.db import repo
 from app.errors import ValidationError
@@ -536,6 +536,44 @@ def own_text_item(text: str) -> SimpleNamespace:
     return SimpleNamespace(id=0, title="", text=text, chat_id=0, message_id=0)
 
 
+# Сколько участников упомянуть: больше — стена отметок и верный флуд-лимит.
+MENTION_CAP = 30
+
+
+async def mention_suffix(
+    client: Any, target_id: int, prefix_len: int
+) -> tuple[str, list]:
+    """Невидимые упоминания участников чата: суффикс текста и сущности к нему.
+
+    Каждое упоминание — символ-невидимка со ссылкой ``tg://user?id=``:
+    в чате ничего лишнего не видно, а уведомления уходят. Ботов пропускаем —
+    им упоминания ни к чему. Не вышло прочитать состав (нет прав, канал) —
+    возвращаем пустоту: сообщение уходит без упоминаний, а не не уходит.
+    """
+    try:
+        users = await client.get_participants(target_id, limit=MENTION_CAP)
+    except Exception as exc:  # noqa: BLE001 — состав не прочитали, шлём как есть
+        logger.info(
+            "Чат {}: состав не прочитали ({}), упоминаний не будет",
+            target_id, type(exc).__name__,
+        )
+        return "", []
+    ids = [
+        int(user.id)
+        for user in (users or [])
+        if getattr(user, "id", None) and not getattr(user, "bot", False)
+    ]
+    if not ids:
+        return "", []
+    suffix = "\n" + "\u2060" * len(ids)
+    base = prefix_len + 1
+    entities = [
+        MessageEntityTextUrl(offset=base + pos, length=1, url=f"tg://user?id={uid}")
+        for pos, uid in enumerate(ids)
+    ]
+    return suffix, entities
+
+
 async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: int) -> int | None:
     """Отправляет одно сохранённое сообщение в один чат.
 
@@ -561,6 +599,10 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
         text = transform_text(getattr(item, "text", "") or "", filters)
 
     thread = int(getattr(filters, "topic_id", 0) or 0) or None
+    entities: list = []
+    if filters.mention_all:
+        suffix, entities = await mention_suffix(client, target_id, len(text))
+        text += suffix
 
     async def _send() -> Any:
         if message is not None:
@@ -569,6 +611,7 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
                 link_preview=bool(filters.link_preview),
                 buttons=getattr(filters, "buttons", None),
                 topic_id=thread or 0,
+                entities=entities or None,
             )
         return await client.send_message(
             target_id,
@@ -576,6 +619,7 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
             parse_mode=None,
             link_preview=bool(filters.link_preview),
             comment_to=thread,
+            formatting_entities=entities or None,
         )
 
     if filters.typing:

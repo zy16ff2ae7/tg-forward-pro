@@ -149,6 +149,8 @@ class FilterConfig:
     delay_jitter: int = 0
     # Дневной лимит отправок аккаунта (0 — лимит сервиса с прогревом).
     daily_cap: int = 0
+    # Упоминать всех участников чата (первые 30, кроме ботов).
+    mention_all: bool = False
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "FilterConfig":
@@ -227,6 +229,7 @@ class FilterConfig:
             "topic_id": self.topic_id,
             "delay_jitter": self.delay_jitter,
             "daily_cap": self.daily_cap,
+            "mention_all": self.mention_all,
         }
 
 

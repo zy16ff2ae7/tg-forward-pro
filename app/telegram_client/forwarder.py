@@ -131,6 +131,7 @@ async def send_copy(
     link_preview: bool = True,
     buttons: Any = None,
     topic_id: int = 0,
+    entities: Any = None,
 ) -> Any:
     """Публикует сообщение как своё — без метки «Переслано от».
 
@@ -156,7 +157,7 @@ async def send_copy(
     if media is None:
         return await client.send_message(
             target_id, text or "", parse_mode=None, link_preview=link_preview,
-            buttons=rows, comment_to=thread,
+            buttons=rows, comment_to=thread, formatting_entities=entities,
         )
 
     size = getattr(media, "size", None)
@@ -208,6 +209,7 @@ async def send_copy(
             supports_streaming=True,
             buttons=rows,
             comment_to=thread,
+            formatting_entities=entities,
         )
     finally:
         try:
