@@ -478,7 +478,10 @@ async def consume_pending_discount(
     if promo is None:
         return None
     promo.active = False
-    promo.used_count += 1
+    if promo.owner_id is not None:
+        # Личный код учли здесь, а не при активации: только зачёт доказывает,
+        # что скидка сработала. Общие уже посчитаны активацией.
+        promo.used_count += 1
     user = await get_user(session, user_id)
     if user is not None:
         user.pending_promo_id = None
@@ -578,6 +581,22 @@ async def _redeem_discount_code(
         return "unknown", 0, None
     if await pending_discount(session, user_id) is not None:
         return "deferred", 0, None
+    if promo.owner_id is None and promo.max_uses > 0:
+        # Общий код с лимитом: место занимает активация, а не оплата, —
+        # иначе разобранный код звал бы ждать, а не торопиться. Гонку за
+        # последний слот держит условный UPDATE, как у кодов на дни.
+        # Проверка — после всех отказов: чужой deferred места не занимает.
+        bumped = await session.execute(
+            update(PromoCode)
+            .where(PromoCode.id == promo.id, PromoCode.used_count < promo.max_uses)
+            .values(used_count=PromoCode.used_count + 1)
+        )
+        if (bumped.rowcount or 0) != 1:
+            return "exhausted", 0, None
+    elif promo.owner_id is None:
+        promo.used_count += 1
+    # Личные коды счётчик при активации не трогают: их одноразовость держит
+    # гашение при зачёте платежа — там и учёт (см. consume_pending_discount).
     # Ссылка могла протухнуть (код погасили мимо зачёта) — чистим, не отказываем.
     user.pending_promo_id = promo.id
     session.add(PromoRedemption(code_id=promo.id, user_id=user_id))

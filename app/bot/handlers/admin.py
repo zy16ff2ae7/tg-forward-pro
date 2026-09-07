@@ -292,12 +292,26 @@ async def grant_access(message: Message) -> None:
     )
 
 
+def _parse_percent(raw: str) -> int | None:
+    """Процент из «20%» и «−20%»: 1–90, иначе None (не скидка)."""
+    cleaned = (raw or "").strip().lstrip("-−").rstrip()
+    if not cleaned.endswith("%"):
+        return None
+    digits = cleaned[:-1]
+    if not digits.isdigit():
+        return None
+    percent = int(digits)
+    return percent if 1 <= percent <= 90 else None
+
+
 @router.message(Command("promo_new"))
 async def promo_new(message: Message) -> None:
     """Создаёт промокод: /promo_new КОД ДНИ [ЛИМИТ] [СРОК_ДНЕЙ].
 
     Лимит — сколько человек успеют активировать (по умолчанию без лимита),
-    срок — сколько дней код живёт (по умолчанию бессрочно).
+    срок — сколько дней код живёт (по умолчанию бессрочно). Вместо дней
+    можно дать скидку: /promo_new КОД 20% [ЛИМИТ] [СРОК_ДНЕЙ] — общий код
+    на −N% к оплате для акций в канале.
     """
     from sqlalchemy.exc import IntegrityError
 
@@ -305,10 +319,21 @@ async def promo_new(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
     parts = (message.text or "").split()
-    usage = "Использование: <code>/promo_new LETO 7 100 3</code> — код, дни, лимит, срок в днях."
-    if len(parts) < 3 or not parts[2].isdigit() or int(parts[2]) < 1:
+    usage = (
+        "Использование: <code>/promo_new LETO 7 100 3</code> — код, дни, лимит, "
+        "срок в днях. Скидка: <code>/promo_new SALE 20% 500 3</code> — код, "
+        "процент, лимит, срок."
+    )
+    if len(parts) < 3:
         await message.answer(usage)
         return
+    percent = _parse_percent(parts[2])
+    days = 0
+    if percent is None:
+        if not parts[2].isdigit() or int(parts[2]) < 1:
+            await message.answer(usage)
+            return
+        days = int(parts[2])
     limit = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
     ttl = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else None
     try:
@@ -316,10 +341,11 @@ async def promo_new(message: Message) -> None:
             promo = await repo.create_promo_code(
                 session,
                 parts[1],
-                int(parts[2]),
+                days,
                 max_uses=limit,
                 ttl_days=ttl or None,
                 created_by=message.from_user.id,
+                percent=percent or 0,
             )
             await session.commit()
     except IntegrityError:
@@ -327,9 +353,14 @@ async def promo_new(message: Message) -> None:
         return
     tail = f", лимит {limit}" if limit else ", без лимита"
     tail += f", срок {ttl} дн." if ttl else ""
-    await message.answer(
-        f"🎟 Промокод <code>{promo.code}</code> на {promo.days} дн.{tail}."
-    )
+    if percent:
+        await message.answer(
+            f"🎟 Промокод <code>{promo.code}</code> на −{percent}% к оплате{tail}."
+        )
+    else:
+        await message.answer(
+            f"🎟 Промокод <code>{promo.code}</code> на {promo.days} дн.{tail}."
+        )
 
 
 # ─────────────────────────────── Рассылка ───────────────────────────────
