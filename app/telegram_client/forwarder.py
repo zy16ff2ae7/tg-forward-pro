@@ -142,7 +142,9 @@ async def deliver(client: Any, message: Any, rule: RuleSnapshot) -> DeliveryResu
     Задачи, отличные от пересылки (см. ``app.telegram_client.jobs``), уходят
     туда — у них свой порядок обработки и свои журналы.
     """
-    if rule.kind != "forward":
+    # Клон — та же пересылка-копия, только с догрузкой истории по таймеру:
+    # новые посты идут общим путём со всеми фильтрами и оформлением.
+    if rule.kind not in ("forward", "clone"):
         from app.telegram_client.jobs import run_job
 
         await run_job(client, message, rule)

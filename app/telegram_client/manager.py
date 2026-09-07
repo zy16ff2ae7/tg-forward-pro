@@ -14,6 +14,7 @@ from telethon.errors import (
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     PhoneNumberInvalidError,
+    RPCError,
     SessionPasswordNeededError,
 )
 from telethon.sessions import StringSession
@@ -227,6 +228,10 @@ class ClientManager:
         # idx — индекс следующего сообщения, runs — сколько раз отправили.
         self._poster_state: dict[int, dict] = {}
         self._poster_task: asyncio.Task | None = None
+        # Клоны каналов: новые посты идут живым путём через _rules, а историю
+        # догружает тик ниже — свой список, чтобы не мешать постеру.
+        self._clone_rules: list[RuleSnapshot] = []
+        self._clone_state: dict[int, dict] = {}
         # Рассылки по чатам — свой список и свой цикл: у них шаг в секундах, а
         # постер тикает раз в 20 сек и такой темп просто не выдержал бы.
         self._mailing_rules: list[RuleSnapshot] = []
@@ -934,6 +939,15 @@ class ClientManager:
                 fresh_mailings.append(snapshot)
             else:
                 fresh_posters.append(snapshot)
+        # Клоны — и живые, и по расписанию: в _rules они уже попали выше, а
+        # сюда — только недогрузившие историю, остальным тик не нужен.
+        fresh_clones: list[RuleSnapshot] = []
+        for rule in rules:
+            if rule.kind != "clone" or not rule.enabled or rule.archived:
+                continue
+            snapshot = _snapshot(rule)
+            if not snapshot.filters.clone_done:
+                fresh_clones.append(snapshot)
 
         async with self._lock:
             self._rules = fresh
@@ -941,6 +955,7 @@ class ClientManager:
             self._rules_by_id = by_id
             self._poster_rules = fresh_posters
             self._mailing_rules = fresh_mailings
+            self._clone_rules = fresh_clones
             # Правило выключили или удалили — состояние планировщика ему больше
             # не нужно. Иначе словари растут весь uptime процесса, а номер
             # удалённой задачи SQLite отдаёт следующей созданной: та получала
@@ -950,6 +965,7 @@ class ClientManager:
             for state, live in (
                 (self._poster_state, {snapshot.id for snapshot in fresh_posters}),
                 (self._mailing_state, {snapshot.id for snapshot in fresh_mailings}),
+                (self._clone_state, {snapshot.id for snapshot in fresh_clones}),
             ):
                 for rule_id in [key for key in state if key not in live]:
                     state.pop(rule_id, None)
@@ -957,15 +973,53 @@ class ClientManager:
     # ─────────────────────────── Авто-постер (планировщик) ───────────────────────────
 
     async def _poster_loop(self) -> None:
-        """Фоновый цикл авто-постера: раз в 20 сек проверяет расписание."""
+        """Фоновый цикл авто-постера: раз в 20 сек проверяет расписание.
+
+        Заодно догружает истории клонов: им отдельного цикла не положено, темп
+        тот же — порция за проход.
+        """
         while True:
             try:
                 await asyncio.sleep(20)
                 await self._poster_tick()
+                await self._clone_tick()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — планировщик не должен падать
                 logger.exception("Постер-планировщик упал: {}", exc)
+
+    async def _clone_tick(self) -> None:
+        """Один проход догрузки историй: каждому недогрузившему клону — порция.
+
+        Паузы после FloodWait — свои на задачу: ждать должны только те, кого
+        Telegram попросил подождать, а не все клоны разом.
+        """
+        from app.telegram_client.jobs import clone_backfill_tick
+
+        async with self._lock:
+            rules = list(self._clone_rules)
+        for rule in rules:
+            if not rule.enabled or rule.archived:
+                continue
+            if rule.filters.clone_done:
+                continue
+            if not await subscription_active(rule.user_id):
+                continue
+            client = self._clients.get(rule.account_id)
+            if client is None or not client.is_connected():
+                continue
+            state = self._clone_state.setdefault(rule.id, {"not_before": 0.0})
+            if time.time() < state.get("not_before", 0.0):
+                continue
+            try:
+                await clone_backfill_tick(client, rule)
+            except FloodWaitError as exc:
+                state["not_before"] = time.time() + exc.seconds
+                logger.warning(
+                    "Клон #{}: Telegram попросил подождать {} сек", rule.id, exc.seconds
+                )
+            except RPCError as exc:
+                logger.warning("Клон #{}: история не забралась: {}", rule.id, exc)
 
     def _calm_posters_after_restart(self) -> None:
         """После рестарта постеры ждут свой интервал, а не шлют всё разом.

@@ -143,6 +143,12 @@ const FIELD_SPEC = {
     control: 'check',
     note: 'синонимы и неотличимые буквы: поиск не опознает исходник',
   },
+  history: {
+    label: 'Постов из истории',
+    control: 'number',
+    placeholder: '50',
+    note: 'сколько последних постов забрать (до 500). 0 — только новые',
+  },
   schedule_only: { label: 'Только по датам (вместо кругов и окна)', control: 'check' },
   scheduled_posts: { label: 'Даты', control: 'schedule' },
 };
@@ -515,6 +521,11 @@ const DEMO_COMMANDS = [
     needs: ['account', 'source', 'target'], optional: ['mode', 'buttons', 'translate_to', 'uniquify'],
     description: 'Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.',
     tags: ['чужие посты', 'один канал → один'] },
+  { id: 'clone', group: 'publish', kind: 'clone', emoji: '📋', title: 'Клон канала', status: 'ready',
+    needs: ['account', 'source', 'target'], optional: ['history', 'buttons', 'translate_to', 'uniquify'],
+    description: 'Ваш канал как зеркало чужого: сначала забирается история, дальше новые посты выходят сами.',
+    hint: 'История забирается не залпом, а порциями — большой канал догрузится за несколько минут. Новые посты из источника выходят у вас сразу, не дожидаясь конца догрузки.',
+    tags: ['чужие посты', 'с историей', 'один канал → один'] },
   { id: 'broadcast', group: 'publish', kind: 'broadcast', emoji: '📣', title: 'Пересылка в несколько чатов', status: 'ready',
     needs: ['account', 'source', 'targets'], optional: ['buttons', 'translate_to', 'uniquify'],
     description: 'Тот же канал — сразу в десятки чатов: пост из источника уходит во все выбранные одним залпом, как только вышел.',
@@ -2137,6 +2148,11 @@ function taskMetaLines(task) {
   if (task.buttons_count) lines.push(`🔘 ${task.buttons_count} кн.`);
   if (task.translate_to) lines.push(`🌐 →${String(task.translate_to).toUpperCase()}`);
   if (task.uniquify) lines.push('✨ уник.');
+  if (task.kind === 'clone' && !task.clone_done) {
+    const total = Number(task.clone_history || 0);
+    const left = Number(task.clone_left || 0);
+    lines.push(total ? `📋 история ${total - left}/${total}` : '📋 забираю историю');
+  }
   // Сколько чатов у задачи — первым делом: у постинга и рассылки это главное
   // число задачи, и в заголовке оно есть только когда чатов больше одного.
   if (task.targets_count) lines.push(`${task.targets_count} ${chatWord(task.targets_count)}`);
@@ -3706,7 +3722,7 @@ function applyTaskPrefill(prefill) {
   // Настройки задачи — одним проходом: ключ формы и ключ задачи совпадают, а
   // лишние для этой команды поля просто не находятся в разметке.
   ['keywords', 'reaction', 'limit', 'scan', 'online_within_hours', 'api_delay',
-    'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'translate_to']
+    'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'translate_to', 'history']
     .forEach((key) => setValue(key, prefill[key]));
   ['typing', 'random_pick', 'link_preview', 'schedule_only', 'uniquify',
     'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only',
@@ -4343,6 +4359,7 @@ function collectTaskPayload() {
   number('gap', values.gap);
   number('cycle', values.cycle);
   number('repeats', values.repeats);
+  number('history', values.history);
   flag('schedule_only', values.schedule_only);
   if (values.scheduled_posts !== undefined) body.scheduled_posts = values.scheduled_posts;
   flag('typing', values.typing);

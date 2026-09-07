@@ -832,20 +832,24 @@ async def _apply_task_settings(
 
     # Кнопки-ссылки под постом — у всех, кто публикует копии: пересылка,
     # веерная отправка, постинг и рассылка. Мусор отклоняется с номером кнопки.
-    if kind in ("forward", "broadcast", "poster", "mailing"):
+    if kind in ("forward", "broadcast", "poster", "mailing", "clone"):
         if "buttons" in payload or not partial:
             filters["buttons"] = normalize_buttons(payload.get("buttons"))
 
     # Перевод чужих постов — у пересылки и веера: свои тексты человек пишет
     # сразу на своём языке, переводить их не надо.
-    if kind in ("forward", "broadcast"):
+    if kind in ("forward", "broadcast", "clone"):
         if "translate_to" in payload or not partial:
             filters["translate_to"] = normalize_lang(payload.get("translate_to"))
 
     # Уникализация — там же, где перевод: чужой текст под своё авторство.
-    if kind in ("forward", "broadcast"):
+    if kind in ("forward", "broadcast", "clone"):
         if "uniquify" in payload or not partial:
             filters["uniquify"] = _as_bool(payload.get("uniquify"))
+    # Клон: сколько постов истории забрать (0 — только новые, без прошлого).
+    if kind == "clone":
+        if "history" in payload or not partial:
+            filters["clone_history"] = max(0, min(500, _as_int(payload.get("history"), 50)))
 
 
 @routes.post("/api/tasks")
@@ -2570,6 +2574,10 @@ def _task_view(
     )
     view["translate_to"] = conf.translate_to or ""
     view["uniquify"] = bool(conf.uniquify)
+    if kind == "clone":
+        view["clone_done"] = bool(conf.clone_done)
+        view["clone_left"] = len(conf.clone_ids or [])
+        view["clone_history"] = int(conf.clone_history or 0)
     if kind == "poster":
         view["interval_min"] = max(1, conf.interval_seconds // 60)
         view["window_start"] = conf.window_start
@@ -2699,17 +2707,19 @@ def _edit_view(
         edit["target"] = str(rule.target_id)
     if conf.target_user_id:
         edit["target_user"] = str(conf.target_user_id)
-    if kind in ("forward", "broadcast", "poster", "mailing"):
+    if kind in ("forward", "broadcast", "poster", "mailing", "clone"):
         # Кнопки под постом — как есть: форма показывает их строками.
         edit["buttons"] = [
             {"text": item.get("text"), "url": item.get("url")}
             for item in (conf.buttons or [])
             if isinstance(item, dict)
         ]
-    if kind in ("forward", "broadcast"):
+    if kind in ("forward", "broadcast", "clone"):
         edit["translate_to"] = conf.translate_to or ""
-    if kind in ("forward", "broadcast"):
+    if kind in ("forward", "broadcast", "clone"):
         edit["uniquify"] = bool(conf.uniquify)
+    if kind == "clone":
+        edit["history"] = int(conf.clone_history or 0)
     if kind == "forward":
         edit["mode"] = rule.mode
     elif kind == "parser":
@@ -2826,6 +2836,19 @@ COMMANDS: list[dict] = [
         "needs": ["account", "source", "target"],
         "optional": ["mode", "buttons", "translate_to", "uniquify"],
         "tags": ["чужие посты", "один канал → один"],
+    },
+    {
+        "id": "clone",
+        "group": "publish",
+        "kind": "clone",
+        "emoji": "📋",
+        "title": "Клон канала",
+        "description": "Ваш канал как зеркало чужого: сначала забирается история, дальше новые посты выходят сами.",
+        "status": "ready",
+        "needs": ["account", "source", "target"],
+        "optional": ["history", "buttons", "translate_to", "uniquify"],
+        "hint": "История забирается не залпом, а порциями — большой канал догрузится за несколько минут. Новые посты из источника выходят у вас сразу, не дожидаясь конца догрузки.",
+        "tags": ["чужие посты", "с историей", "один канал → один"],
     },
     {
         "id": "broadcast",

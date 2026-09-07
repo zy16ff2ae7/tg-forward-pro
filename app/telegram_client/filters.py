@@ -69,6 +69,11 @@ class FilterConfig:
     translate_to: str = ""
     # Уникализация чужого текста: омоглифы + безопасные синонимы.
     uniquify: bool = False
+    # Клон канала: сколько постов истории забрать и что уже забрали.
+    clone_history: int = 0
+    clone_ids: list = field(default_factory=list)
+    clone_listed: bool = False
+    clone_done: bool = False
     # Настройки задач из app.telegram_client.jobs
     targets: list[int] = field(default_factory=list)
     subscribe_to: list[str] = field(default_factory=list)
@@ -143,6 +148,10 @@ class FilterConfig:
             "buttons": self.buttons,
             "translate_to": self.translate_to,
             "uniquify": self.uniquify,
+            "clone_history": self.clone_history,
+            "clone_ids": self.clone_ids,
+            "clone_listed": self.clone_listed,
+            "clone_done": self.clone_done,
             "targets": self.targets,
             "subscribe_to": self.subscribe_to,
             "reaction": self.reaction,

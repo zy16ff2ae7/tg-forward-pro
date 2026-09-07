@@ -146,6 +146,14 @@ def task_title(rule: Any) -> str:
         return f"Уведомления из ЛС → {target}"
     if kind == "checks":
         return f"Ловец чеков: {source} → {target}"
+    if kind == "clone":
+        if filters.get("clone_done"):
+            return f"Клон: {source} → {target}"
+        left = len(filters.get("clone_ids") or [])
+        total = int(filters.get("clone_history") or 0)
+        if filters.get("clone_listed") and total:
+            return f"Клон: {source} → {target} · история {total - left}/{total}"
+        return f"Клон: {source} → {target} · забираю историю"
     if kind == "broadcast":
         total = len(chat_recipients(rule))
         if total > 1:
@@ -659,6 +667,96 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
         await record_ok(rule, message, count=sent)
     else:
         await record_error(rule, message, "Сообщение не удалось доставить ни в один чат")
+
+
+# История забирается порциями: залп в сотни постов — верный FloodWait.
+CLONE_BATCH = 20
+# Больше — уже не клон, а архив: качать тысячи постов через API — часы работы.
+CLONE_HISTORY_CAP = 500
+
+
+async def clone_backfill_tick(client: Any, rule: RuleSnapshot) -> str:
+    """Один проход догрузки истории клона: не больше CLONE_BATCH постов.
+
+    Возвращает "done", когда забирать больше нечего, иначе "progress".
+    Порядок — от старых к новым: читатель нового канала листает историю как
+    она выходила. Удалённый или служебный пост не держит очередь: его id
+    считается обработанным, иначе один такой пост встал бы пробкой навсегда.
+    FloodWait отдаётся наверх: менеджер ставит задачу на паузу до срока.
+    """
+    filters = rule.filters
+    want = max(0, min(CLONE_HISTORY_CAP, int(filters.clone_history or 0)))
+    ids = [int(item) for item in (filters.clone_ids or [])]
+
+    async def persist(
+        rest: list[int] | None = None,
+        listed: bool | None = None,
+        done: bool | None = None,
+    ) -> None:
+        async with SessionLocal() as session:
+            await repo.update_clone_progress(
+                session, rule.id, ids=rest, listed=listed, done=done
+            )
+            await session.commit()
+        # Снимок менеджера правим руками: следующий тик читает его же, а не базу.
+        if rest is not None:
+            filters.clone_ids = list(rest)
+        if listed is not None:
+            filters.clone_listed = listed
+        if done is not None:
+            filters.clone_done = done
+
+    if filters.clone_done or want <= 0:
+        if not filters.clone_done:
+            await persist([], True, True)
+        return "done"
+    if not ids and not filters.clone_listed:
+        # Опись: забираем id последних постов одним запросом и разворачиваем —
+        # дальше очередь всегда идёт от старых к новым.
+        found = await client.get_messages(rule.source_id, limit=want)
+        if not isinstance(found, list):
+            found = [found] if found else []
+        ids = sorted({int(msg.id) for msg in found if msg and msg.id})
+        await persist(ids, True, None)
+    if not ids:
+        await persist([], True, True)
+        return "done"
+
+    chunk, rest = ids[:CLONE_BATCH], ids[CLONE_BATCH:]
+    found = await client.get_messages(rule.source_id, ids=chunk)
+    if not isinstance(found, list):
+        found = [found] if found else []
+    by_id = {int(msg.id): msg for msg in found if msg and msg.id}
+    sent_count = 0
+    try:
+        for pos, mid in enumerate(chunk):
+            msg = by_id.get(mid)
+            raw_text = message_text(msg) if msg is not None else ""
+            if (
+                msg is None
+                or getattr(msg, "action", None) is not None
+                or (not raw_text and getattr(msg, "media", None) is None)
+            ):
+                continue
+            if filters.translate_to:
+                raw_text = await maybe_translate(raw_text, filters.translate_to)
+            await send_copy(
+                client,
+                rule.target_id,
+                msg,
+                transform_text(raw_text, filters),
+                buttons=getattr(filters, "buttons", None),
+            )
+            await record_ok(rule, msg)
+            sent_count = pos + 1
+    except FloodWaitError:
+        # Успевшее — в базу, остаток — в очередь: повтор начнётся с места
+        # остановки, а не с начала порции.
+        await persist(chunk[sent_count:] + rest, None, None)
+        raise
+    rest = chunk[sent_count:] + rest if sent_count < len(chunk) else rest
+    await persist(rest, None, not rest)
+    return "done" if not rest else "progress"
 
 
 async def _baiting(client: Any, message: Any, rule: RuleSnapshot) -> None:

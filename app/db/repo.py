@@ -756,6 +756,33 @@ async def update_scheduled_slot(
     return False
 
 
+async def update_clone_progress(
+    session: AsyncSession,
+    rule_id: int,
+    *,
+    ids: list[int] | None = None,
+    listed: bool | None = None,
+    done: bool | None = None,
+) -> None:
+    """Пишет прогресс догрузки истории клона.
+
+    Копия — глубокая (см. update_scheduled_slot): иначе ORM молча пишет UPDATE
+    со старым значением. Вызывающий правит свой снимок сам.
+    """
+    rule = await session.get(Rule, rule_id)
+    if rule is None:
+        return
+    filters = copy.deepcopy(rule.filters or {})
+    if ids is not None:
+        filters["clone_ids"] = [int(item) for item in ids]
+    if listed is not None:
+        filters["clone_listed"] = bool(listed)
+    if done is not None:
+        filters["clone_done"] = bool(done)
+    rule.filters = filters
+    await session.flush()
+
+
 async def set_rule_archived(session: AsyncSession, rule: Rule, archived: bool) -> None:
     """Убирает задачу в архив или возвращает из него."""
     rule.archived = archived
