@@ -26,6 +26,18 @@ router = Router(name="rules")
 RESULTS_PREVIEW = 20
 
 
+def free_limit_text() -> str:
+    """Апсейл в упор: потолок бесплатного режима с ценой безлимита.
+
+    Отдельной функцией — текст проверяет юнит-тест, а хендлер со стейтами
+    и чатами для этого слишком тяжёлый.
+    """
+    return (
+        f"🔒 <b>Потолок бесплатного режима — {settings.max_rules_free} задачи.</b>\n\n"
+        f"Абонемент снимает лимит: безлимит задач за {settings.price_stars} ⭐/мес."
+    )
+
+
 async def _collected_count(rule) -> int:
     """Сколько задача уже нашла. У несобирающих задач — ноль без запроса."""
     if (rule.kind or "forward") not in COLLECTING_KINDS:
@@ -206,8 +218,7 @@ async def set_target(message: Message, state: FSMContext) -> None:
         if not subscribed and rules_count >= settings.max_rules_free:
             await state.clear()
             await wait.edit_text(
-                f"🔒 На бесплатном режиме доступно только {settings.max_rules_free} правила.\n"
-                "Оформите абонемент, чтобы снять ограничение.",
+                free_limit_text(),
                 reply_markup=kb.payment_menu(message.from_user.id),
             )
             return

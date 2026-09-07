@@ -436,6 +436,24 @@
     </div>
   </div>
 
+  <!-- Пейволл: упор в лимит бесплатных задач. Раньше здесь были сухая
+       ошибка и редирект в бота — теперь цена безлимита и оплата в один тап
+       прямо из кабинета. Рисует openPaywall. -->
+  <div class="sheet" id="paywallSheet" role="dialog" aria-modal="true" aria-label="Абонемент">
+    <div class="sheet__backdrop" data-close></div>
+    <div class="sheet__panel">
+      <div class="sheet__head">
+        <div class="sheet__title">Потолок бесплатного режима</div>
+        <button class="icon-btn" data-close aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="form">
+        <div class="sheet__lead" id="paywallLead"></div>
+        <button class="btn btn--primary btn--block" id="paywallPay">Оформить</button>
+        <button class="btn btn--block" data-close>Позже</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Модалка результатов задачи. Кнопка выгрузки стоит в шапке, а не под
        списком: список бывает на сотню строк, и внизу её пришлось бы искать
        прокруткой. «Показать ещё» наоборот живёт под списком — там, где

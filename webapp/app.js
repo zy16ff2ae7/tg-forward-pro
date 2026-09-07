@@ -4767,8 +4767,7 @@ async function submitTask() {
     switchTab('tasks');
   } catch (requestError) {
     if (requestError.status === 402) {
-      $('taskError').textContent = 'Лимит правил. Оформите абонемент.';
-      setTimeout(() => openBot('subscribe'), 1200);
+      openPaywall();
     } else if (requestError.status === 503) {
       $('taskError').textContent = requestError.message;
       setTimeout(() => openBot('add_account'), 1200);
@@ -4776,6 +4775,20 @@ async function submitTask() {
       $('taskError').textContent = requestError.message;
     }
   }
+}
+
+/* Пейволл: упор в лимит бесплатных задач. Вместо сухой ошибки и редиректа
+   в бота — цена безлимита и оплата звёздами прямо из кабинета. */
+function openPaywall() {
+  const tariffs = (state.me && state.me.tariffs) || {};
+  const max = tariffs.max_rules_free || 3;
+  const stars = tariffs.stars || 0;
+  const tasks = pluralRu(max, 'задача', 'задачи', 'задач');
+  $('paywallLead').textContent =
+    `Бесплатно — ${max} ${tasks}. Абонемент снимает лимит: ` +
+    (stars ? `безлимит задач за ${stars} ⭐/мес.` : 'безлимит задач.');
+  $('paywallPay').textContent = stars ? `Оформить за ${stars} ⭐` : 'Оформить абонемент';
+  $('paywallSheet').classList.add('is-open');
 }
 
 /* ─────────────────────── Копилка подписок ────────────────────────────── */
@@ -5546,6 +5559,7 @@ function bindEvents() {
   // форма задачи: поля и переключатель режима собираются при каждом открытии
   // шторки (у каждой команды свой набор), поэтому слушатели вешаются в bindSheetFields
   $('taskSubmit').addEventListener('click', submitTask);
+  $('paywallPay').addEventListener('click', (event) => payWithStars(event.currentTarget, 1));
 
   // выбор чата мышкой: кнопка «💬 выбрать» живёт в пересобираемой разметке
   // полей, поэтому слушатель делегированный — на контейнер.
