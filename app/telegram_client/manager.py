@@ -1060,10 +1060,12 @@ class ClientManager:
             POSTER_TICK_BUDGET,
             MailingMessageGone,
             chat_recipients,
+            is_hopeless_chat_error,
             load_mailing_library,
             mailing_pick,
             mailing_send,
             own_text_item,
+            record_pruned_chats,
             window_now_sec,
             window_tz_minutes,
         )
@@ -1151,6 +1153,9 @@ class ClientManager:
             # Чаты, которые круг потерял: о них человек узнаёт из карточки задачи,
             # поэтому итог прохода уходит в журнал (см. jobs.record_batch).
             failed: list[str] = []
+            # Безнадёжные сбои и удачи прохода — в счётчик мёртвых чатов.
+            struck: dict[int, str] = {}
+            delivered: list[int] = []
             while st["queue"] and sent < POSTER_BATCH and time.time() < deadline:
                 chat_id = st["queue"][0]
                 try:
@@ -1183,8 +1188,11 @@ class ClientManager:
                     # очередь и остальные чаты не получили бы ничего.
                     logger.warning("Постер #{} не отправил в {}: {}", rule.id, chat_id, exc)
                     failed.append(f"{chat_id}: {type(exc).__name__}")
+                    if is_hopeless_chat_error(exc):
+                        struck[chat_id] = type(exc).__name__
                     st["queue"].pop(0)
                     continue
+                delivered.append(chat_id)
                 st["queue"].pop(0)
                 st["runs"] += 1
                 sent += 1
@@ -1194,6 +1202,20 @@ class ClientManager:
             # Счётчик отправок и итог прохода — одним заходом в базу: по нему в
             # кабинете видно и работу задачи, и потерянные чаты.
             await record_batch(rule, sent=sent, failed=failed)
+            if struck or (delivered and rule.filters.chat_strikes):
+                # Мёртвые чаты уходят из получателей сами: иначе каждый круг
+                # спотыкался бы об одни и те же недоступные чаты.
+                async with session_scope() as session:
+                    pruned, strikes = await repo.register_chat_strikes(
+                        session, rule.id, failed=struck, succeeded=delivered
+                    )
+                    await session.commit()
+                rule.filters.chat_strikes = strikes
+                if pruned:
+                    rule.filters.targets = [
+                        chat_id for chat_id in rule.filters.targets if chat_id not in pruned
+                    ]
+                    await record_pruned_chats(rule, pruned)
             if not st["queue"]:
                 # Круг закрыт — интервал считаем от него, а не от начала обхода.
                 st["last"] = time.time()
@@ -1331,6 +1353,14 @@ class ClientManager:
             # Итог отправки — тем же способом, каким его пишет постер: счётчик,
             # запись в журнале и, если не ушло, причина для карточки.
             await record_batch(rule, sent=1, target_id=target_id)
+            if str(target_id) in (rule.filters.chat_strikes or {}):
+                # Чат ожил (снова приняли) — страйки с него снимаем.
+                async with session_scope() as session:
+                    _, strikes = await repo.register_chat_strikes(
+                        session, rule.id, succeeded=[target_id]
+                    )
+                    await session.commit()
+                rule.filters.chat_strikes = strikes
             logger.debug("Рассылка #{}: отправлено в {}", rule.id, target_id)
 
     async def _mailing_failed(
@@ -1350,6 +1380,23 @@ class ClientManager:
             exc,
         )
         await record_batch(rule, failed=[f"{target_id}: {type(exc).__name__}"])
+        from app.telegram_client.jobs import is_hopeless_chat_error, record_pruned_chats
+
+        if is_hopeless_chat_error(exc):
+            # Безнадёжный получатель держит рассылку: позиция не двигается,
+            # пока чат не примет. Три таких сбоя — и чат уходит сам.
+            async with session_scope() as session:
+                pruned, strikes = await repo.register_chat_strikes(
+                    session, rule.id,
+                    failed={target_id: type(exc).__name__},
+                )
+                await session.commit()
+            rule.filters.chat_strikes = strikes
+            if pruned:
+                rule.filters.targets = [
+                    chat_id for chat_id in rule.filters.targets if chat_id not in pruned
+                ]
+                await record_pruned_chats(rule, pruned)
         state["not_before"] = time.time() + MAILING_ERROR_PAUSE
 
     async def _mailing_nothing_to_send(self, rule: RuleSnapshot) -> None:
@@ -1380,9 +1427,11 @@ class ClientManager:
             POSTER_CHAT_GAP,
             MailingMessageGone,
             due_scheduled_slot,
+            is_hopeless_chat_error,
             load_scheduled_item,
             mailing_send,
             record_batch,
+            record_pruned_chats,
             scheduled_pending,
         )
 
@@ -1405,6 +1454,8 @@ class ClientManager:
             return
         processed: list[int] = []
         failed: list[str] = []
+        struck: dict[int, str] = {}
+        delivered: list[int] = []
         sent_to = set(slot.get("sent_to") or [])
         for chat_id in chats:
             if chat_id in sent_to or chat_id in processed:
@@ -1432,8 +1483,11 @@ class ClientManager:
                 # закроется, а тик будет спотыкаться об один и тот же чат.
                 logger.warning("Постер #{} не отправил в {}: {}", rule.id, chat_id, exc)
                 failed.append(f"{chat_id}: {type(exc).__name__}")
+                if is_hopeless_chat_error(exc):
+                    struck[chat_id] = type(exc).__name__
                 processed.append(chat_id)
                 continue
+            delivered.append(chat_id)
             processed.append(chat_id)
             st["runs"] += 1
             if time.time() < deadline:
@@ -1452,6 +1506,18 @@ class ClientManager:
         # следующий тик в той же минуте отправит те же чаты повторно.
         slot["sent_to"] = sorted(sent_to | set(processed))
         await record_batch(rule, sent=len(processed) - len(failed), failed=failed)
+        if struck or (delivered and rule.filters.chat_strikes):
+            async with session_scope() as session:
+                pruned, strikes = await repo.register_chat_strikes(
+                    session, rule.id, failed=struck, succeeded=delivered
+                )
+                await session.commit()
+            rule.filters.chat_strikes = strikes
+            if pruned:
+                rule.filters.targets = [
+                    chat_id for chat_id in rule.filters.targets if chat_id not in pruned
+                ]
+                await record_pruned_chats(rule, pruned)
         if set(chats) <= set(slot["sent_to"]):
             await self._close_scheduled_slot(rule, slot)
 

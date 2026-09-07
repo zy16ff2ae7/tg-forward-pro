@@ -2233,6 +2233,7 @@ function taskMetaLines(task) {
   if (task.uniquify) lines.push('✨ уник.');
   if (task.keywords_count) lines.push(`🔎 ${task.keywords_count} сл.`);
   if (task.alerts === false) lines.push('🔕 без алертов');
+  if (task.chats_pruned) lines.push(`🧹 ${task.chats_pruned} мёртв.`);
   if (task.kind === 'clone' && !task.clone_done) {
     const total = Number(task.clone_history || 0);
     const left = Number(task.clone_left || 0);

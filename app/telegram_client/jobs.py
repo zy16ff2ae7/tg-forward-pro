@@ -26,7 +26,15 @@ from types import SimpleNamespace
 from typing import Any, Callable, Awaitable, Sequence
 
 from loguru import logger
-from telethon.errors import FloodWaitError, RPCError
+from telethon.errors import (
+    ChannelInvalidError,
+    ChannelPrivateError,
+    ChatIdInvalidError,
+    ChatWriteForbiddenError,
+    FloodWaitError,
+    RPCError,
+    UserBannedInChannelError,
+)
 from telethon.tl.functions.channels import (
     GetFullChannelRequest,
     InviteToChannelRequest,
@@ -664,6 +672,8 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
         raw_text = await maybe_translate(raw_text, rule.filters.translate_to)
     text = transform_text(raw_text, rule.filters)
     sent = 0
+    struck: dict[int, str] = {}
+    delivered: list[int] = []
     for target in targets:
         try:
             await send_copy(
@@ -671,6 +681,7 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
                 buttons=getattr(rule.filters, "buttons", None),
             )
             sent += 1
+            delivered.append(target)
         except FloodWaitError:
             # «Подождите» — не отказ чата, а пауза всего задания: отдаём её
             # наверх очереди, она подождёт вне слота отправки и повторит всё
@@ -678,10 +689,43 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
             raise
         except RPCError as exc:
             logger.warning("Рассылка #{}: не ушло в {}: {}", rule.id, target, exc)
+            if is_hopeless_chat_error(exc):
+                struck[target] = type(exc).__name__
     if sent:
         await record_ok(rule, message, count=sent)
     else:
         await record_error(rule, message, "Сообщение не удалось доставить ни в один чат")
+    # Мёртвые чаты копятся в счётчике и уходят из получателей сами — иначе
+    # каждое сообщение спотыкалось бы об один и тот же недоступный чат.
+    if struck or (delivered and rule.filters.chat_strikes):
+        async with SessionLocal() as session:
+            pruned, strikes = await repo.register_chat_strikes(
+                session, rule.id, failed=struck, succeeded=delivered
+            )
+            await session.commit()
+        rule.filters.chat_strikes = strikes
+        if pruned:
+            rule.filters.targets = [
+                chat_id for chat_id in rule.filters.targets if chat_id not in pruned
+            ]
+            await record_pruned_chats(rule, pruned)
+
+
+# Безнадёжные ошибки отправки в чат: сами не пройдут, сколько ни повторяй.
+# Всё остальное (сеть, слоумод, временные отказы) — повод подождать, а не
+# вычёркивать: transient-ошибка три круга подряд — ещё не мёртвый чат.
+HOPELESS_CHAT_ERRORS: tuple[type, ...] = (
+    ChatWriteForbiddenError,
+    UserBannedInChannelError,
+    ChannelPrivateError,
+    ChannelInvalidError,
+    ChatIdInvalidError,
+)
+
+
+def is_hopeless_chat_error(exc: BaseException) -> bool:
+    """Чат не примет сообщение никогда: выгнали, снесли, закрыли."""
+    return isinstance(exc, HOPELESS_CHAT_ERRORS)
 
 
 # История забирается порциями: залп в сотни постов — верный FloodWait.
@@ -1590,6 +1634,29 @@ async def record_error(rule: RuleSnapshot, message: Any, error: str) -> None:
     from app.task_alerts import maybe_alert_problem
 
     await maybe_alert_problem(rule, error)
+
+
+async def record_pruned_chats(rule: RuleSnapshot, pruned: list[int]) -> None:
+    """Мёртвые получатели убраны из задачи — одной строкой в журнал.
+
+    Статус «успех»: задача самовылечилась, а не сломалась. Текст — в поле
+    причины: карточка его не покажет (там только несчастья), а в журнале
+    уборка видна — молча выкидывать чаты из чужой задачи нельзя.
+    """
+    if not pruned:
+        return
+    chats = ", ".join(str(chat_id) for chat_id in sorted(pruned))
+    async with SessionLocal() as session:
+        await repo.log_forward(
+            session,
+            rule_id=rule.id,
+            user_id=rule.user_id,
+            source_msg_id=0,
+            target_msg_id=None,
+            status="ok",
+            error=f"🧹 Убраны мёртвые чаты ({repo.DEAD_CHAT_STRIKES} сбоя подряд): {chats}",
+        )
+        await session.commit()
 
 
 def batch_error_text(failed: Sequence[str]) -> str:

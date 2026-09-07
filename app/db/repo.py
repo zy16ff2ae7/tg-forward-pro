@@ -1496,6 +1496,67 @@ async def count_trailing_errors(
     return streak
 
 
+# Сколько безнадёжных сбоев подряд терпим, прежде чем убрать чат.
+DEAD_CHAT_STRIKES = 3
+
+
+async def register_chat_strikes(
+    session: AsyncSession,
+    rule_id: int,
+    *,
+    failed: dict[int, str] | None = None,
+    succeeded: list[int] | None = None,
+) -> tuple[list[int], dict]:
+    """Сбои и успехи отправки по чатам — в счётчик, мёртвые — из получателей.
+
+    Возвращает (убранные чаты, новый счётчик). Убираем только из ``targets``:
+    главный приёмник — руками человека, его смерть и так видна (алерты).
+    Счётчик — в ``filters``: переживает рестарт, а правка задачи его не
+    трогает. Копия глубокая (см. update_scheduled_slot).
+    """
+    rule = await session.get(Rule, rule_id)
+    if rule is None:
+        return [], {}
+    filters = copy.deepcopy(rule.filters or {})
+    raw = filters.get("chat_strikes") or {}
+    strikes = {
+        str(key): {
+            "fails": int(value.get("fails", 0)),
+            "error": str(value.get("error", "")),
+        }
+        for key, value in raw.items()
+        if isinstance(value, dict)
+    }
+    changed = False
+    for chat_id in succeeded or []:
+        if strikes.pop(str(int(chat_id)), None) is not None:
+            changed = True
+    for chat_id, error in (failed or {}).items():
+        entry = strikes.get(str(int(chat_id)), {"fails": 0, "error": error})
+        entry["fails"] += 1
+        entry["error"] = error
+        strikes[str(int(chat_id))] = entry
+        changed = True
+    pruned: list[int] = []
+    if failed:
+        targets = [int(item) for item in (filters.get("targets") or [])]
+        for key in [key for key, entry in strikes.items() if entry["fails"] >= DEAD_CHAT_STRIKES]:
+            chat_id = int(key)
+            if chat_id in targets:
+                targets.remove(chat_id)
+                pruned.append(chat_id)
+                del strikes[key]
+                changed = True
+        filters["targets"] = targets
+        if pruned:
+            filters["chats_pruned"] = int(filters.get("chats_pruned") or 0) + len(pruned)
+    if changed:
+        filters["chat_strikes"] = strikes
+        rule.filters = filters
+        await session.flush()
+    return pruned, strikes
+
+
 async def task_health(
     session: AsyncSession, rule_ids: Sequence[int]
 ) -> dict[int, dict]:

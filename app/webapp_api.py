@@ -2630,6 +2630,10 @@ def _task_view(
     if kind in ("forward", "broadcast", "poster", "mailing", "clone",
                 "listener", "checks", "dialogs", "baiting", "mute"):
         view["alerts"] = bool(getattr(conf, "alerts", True))
+    if kind in ("broadcast", "poster", "mailing"):
+        # Сколько мёртвых чатов задача уже убрала сама: авто-уборка обязана
+        # быть видна, иначе пропавшие получатели выглядят как баг.
+        view["chats_pruned"] = int(getattr(conf, "chats_pruned", 0) or 0)
     if kind == "clone":
         view["clone_done"] = bool(conf.clone_done)
         view["clone_left"] = len(conf.clone_ids or [])

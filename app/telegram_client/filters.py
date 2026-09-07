@@ -78,6 +78,9 @@ class FilterConfig:
     invite_to: str = ""
     # Письма о третьей ошибке подряд. Выключается галочкой в задаче.
     alerts: bool = True
+    # Счётчик сбоев по чатам {chat_id: {fails, error}} и сколько уже убрано.
+    chat_strikes: dict = field(default_factory=dict)
+    chats_pruned: int = 0
     # Настройки задач из app.telegram_client.jobs
     targets: list[int] = field(default_factory=list)
     subscribe_to: list[str] = field(default_factory=list)
@@ -158,6 +161,8 @@ class FilterConfig:
             "clone_done": self.clone_done,
             "invite_to": self.invite_to,
             "alerts": self.alerts,
+            "chat_strikes": self.chat_strikes,
+            "chats_pruned": self.chats_pruned,
             "targets": self.targets,
             "subscribe_to": self.subscribe_to,
             "reaction": self.reaction,
