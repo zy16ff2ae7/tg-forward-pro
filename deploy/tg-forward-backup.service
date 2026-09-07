@@ -15,4 +15,4 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/opt/tg-forward/data /opt/tg-forward/backups
+ReadWritePaths=/opt/tg-forward/data /var/backups/tg-forward

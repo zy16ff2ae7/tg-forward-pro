@@ -5,6 +5,10 @@ set -euo pipefail
 TARGET_HOST="${1:-}"
 APP_DIR="/opt/tg-forward"
 SERVICE_NAME="tg-forward"
+# Бэкапы лежат ВНЕ каталога приложения: rsync --delete в этом скрипте
+# зеркалит $APP_DIR по исходнику, и всё, чего нет в проекте, стирается.
+# Один деплой уже уничтожил накопленные архивы — больше не повторится.
+BACKUP_DIR="/var/backups/tg-forward"
 
 if [[ -z "$TARGET_HOST" ]]; then
   echo "Использование: ./deploy/deploy.sh user@server"
@@ -17,7 +21,7 @@ echo "==> Пользователь сервиса и каталоги на $TARG
 # Сервис работает НЕ от root (см. User= в юните): отдельный пользователь
 # без шелла, код читает, пишет только в data/ и logs/.
 ssh "$TARGET_HOST" "id -u tgforward >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d $APP_DIR tgforward"
-ssh "$TARGET_HOST" "mkdir -p $APP_DIR/{data,logs,backups}"
+ssh "$TARGET_HOST" "mkdir -p $APP_DIR/data $APP_DIR/logs $BACKUP_DIR"
 
 echo "==> Синхронизирую файлы в $TARGET_HOST:$APP_DIR"
 
@@ -77,10 +81,11 @@ echo "==> Права: код — root, данные и секреты — tgforw
 # logs — отладочные записи с номерами телефонов.
 # .env читает systemd-юнит от имени tgforward: 600 + владелец. БД (data/*.db
 # с WAL) и логи должны быть записываемы сервисом — отдаём каталоги целиком.
-ssh "$TARGET_HOST" "chown -R tgforward:tgforward $APP_DIR/data $APP_DIR/logs $APP_DIR/backups \
+ssh "$TARGET_HOST" "mkdir -p $APP_DIR/data $APP_DIR/logs $BACKUP_DIR \
+  && chown -R tgforward:tgforward $APP_DIR/data $APP_DIR/logs $BACKUP_DIR \
   && chown tgforward:tgforward $APP_DIR/.env && chmod 600 $APP_DIR/.env \
-  && chmod 700 $APP_DIR/data $APP_DIR/logs $APP_DIR/backups \
-  && find $APP_DIR/data $APP_DIR/logs $APP_DIR/backups -type f -exec chmod 600 {} + 2>/dev/null || true"
+  && chmod 700 $APP_DIR/data $APP_DIR/logs $BACKUP_DIR \
+  && find $APP_DIR/data $APP_DIR/logs $BACKUP_DIR -type f -exec chmod 600 {} + 2>/dev/null || true"
 
 echo "==> Устанавливаю systemd-юнит"
 ssh "$TARGET_HOST" "cp $APP_DIR/deploy/$SERVICE_NAME.service /etc/systemd/system/ \
