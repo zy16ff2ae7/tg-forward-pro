@@ -47,6 +47,7 @@ async def maybe_alert_problem(rule: Any, reason: str) -> None:
         if streak != ALERT_STREAK:
             return
         from app.telegram_client.jobs import task_title
+        from app.bot.keyboards import cabinet_button
 
         title = escape(str(task_title(rule)))
         text = str(reason or "").strip()
@@ -56,6 +57,7 @@ async def maybe_alert_problem(rule: Any, reason: str) -> None:
             rule.user_id,
             f"⚠️ <b>{title}</b>\n{escape(text)}\nОшибка третья подряд — "
             "откройте задачу, в журнале подробности.",
+            reply_markup=cabinet_button(),
         )
     except Exception as exc:  # noqa: BLE001 — алерт не должен ронять доставку
         logger.warning("Не удалось отправить алерт задачи #{}: {}", getattr(rule, "id", "?"), exc)

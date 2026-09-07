@@ -3,8 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.config import settings
+from app.db import repo
 from app.db.database import session_scope
-from app.db.models import Rule
+from app.db.models import ForwardLog, Rule
 from app.task_alerts import maybe_alert_problem, set_alert_bot
 from app.telegram_client import jobs
 from app.telegram_client.filters import FilterConfig
@@ -163,3 +165,38 @@ async def test_api_alerts_toggle_roundtrip(
     )
     assert resp.status == 201, await resp.text()
     assert (await resp.json())["task"]["alerts"] is True
+
+
+async def test_alert_carries_cabinet_button(monkeypatch, create_user, create_account):
+    """Письмо о больной задаче несёт кнопку кабинета — чинить в один тап."""
+    from tests.helpers import add_rule
+
+    monkeypatch.setattr(
+        type(settings), "mini_app_url",
+        property(lambda self: "https://cabinet.test/app/"),
+    )
+    user_id = await create_user()
+    account_id = await create_account(user_id)
+    await add_rule(user_id, account_id)
+    async with session_scope() as session:
+        rule = (await repo.list_rules(session, user_id))[0]
+        for _ in range(3):
+            session.add(
+                ForwardLog(
+                    rule_id=rule.id, user_id=user_id, source_msg_id=1,
+                    status="error", error="чат снесён",
+                )
+            )
+        await session.commit()
+
+    sent = {}
+
+    class ButtonBot:
+        async def send_message(self, chat_id, text, **kwargs):
+            sent.update(kwargs)
+
+    set_alert_bot(ButtonBot())
+    await maybe_alert_problem(rule, "чат снесён")
+    markup = sent.get("reply_markup")
+    assert markup is not None
+    assert markup.inline_keyboard[0][0].text == "🖥 Открыть кабинет"
