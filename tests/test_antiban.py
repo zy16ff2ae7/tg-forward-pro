@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 from sqlalchemy import select
 
+import pytest
+
 from app.db import repo
 from app.db.database import session_scope
 from app.db.models import ForwardLog
@@ -20,6 +22,14 @@ from app.telegram_client.manager import manager
 from app.telegram_client.queue import DeliveryQueue
 from app.telegram_client.types import SKIP_DAILY_CAP, RuleSnapshot
 from tests.test_pin import _forward_rule
+
+
+@pytest.fixture(autouse=True)
+def _fresh_cap_warnings():
+    """Журнал «по лимиту» — раз в сутки на задачу: между тестами память чистим."""
+    forwarder._cap_warned.clear()
+    yield
+    forwarder._cap_warned.clear()
 
 
 def _aged(days: int):
@@ -230,3 +240,27 @@ async def test_mailing_send_counts(create_user, create_account):
 
     async with session_scope() as session:
         assert await repo.send_count_today(session, account_id) == 1
+
+
+async def test_broadcast_stops_at_cap_and_tells_once(create_user, create_account):
+    """Веер при исчерпанном лимите молчит: ни одного чата, строка в журнале одна."""
+    from app.telegram_client import jobs
+    from tests.test_delivery_fixes import _db_rule, _snapshot
+
+    rule = await _db_rule(create_user, create_account, kind="broadcast")
+    snapshot = _snapshot(rule, filters=FilterConfig(targets=[-300], daily_cap=1))
+    async with session_scope() as session:
+        await repo.bump_send_count(session, rule.account_id)
+    client = CapClient()
+
+    await jobs._broadcast(
+        client, SimpleNamespace(id=21, message="пост", media=None), snapshot
+    )
+    await jobs._broadcast(
+        client, SimpleNamespace(id=22, message="пост", media=None), snapshot
+    )
+
+    assert client.sent == []
+    errors = await _journal_errors(rule.id)
+    assert len(errors) == 1
+    assert "Дневной лимит" in errors[0]

@@ -248,9 +248,10 @@ class DeliveryQueue:
         if delay_override is not None:
             return max(0, int(delay_override))
         delay = max(0, int(getattr(rule, "delay_seconds", 0) or 0))
-        # Тихо ждут только пересылки: модерации и подпискам ночь не помеха —
-        # спам в три часа ночи мутить надо, а не откладывать до утра.
-        if getattr(rule, "kind", "forward") in ("forward", "clone"):
+        # Тихо ждут только пересылки — обычная, веер и клон: модерации и
+        # подпискам ночь не помеха — спам в три часа ночи мутить надо,
+        # а не откладывать до утра.
+        if getattr(rule, "kind", "forward") in ("forward", "broadcast", "clone"):
             from app.telegram_client.jobs import quiet_wait_seconds
 
             delay += quiet_wait_seconds(getattr(rule, "filters", None))

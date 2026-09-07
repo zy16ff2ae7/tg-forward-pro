@@ -1,4 +1,4 @@
-"""Тихие часы: окно отправки для пересылки и рассылки.
+"""Тихие часы: окно отправки для пересылки, веера и рассылки.
 
 Постер окном уже жил, а пересылка слала ночью и рассылка — тоже. Теперь окно
 одно на всех: пересылка откладывает сообщение до открытия (а не выбрасывает),
@@ -191,3 +191,18 @@ async def test_mailing_continues_inside_window(create_user, create_account, clea
     await manager._mailing_tick()
 
     assert client.recipients == [-1001]
+
+
+async def test_queue_adds_quiet_for_broadcast(monkeypatch):
+    """Веер — тоже пересылка: ночью пост ждёт утра, а не уходит сразу."""
+    monkeypatch.setattr(jobs, "quiet_wait_seconds", lambda config, **_: 3600)
+    calls: list[int] = []
+
+    async def handler(client, message, rule) -> bool:
+        return True
+
+    queue = DeliveryQueue(handler, workers=1, maxsize=10)
+    monkeypatch.setattr(queue, "_spawn_delayed", lambda job, delay: calls.append(delay))
+
+    assert queue.submit(None, None, _snapshot(_filters(), kind="broadcast")) is True
+    assert calls == [10 + 3600]

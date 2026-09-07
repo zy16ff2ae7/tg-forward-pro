@@ -45,7 +45,13 @@ from app.db import repo
 from app.errors import ValidationError
 from app.db.database import SessionLocal
 from app.telegram_client.filters import URL_RE, FilterConfig, message_text, transform_text
-from app.telegram_client.forwarder import pin_sent, send_copy, subscription_active
+from app.telegram_client.forwarder import (
+    check_send_cap,
+    note_cap_hit,
+    pin_sent,
+    send_copy,
+    subscription_active,
+)
 from app.telegram_client.types import RuleSnapshot
 from app.translate import maybe_translate
 
@@ -762,6 +768,13 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
     targets = chat_recipients(rule)
     if not targets:
         await record_error(rule, message, "У рассылки нет получателей")
+        return
+
+    # Лимит — до перевода и отправок: как у пересылки, пост пропускается,
+    # а в журнал ложится одна строка на день (см. note_cap_hit).
+    hit, used, cap = await check_send_cap(rule)
+    if hit:
+        await note_cap_hit(rule, used, cap, int(getattr(message, "id", 0) or 0))
         return
 
     raw_text = message_text(message)

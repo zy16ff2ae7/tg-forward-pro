@@ -226,7 +226,7 @@ const FIELD_SPEC = {
     label: 'Отправок в сутки, не больше',
     control: 'number',
     placeholder: '0',
-    note: '0 — по прогреву аккаунта. Лишнее ждёт полуночи',
+    note: '0 — по прогреву аккаунта. Постинг ждёт полуночи, пересылка пост пропускает',
   },
   schedule_only: { label: 'Только по датам (вместо кругов и окна)', control: 'check' },
   scheduled_posts: { label: 'Даты', control: 'schedule' },
