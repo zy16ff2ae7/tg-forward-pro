@@ -35,6 +35,7 @@ from app.db.database import SessionLocal
 from app.telegram_client.filters import FilterConfig, message_text, transform_text
 from app.telegram_client.forwarder import send_copy, subscription_active
 from app.telegram_client.types import RuleSnapshot
+from app.translate import maybe_translate
 
 # Слушают все чаты аккаунта, а не один источник: у ЛС нет фиксированного chat_id
 FLOATING_KINDS: tuple[str, ...] = ("dialogs",)
@@ -635,7 +636,10 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
         await record_error(rule, message, "У рассылки нет получателей")
         return
 
-    text = transform_text(message_text(message), rule.filters)
+    raw_text = message_text(message)
+    if rule.filters.translate_to:
+        raw_text = await maybe_translate(raw_text, rule.filters.translate_to)
+    text = transform_text(raw_text, rule.filters)
     sent = 0
     for target in targets:
         try:

@@ -133,6 +133,11 @@ const FIELD_SPEC = {
     placeholder: 'Подписаться | https://t.me/mychannel\nКупить | https://shop.example/buy',
     note: 'строка — кнопка: текст | ссылка. В форварде кнопок нет — только в копии',
   },
+  translate_to: {
+    label: 'Переводить посты на',
+    placeholder: 'ru',
+    note: 'код языка: ru, en, uk… пусто — не переводить. Форвард не переводится',
+  },
   schedule_only: { label: 'Только по датам (вместо кругов и окна)', control: 'check' },
   scheduled_posts: { label: 'Даты', control: 'schedule' },
 };
@@ -502,11 +507,11 @@ const DEMO_COMMANDS = [
     hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
     tags: ['ваш текст', 'расписание или очередь'] },
   { id: 'copy_channel', group: 'publish', kind: 'forward', emoji: '🔁', title: 'Копирование канала', status: 'ready',
-    needs: ['account', 'source', 'target'], optional: ['mode', 'buttons'],
+    needs: ['account', 'source', 'target'], optional: ['mode', 'buttons', 'translate_to'],
     description: 'Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.',
     tags: ['чужие посты', 'один канал → один'] },
   { id: 'broadcast', group: 'publish', kind: 'broadcast', emoji: '📣', title: 'Пересылка в несколько чатов', status: 'ready',
-    needs: ['account', 'source', 'targets'], optional: ['buttons'],
+    needs: ['account', 'source', 'targets'], optional: ['buttons', 'translate_to'],
     description: 'Тот же канал — сразу в десятки чатов: пост из источника уходит во все выбранные одним залпом, как только вышел.',
     hint: 'Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу. Свой текст здесь не нужен: уходит то, что вышло в источнике.',
     tags: ['чужие посты', 'все чаты разом', 'по факту поста'] },
@@ -2125,6 +2130,7 @@ function taskMetaLines(task) {
   const lines = [task.kind_label || (isForward ? 'пересылка' : kind)];
   if (isForward) lines.push(task.mode === 'copy' ? 'копия без метки' : 'обычный форвард');
   if (task.buttons_count) lines.push(`🔘 ${task.buttons_count} кн.`);
+  if (task.translate_to) lines.push(`🌐 →${String(task.translate_to).toUpperCase()}`);
   // Сколько чатов у задачи — первым делом: у постинга и рассылки это главное
   // число задачи, и в заголовке оно есть только когда чатов больше одного.
   if (task.targets_count) lines.push(`${task.targets_count} ${chatWord(task.targets_count)}`);
@@ -3694,7 +3700,7 @@ function applyTaskPrefill(prefill) {
   // Настройки задачи — одним проходом: ключ формы и ключ задачи совпадают, а
   // лишние для этой команды поля просто не находятся в разметке.
   ['keywords', 'reaction', 'limit', 'scan', 'online_within_hours', 'api_delay',
-    'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats']
+    'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'translate_to']
     .forEach((key) => setValue(key, prefill[key]));
   ['typing', 'random_pick', 'link_preview', 'schedule_only',
     'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only',
@@ -4304,6 +4310,7 @@ function collectTaskPayload() {
   text('target_user', values.target_user);
   text('reaction', values.reaction);
   text('mode', values.mode);
+  text('translate_to', values.translate_to);
   text('send_mode', values.send_mode);
   text('parser_mode', values.parser_mode);
   text('message', values.message);

@@ -65,6 +65,8 @@ class FilterConfig:
     # Кнопки-ссылки под постом: [{'text', 'url'}]. Форвард их не умеет —
     # прикладываются только в режиме «копия» (см. send_copy).
     buttons: list = field(default_factory=list)
+    # Перевод чужих постов: код языка («ru») или пусто — не переводить.
+    translate_to: str = ""
     # Настройки задач из app.telegram_client.jobs
     targets: list[int] = field(default_factory=list)
     subscribe_to: list[str] = field(default_factory=list)
@@ -137,6 +139,7 @@ class FilterConfig:
             "replace": self.replace,
             "append_text": self.append_text,
             "buttons": self.buttons,
+            "translate_to": self.translate_to,
             "targets": self.targets,
             "subscribe_to": self.subscribe_to,
             "reaction": self.reaction,

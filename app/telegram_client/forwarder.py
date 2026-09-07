@@ -8,6 +8,8 @@ from typing import Any
 from loguru import logger
 from telethon import Button
 
+from app.translate import maybe_translate
+
 from app.db import repo
 from app.db.database import SessionLocal, session_scope
 from app.telegram_client.filters import (
@@ -166,6 +168,11 @@ async def deliver(client: Any, message: Any, rule: RuleSnapshot) -> DeliveryResu
         logger.debug("Правило #{}: у пользователя нет активной подписки", rule.id)
         return skipped(SKIP_NO_SUBSCRIPTION)
 
+    if rule.mode != "forward" and filters.translate_to:
+        # Переводим исходник, а не готовый текст: подпись и замены уже на
+        # языке читателя, гонять их туда-обратно не надо. Фильтры при этом
+        # смотрят исходник: они подбирают посты, а не их отображение.
+        raw_text = await maybe_translate(raw_text, filters.translate_to)
     text = transform_text(raw_text, filters)
 
     # Задержку из правила отрабатывает очередь — до постановки в работу.

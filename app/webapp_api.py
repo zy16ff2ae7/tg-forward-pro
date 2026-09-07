@@ -50,6 +50,7 @@ from app.telegram_client.jobs import (
 )
 from app.telegram_client.manager import HOPELESS_ERRORS, manager
 from app.telegram_client.filters import normalize_buttons
+from app.translate import normalize_lang
 
 # initData считаем свежим в течение суток
 INIT_DATA_TTL = 24 * 60 * 60
@@ -834,6 +835,12 @@ async def _apply_task_settings(
     if kind in ("forward", "broadcast", "poster", "mailing"):
         if "buttons" in payload or not partial:
             filters["buttons"] = normalize_buttons(payload.get("buttons"))
+
+    # Перевод чужих постов — у пересылки и веера: свои тексты человек пишет
+    # сразу на своём языке, переводить их не надо.
+    if kind in ("forward", "broadcast"):
+        if "translate_to" in payload or not partial:
+            filters["translate_to"] = normalize_lang(payload.get("translate_to"))
 
 
 @routes.post("/api/tasks")
@@ -2556,6 +2563,7 @@ def _task_view(
     view["buttons_count"] = len(
         [item for item in (conf.buttons or []) if isinstance(item, dict)]
     )
+    view["translate_to"] = conf.translate_to or ""
     if kind == "poster":
         view["interval_min"] = max(1, conf.interval_seconds // 60)
         view["window_start"] = conf.window_start
@@ -2692,6 +2700,8 @@ def _edit_view(
             for item in (conf.buttons or [])
             if isinstance(item, dict)
         ]
+    if kind in ("forward", "broadcast"):
+        edit["translate_to"] = conf.translate_to or ""
     if kind == "forward":
         edit["mode"] = rule.mode
     elif kind == "parser":
@@ -2806,7 +2816,7 @@ COMMANDS: list[dict] = [
         "description": "Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.",
         "status": "ready",
         "needs": ["account", "source", "target"],
-        "optional": ["mode", "buttons"],
+        "optional": ["mode", "buttons", "translate_to"],
         "tags": ["чужие посты", "один канал → один"],
     },
     {
@@ -2824,7 +2834,7 @@ COMMANDS: list[dict] = [
         # них всё равно становится главным. Два поля под одно и то же заставляли
         # заполнять «приёмник» руками даже при выборе чатов мышкой.
         "needs": ["account", "source", "targets"],
-        "optional": ["buttons"],
+        "optional": ["buttons", "translate_to"],
         "hint": "Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу. Свой текст здесь не нужен: уходит то, что вышло в источнике.",
         "tags": ["чужие посты", "все чаты разом", "по факту поста"],
     },
