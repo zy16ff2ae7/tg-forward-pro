@@ -842,6 +842,11 @@ async def _apply_task_settings(
         if "translate_to" in payload or not partial:
             filters["translate_to"] = normalize_lang(payload.get("translate_to"))
 
+    # Уникализация — там же, где перевод: чужой текст под своё авторство.
+    if kind in ("forward", "broadcast"):
+        if "uniquify" in payload or not partial:
+            filters["uniquify"] = _as_bool(payload.get("uniquify"))
+
 
 @routes.post("/api/tasks")
 @require_auth
@@ -2564,6 +2569,7 @@ def _task_view(
         [item for item in (conf.buttons or []) if isinstance(item, dict)]
     )
     view["translate_to"] = conf.translate_to or ""
+    view["uniquify"] = bool(conf.uniquify)
     if kind == "poster":
         view["interval_min"] = max(1, conf.interval_seconds // 60)
         view["window_start"] = conf.window_start
@@ -2702,6 +2708,8 @@ def _edit_view(
         ]
     if kind in ("forward", "broadcast"):
         edit["translate_to"] = conf.translate_to or ""
+    if kind in ("forward", "broadcast"):
+        edit["uniquify"] = bool(conf.uniquify)
     if kind == "forward":
         edit["mode"] = rule.mode
     elif kind == "parser":
@@ -2816,7 +2824,7 @@ COMMANDS: list[dict] = [
         "description": "Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.",
         "status": "ready",
         "needs": ["account", "source", "target"],
-        "optional": ["mode", "buttons", "translate_to"],
+        "optional": ["mode", "buttons", "translate_to", "uniquify"],
         "tags": ["чужие посты", "один канал → один"],
     },
     {
@@ -2834,7 +2842,7 @@ COMMANDS: list[dict] = [
         # них всё равно становится главным. Два поля под одно и то же заставляли
         # заполнять «приёмник» руками даже при выборе чатов мышкой.
         "needs": ["account", "source", "targets"],
-        "optional": ["buttons", "translate_to"],
+        "optional": ["buttons", "translate_to", "uniquify"],
         "hint": "Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу. Свой текст здесь не нужен: уходит то, что вышло в источнике.",
         "tags": ["чужие посты", "все чаты разом", "по факту поста"],
     },

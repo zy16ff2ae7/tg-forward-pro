@@ -138,6 +138,11 @@ const FIELD_SPEC = {
     placeholder: 'ru',
     note: 'код языка: ru, en, uk… пусто — не переводить. Форвард не переводится',
   },
+  uniquify: {
+    label: 'Уникализировать текст',
+    control: 'check',
+    note: 'синонимы и неотличимые буквы: поиск не опознает исходник',
+  },
   schedule_only: { label: 'Только по датам (вместо кругов и окна)', control: 'check' },
   scheduled_posts: { label: 'Даты', control: 'schedule' },
 };
@@ -507,11 +512,11 @@ const DEMO_COMMANDS = [
     hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
     tags: ['ваш текст', 'расписание или очередь'] },
   { id: 'copy_channel', group: 'publish', kind: 'forward', emoji: '🔁', title: 'Копирование канала', status: 'ready',
-    needs: ['account', 'source', 'target'], optional: ['mode', 'buttons', 'translate_to'],
+    needs: ['account', 'source', 'target'], optional: ['mode', 'buttons', 'translate_to', 'uniquify'],
     description: 'Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.',
     tags: ['чужие посты', 'один канал → один'] },
   { id: 'broadcast', group: 'publish', kind: 'broadcast', emoji: '📣', title: 'Пересылка в несколько чатов', status: 'ready',
-    needs: ['account', 'source', 'targets'], optional: ['buttons', 'translate_to'],
+    needs: ['account', 'source', 'targets'], optional: ['buttons', 'translate_to', 'uniquify'],
     description: 'Тот же канал — сразу в десятки чатов: пост из источника уходит во все выбранные одним залпом, как только вышел.',
     hint: 'Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу. Свой текст здесь не нужен: уходит то, что вышло в источнике.',
     tags: ['чужие посты', 'все чаты разом', 'по факту поста'] },
@@ -2131,6 +2136,7 @@ function taskMetaLines(task) {
   if (isForward) lines.push(task.mode === 'copy' ? 'копия без метки' : 'обычный форвард');
   if (task.buttons_count) lines.push(`🔘 ${task.buttons_count} кн.`);
   if (task.translate_to) lines.push(`🌐 →${String(task.translate_to).toUpperCase()}`);
+  if (task.uniquify) lines.push('✨ уник.');
   // Сколько чатов у задачи — первым делом: у постинга и рассылки это главное
   // число задачи, и в заголовке оно есть только когда чатов больше одного.
   if (task.targets_count) lines.push(`${task.targets_count} ${chatWord(task.targets_count)}`);
@@ -3702,7 +3708,7 @@ function applyTaskPrefill(prefill) {
   ['keywords', 'reaction', 'limit', 'scan', 'online_within_hours', 'api_delay',
     'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'translate_to']
     .forEach((key) => setValue(key, prefill[key]));
-  ['typing', 'random_pick', 'link_preview', 'schedule_only',
+  ['typing', 'random_pick', 'link_preview', 'schedule_only', 'uniquify',
     'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only',
     'ignore_bots', 'ignore_archived', 'ignore_muted']
     .forEach((key) => {
@@ -4342,6 +4348,7 @@ function collectTaskPayload() {
   flag('typing', values.typing);
   flag('random_pick', values.random_pick);
   flag('link_preview', values.link_preview);
+  flag('uniquify', values.uniquify);
   flag('require_username', values.require_username);
   flag('exclude_admins', values.exclude_admins);
   flag('only_premium', values.only_premium);

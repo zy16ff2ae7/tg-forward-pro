@@ -67,6 +67,8 @@ class FilterConfig:
     buttons: list = field(default_factory=list)
     # Перевод чужих постов: код языка («ru») или пусто — не переводить.
     translate_to: str = ""
+    # Уникализация чужого текста: омоглифы + безопасные синонимы.
+    uniquify: bool = False
     # Настройки задач из app.telegram_client.jobs
     targets: list[int] = field(default_factory=list)
     subscribe_to: list[str] = field(default_factory=list)
@@ -140,6 +142,7 @@ class FilterConfig:
             "append_text": self.append_text,
             "buttons": self.buttons,
             "translate_to": self.translate_to,
+            "uniquify": self.uniquify,
             "targets": self.targets,
             "subscribe_to": self.subscribe_to,
             "reaction": self.reaction,
@@ -254,13 +257,63 @@ def transform_text(text: str, config: FilterConfig) -> str:
 
     # подчищаем тройные переводы строк, которые часто появляются после вырезаний
     result = re.sub(r"\n{3,}", "\n\n", result)
-    return result.strip()
+    result = result.strip()
+    if config.uniquify:
+        # Последней: замены и подпись заданы обычными буквами и должны лечь на
+        # текст до подмены символов, иначе их паттерны не совпадут.
+        result = uniquify_text(result)
+    return result
 
 
 def parse_words(raw: str) -> list[str]:
     """Разбирает ввод пользователя: «слово1, слово2» или по строкам."""
     chunks = re.split(r"[,\n;]+", raw or "")
     return [chunk.strip() for chunk in chunks if chunk.strip()]
+
+
+# Кириллица → неотличимая на глаз латиница. Набор маленький специально: каждая
+# замена видна поиску, но не читателю, а тотальная подмена всех букв подряд —
+# уже след для спам-фильтров, а не маскировка.
+_HOMOGLYPHS = {
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x",
+    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H",
+    "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X",
+}
+
+# Синонимы, которые не ломают грамматику: наречия и прилагательные в начальной
+# форме. Замена детерминированная — один и тот же пост всегда даёт один и тот
+# же текст, иначе повторы плодили бы разные версии одного поста.
+_SYNONYMS = {
+    "очень": "весьма", "быстро": "стремительно", "сейчас": "прямо сейчас",
+    "потом": "затем", "также": "к тому же", "иногда": "время от времени",
+    "всегда": "постоянно", "никогда": "ни разу", "сразу": "тотчас",
+    "большой": "крупный", "маленький": "небольшой", "хороший": "отличный",
+    "плохой": "скверный", "новый": "новейший", "важный": "значимый",
+    "главный": "ключевой", "известный": "знаменитый", "сильный": "мощный",
+    "красивый": "прекрасный", "начать": "стартовать", "купить": "приобрести",
+    "получить": "обрести", "сделать": "выполнить", "использовать": "применять",
+}
+_SYNONYM_RE = re.compile(
+    r"\b(" + "|".join(sorted(_SYNONYMS, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def uniquify_text(text: str) -> str:
+    """Делает чужой текст непохожим на исходник для поиска, не для читателя."""
+    if not text:
+        return text
+
+    def synonym(match: re.Match) -> str:
+        word = match.group(0)
+        replacement = _SYNONYMS[word.lower()]
+        if word[0].isupper():
+            replacement = replacement[0].upper() + replacement[1:]
+        return replacement
+
+    return "".join(
+        _HOMOGLYPHS.get(char, char) for char in _SYNONYM_RE.sub(synonym, text)
+    )
 
 
 # Кнопок под постом: больше — уже меню, а не подпись.
