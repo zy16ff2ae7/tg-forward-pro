@@ -277,7 +277,7 @@ def payment_menu(user_id: int | None = None) -> InlineKeyboardMarkup:
     if referral.enabled():
         builder.row(
             InlineKeyboardButton(
-                text=f"👥 Пригласить друга: +{referral.days()} дн. обоим",
+                text="👥 Пригласить друга — обоим выгода",
                 callback_data="ref:open",
             )
         )
@@ -285,6 +285,11 @@ def payment_menu(user_id: int | None = None) -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo:open")
     )
+    # Подарок другу — звёздами, как себе: счёт тот же, получатель другой.
+    if "stars" in settings.inline_payment_methods():
+        builder.row(
+            InlineKeyboardButton(text="🎁 Подарить абонемент", callback_data="pay:gift")
+        )
     inline_methods = settings.inline_payment_methods()
     for method in inline_methods:
         builder.row(
@@ -344,27 +349,32 @@ def referral_menu(link: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def stars_periods() -> InlineKeyboardMarkup:
+def stars_periods(
+    *, prefix: str = "pay:stars", with_autorenew: bool = True
+) -> InlineKeyboardMarkup:
     """Выбор срока оплаты звёздами: на кнопке сразу итоговая сумма.
 
     Сроки берём из каталога, а цену считаем на месте — если тариф поменяли,
-    кнопки не расходятся с тем, что реально уедет в инвойс.
+    кнопки не расходятся с тем, что реально уедет в инвойс. Подарок пользуется
+    той же клавиатурой с другим префиксом и без автопродления: дарить чужому
+    человеку списание каждый месяц нельзя.
     """
     builder = InlineKeyboardBuilder()
     for months in PERIODS:
         builder.row(
             InlineKeyboardButton(
                 text=f"{months} мес. — {stars_amount(months)} ⭐",
-                callback_data=f"pay:stars:{months}",
+                callback_data=f"{prefix}:{months}",
             )
         )
-    # Автопродление — помесячно: период подписки в звёздах всегда 30 дней.
-    builder.row(
-        InlineKeyboardButton(
-            text=f"🔁 Автопродление — {stars_amount(1)} ⭐/мес",
-            callback_data="pay:stars:auto",
+    if with_autorenew:
+        # Автопродление — помесячно: период подписки в звёздах всегда 30 дней.
+        builder.row(
+            InlineKeyboardButton(
+                text=f"🔁 Автопродление — {stars_amount(1)} ⭐/мес",
+                callback_data="pay:stars:auto",
+            )
         )
-    )
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="menu:sub"))
     return builder.as_markup()
 

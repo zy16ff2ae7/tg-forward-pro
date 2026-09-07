@@ -245,6 +245,17 @@
           <button class="btn btn--primary" id="topUpBtn">⭐ Оплатить звёздами</button>
           <button class="btn" id="distributeBtn">Распределить подписку</button>
           <button class="btn" id="freezeBtn">❄️ Заморозить дни</button>
+          <button class="btn" id="giftBtn">🎁 Подарить</button>
+        </div>
+        <!-- Подарок: месяц звёздами не себе, а другу. Друг должен быть в базе
+             (первый /start) — получателя проверяет сервер, а не кабинет. -->
+        <div id="giftRow" hidden>
+          <input class="promo__input" type="text" id="giftTo" placeholder="id или @username друга"
+                 autocomplete="off" autocapitalize="off" aria-label="Кому подарить">
+          <div class="bonus__actions">
+            <button class="btn btn--primary" id="giftPayBtn">⭐ Подарить месяц</button>
+          </div>
+          <div class="sub__note" id="giftNote"></div>
         </div>
         <!-- Карта и крипта живут на странице сервиса вне Telegram: внутри
              Telegram абонемент продаётся только за звёзды (ToS, п. 6.2).

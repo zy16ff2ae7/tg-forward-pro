@@ -1,6 +1,8 @@
 """Абонемент и оплата: Stars, карта/СБП, USDT, ручная выдача."""
 from __future__ import annotations
 
+from html import escape as html_escape
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
@@ -17,7 +19,7 @@ from loguru import logger
 from app import bonus, promocode, referral
 from app.bot import keyboards as kb
 from app.bot import texts
-from app.bot.states import PromoStates
+from app.bot.states import GiftStates, PromoStates
 from app.bot.utils import ensure_user, smart_edit
 from app.config import settings
 from app.db import repo
@@ -476,6 +478,122 @@ async def pay_stars_autorenew(callback: CallbackQuery) -> None:
     )
 
 
+@router.callback_query(F.data == "pay:gift")
+async def pay_gift(callback: CallbackQuery, state: FSMContext) -> None:
+    """Подарок, шаг 1: кому дарим."""
+    await callback.answer()
+    await state.set_state(GiftStates.waiting_friend)
+    if callback.message is not None:
+        await smart_edit(
+            callback.message,
+            "🎁 <b>Подарок другу</b>\n\n"
+            "Пришлите id или @username друга следующим сообщением. Друг должен "
+            "хотя бы раз запустить бота — незнакомцу дарить нечего.",
+            reply_markup=kb.cancel_kb(),
+        )
+
+
+@router.message(GiftStates.waiting_friend)
+async def gift_friend_entered(message: Message, state: FSMContext) -> None:
+    """Подарок, шаг 2: нашли друга — выбираем срок."""
+    assert message.from_user is not None
+    raw = (message.text or "").strip()
+    async with SessionLocal() as session:
+        if raw.isdigit():
+            target = await repo.get_user(session, int(raw))
+        else:
+            target = await repo.get_user_by_username(session, raw)
+    if target is None:
+        await message.answer(
+            "Не нашли такого: друг сначала должен запустить бота (/start). "
+            "Пришлите другой id или @username:",
+            reply_markup=kb.cancel_kb(),
+        )
+        return
+    if target.id == message.from_user.id:
+        await state.clear()
+        await message.answer(
+            "Себе дарить не надо — оформите абонемент как обычно 🙂",
+            reply_markup=kb.payment_menu(message.from_user.id),
+        )
+        return
+    await state.update_data(gift_to=target.id)
+    await state.set_state(None)
+    nick = f"@{target.username}" if target.username else f"id {target.id}"
+    await message.answer(
+        f"🎁 Подарок для <b>{nick}</b> — выберите срок "
+        f"({settings.price_stars} ⭐ за месяц):",
+        reply_markup=kb.stars_periods(prefix="pay:gift", with_autorenew=False),
+    )
+
+
+@router.callback_query(F.data.startswith("pay:gift:"))
+async def pay_gift_period(callback: CallbackQuery, state: FSMContext) -> None:
+    """Подарок, шаг 3: счёт на выбранный срок. Платит даритель."""
+    await callback.answer()
+    assert callback.from_user is not None and callback.data is not None
+    # Тот же разбор срока, что у своих счетов: три части, срок — последний.
+    months = months_from_callback(callback.data)
+    data = await state.get_data()
+    friend_id = data.get("gift_to")
+    if months is None or not friend_id:
+        logger.warning("Подарок: непонятные данные {} / {}", callback.data, data)
+        if callback.message is not None:
+            await smart_edit(
+                callback.message,
+                "Не удалось разобрать подарок. Начните заново: «🎁 Подарить абонемент».",
+                reply_markup=kb.payment_menu(callback.from_user.id),
+            )
+        return
+    async with SessionLocal() as session:
+        friend = await repo.get_user(session, int(friend_id))
+        pending = await repo.pending_discount(session, callback.from_user.id)
+    if friend is None or friend.id == callback.from_user.id:
+        await state.clear()
+        if callback.message is not None:
+            await smart_edit(
+                callback.message,
+                "Получатель потерялся. Начните подарок заново.",
+                reply_markup=kb.payment_menu(callback.from_user.id),
+            )
+        return
+    await state.clear()
+    amount = stars_amount(months)
+    description = STARS_DESCRIPTION
+    if pending is not None:
+        # Скидка дарителя действует и на подарок: платит-то он.
+        amount = int(apply_discount(amount, int(pending.percent or 0)))
+        description = f"{STARS_DESCRIPTION} Скидка {pending.percent}% по промокоду."
+    title = f"Подарок: абонемент на {months} мес."
+    await callback.bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title=title,
+        description=description,
+        # Формат читает хендлер successful_payment — менять нельзя.
+        payload=f"gift:{callback.from_user.id}:{friend.id}:{months}",
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label=title, amount=amount)],
+    )
+
+
+def _parse_payload(payload: str) -> tuple[str, int | None, int | None, int | None]:
+    """Разбирает payload счёта: ``sub:<кто>:<срок>`` или ``gift:<кто>:<кому>:<срок>``.
+
+    Возвращает (вид, плательщик, получатель, срок). Получатель — только у
+    подарка. Мусор — вид ``""``: оба сверяющих хендлера ответят отказом.
+    """
+    parts = (payload or "").split(":")
+    try:
+        if len(parts) == 3 and parts[0] == "sub":
+            return "sub", int(parts[1]), None, int(parts[2])
+        if len(parts) == 4 and parts[0] == "gift":
+            return "gift", int(parts[1]), int(parts[2]), int(parts[3])
+    except ValueError:
+        pass
+    return "", None, None, None
+
+
 @router.pre_checkout_query()
 async def on_pre_checkout(query: PreCheckoutQuery) -> None:
     """Проверяем счёт до списания: срок из каталога, сумма наша, плательщик тот.
@@ -484,13 +602,7 @@ async def on_pre_checkout(query: PreCheckoutQuery) -> None:
     ушли бы, а подписка включилась бы не ему.
     """
     payload = query.invoice_payload or ""
-    months: int | None = None
-    owner_id: int | None = None
-    try:
-        _, user_id_raw, months_raw = payload.split(":")
-        owner_id, months = int(user_id_raw), int(months_raw)
-    except ValueError:
-        months = None
+    kind, owner_id, friend_id, months = _parse_payload(payload)
 
     accepted = {stars_amount(months)} if months is not None else set()
     if months is not None and is_valid_period(months):
@@ -501,12 +613,21 @@ async def on_pre_checkout(query: PreCheckoutQuery) -> None:
             # повторяется здесь, а не только при создании счёта: между ними
             # скидку могли уже потратить другим платежом.
             accepted.add(int(apply_discount(stars_amount(months), int(pending.percent or 0))))
+    gift_ok = True
+    if kind == "gift":
+        # Подарок себе — подделка payload: честный путь это запрещает раньше.
+        gift_ok = friend_id is not None and friend_id != query.from_user.id
+        if gift_ok:
+            async with SessionLocal() as session:
+                gift_ok = await repo.get_user(session, friend_id) is not None
     if (
-        months is None
+        kind not in ("sub", "gift")
+        or months is None
         or not is_valid_period(months)
         or owner_id != query.from_user.id
         or query.currency != "XTR"
         or query.total_amount not in accepted
+        or not gift_ok
     ):
         logger.warning(
             "Stars pre_checkout отклонён: payload={!r} amount={} {} от {}",
@@ -527,27 +648,34 @@ async def on_pre_checkout(query: PreCheckoutQuery) -> None:
 async def on_stars_paid(message: Message) -> None:
     payment = message.successful_payment
     assert payment is not None and message.from_user is not None
-    try:
-        _, user_id_raw, months_raw = payment.invoice_payload.split(":")
-        user_id, months = int(user_id_raw), int(months_raw)
-    except ValueError:
-        user_id, months = message.from_user.id, MONTHS
+    kind, owner_id, friend_id, months = _parse_payload(payment.invoice_payload or "")
+    user_id = owner_id if owner_id is not None else message.from_user.id
+    months = months if months is not None else MONTHS
 
     # Финальная сверка уже после списания: pre_checkout мог пройти до смены
     # тарифа, а апдейт — приехать дважды. Молча активировать «что-то» нельзя.
     full_price = stars_amount(months) if is_valid_period(months) else None
     async with SessionLocal() as session:
         stars_pending = await repo.pending_discount(session, message.from_user.id)
+        gift_ok = True
+        if kind == "gift":
+            gift_ok = (
+                friend_id is not None
+                and friend_id != message.from_user.id
+                and await repo.get_user(session, friend_id) is not None
+            )
     accepted_amounts = {full_price} if full_price is not None else set()
     if stars_pending is not None and full_price is not None:
         accepted_amounts.add(
             int(apply_discount(full_price, int(stars_pending.percent or 0)))
         )
     if (
-        user_id != message.from_user.id
+        kind not in ("sub", "gift")
+        or user_id != message.from_user.id
         or payment.currency != "XTR"
         or not is_valid_period(months)
         or payment.total_amount not in accepted_amounts
+        or not gift_ok
     ):
         logger.error(
             "Stars-платёж не сошёлся: payload={!r} amount={} {} payer={}",
@@ -585,7 +713,11 @@ async def on_stars_paid(message: Message) -> None:
             months=months,
             external_id=payment.telegram_payment_charge_id,
         )
-        until = await repo.activate_subscription(session, user_id, months)
+        # Подарок включает абонемент не плательщику, а другу. Строка платежа
+        # пишется на плательщика: платил он, ему и чек.
+        recipient_id = friend_id if kind == "gift" else user_id
+        assert recipient_id is not None
+        until = await repo.activate_subscription(session, recipient_id, months)
         # Уплачено меньше тарифа — сработала ожидавшая скидка: гасим её.
         # Повторный апдейт сюда не доходит (проверка дубликата выше), поэтому
         # дважды скидка не гаснет, а чужой платёж её не трогает.
@@ -599,10 +731,13 @@ async def on_stars_paid(message: Message) -> None:
         # Первый оплаченный абонемент — награда пригласившему (если друга
         # приводили по ссылке). Повторный апдейт сюда не доходит, а второй
         # платёж того же друга награды не даёт: один друг — одна награда.
-        stars_reward = await repo.reward_referrer(
-            session, user_id,
-            settings.referral_days, referral.discount_percent(),
-        )
+        # Подарок награды не даёт: «оплатил» — значит, сам заплатил.
+        stars_reward = None
+        if kind == "sub":
+            stars_reward = await repo.reward_referrer(
+                session, user_id,
+                settings.referral_days, referral.discount_percent(),
+            )
         # Рекуррентное списание — признак живой подписки: взводим флаг.
         # Разовый платёж флага не касается: подписка могла остаться с прошлого
         # раза, а могла и не быть — гадать по одному платежу нельзя.
@@ -610,7 +745,7 @@ async def on_stars_paid(message: Message) -> None:
             getattr(payment, "is_recurring", False)
             or getattr(payment, "is_first_recurring", False)
         )
-        if recurring:
+        if recurring and kind == "sub":
             await repo.set_stars_autorenew(session, user_id, True)
         await session.commit()
 
@@ -627,6 +762,32 @@ async def on_stars_paid(message: Message) -> None:
             )
         except Exception:  # noqa: BLE001 — награда начислена, весть вторична
             logger.debug("Не смогли уведомить {} о награде", referrer_id)
+
+    if kind == "gift":
+        # Друг узнаёт о подарке сразу — иначе сюрприз раскроется, только когда
+        # он сам откроет абонемент. Имя дарителя — из апдейта: в базу за ним
+        # ходить не надо, а разметку из чужого имени экранируем.
+        giver = message.from_user
+        giver_name = (
+            f"@{giver.username}" if giver.username else html_escape(giver.full_name or "друг")
+        )
+        assert friend_id is not None
+        try:
+            await message.bot.send_message(
+                friend_id,
+                "🎁 <b>Вам подарили абонемент!</b>\n\n"
+                f"{giver_name} оплатил вам {months} мес. — "
+                f"доступен до <b>{until:%d.%m.%Y %H:%M}</b> (UTC).\n"
+                "Можно создавать правила и запускать пересылку.",
+            )
+        except Exception:  # noqa: BLE001 — подарок уже включён, весть вторична
+            logger.debug("Не смогли уведомить {} о подарке", friend_id)
+        await message.answer(
+            "🎁 <b>Подарок оплачен</b>\n\n"
+            f"Абонемент друга активен до <b>{until:%d.%m.%Y %H:%M}</b> (UTC).",
+            reply_markup=kb.back_to_main(),
+        )
+        return
 
     head = (
         "🔁 <b>Автопродление сработало</b>"

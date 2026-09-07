@@ -4705,7 +4705,7 @@ function renderPiggyBank(banked, daysLeft) {
 /* Инвойс создаёт бот через Bot API, кабинет только открывает его:
    сумма и payload формируются на сервере, пользователь не покидает
    мини-апп. Зачисление приходит в хендлер successful_payment бота. */
-async function payWithStars(button, months = 1, autorenew = false) {
+async function payWithStars(button, months = 1, autorenew = false, giftTo = '') {
   // Вне Telegram (демо или обычный браузер) платёжный WebView не поднимется —
   // честно уводим в бота, а не делаем вид, что что-то произошло.
   if (DEMO || !tg || !tg.openInvoice) {
@@ -4714,19 +4714,45 @@ async function payWithStars(button, months = 1, autorenew = false) {
   }
 
   try {
+    const body = { months, autorenew };
+    if (giftTo) body.gift_to = giftTo;
     const invoice = await withLoading(button, () =>
-      api('/api/subscription/invoice', { method: 'POST', body: JSON.stringify({ months, autorenew }) })
+      api('/api/subscription/invoice', { method: 'POST', body: JSON.stringify(body) })
     );
-    openStarsInvoice(invoice.url);
+    openStarsInvoice(invoice.url, giftTo ? 'gift' : 'paid');
   } catch (error) {
     toast(error.message, 'error');
   }
 }
 
-function openStarsInvoice(url) {
+/* Подарок из кабинета: кому — в поле, счёт — на месяц звёздами. Длинные сроки
+   остались в боте: там выбор срока уже есть, а сюда тащить его незачем. */
+function toggleGiftRow() {
+  const row = $('giftRow');
+  if (!row) return;
+  row.hidden = !row.hidden;
+  if (!row.hidden) {
+    const note = $('giftNote');
+    if (note) note.textContent = 'Друг должен хотя бы раз запустить бота — иначе дарить некому.';
+    const field = $('giftTo');
+    if (field) field.focus();
+  }
+}
+
+function payGift(button) {
+  const field = $('giftTo');
+  const target = (field && field.value || '').trim();
+  if (!target) {
+    toast('Укажите id или @username друга.', 'error');
+    return;
+  }
+  payWithStars(button, 1, false, target);
+}
+
+function openStarsInvoice(url, kind = 'paid') {
   tg.openInvoice(url, (status) => {
     if (status === 'paid') {
-      toast('Оплата прошла — абонемент активен.', 'ok');
+      toast(kind === 'gift' ? 'Подарок оплачен — друг уведомлён.' : 'Оплата прошла — абонемент активен.', 'ok');
       loadAccounts();
     } else if (status === 'pending') {
       toast('Платёж обрабатывается, абонемент появится после подтверждения.');
@@ -5358,6 +5384,10 @@ function bindEvents() {
   });
   $('autoRenewBtn').addEventListener('click', (event) => {
     payWithStars(event.currentTarget, 1, true);
+  });
+  $('giftBtn').addEventListener('click', toggleGiftRow);
+  $('giftPayBtn').addEventListener('click', (event) => {
+    payGift(event.currentTarget);
   });
   $('distributeBtn').addEventListener('click', (event) => {
     moveBankDays('distribute', event.currentTarget);

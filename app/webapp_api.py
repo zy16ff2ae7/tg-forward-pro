@@ -2234,6 +2234,28 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
     if autorenew and months != 1:
         raise ValidationError("Автопродление работает только на сроке 1 месяц")
 
+    # Подарок: id или @username друга. Друг должен быть в базе (первый /start),
+    # себе дарить нельзя, автопродление в подарок не заворачивается.
+    gift_to = None
+    raw_gift = body.get("gift_to")
+    if raw_gift:
+        if autorenew:
+            raise ValidationError(
+                "Подарок — только разовым счётом: дарить автопродление нельзя"
+            )
+        token = str(raw_gift).strip()
+        async with SessionLocal() as session:
+            if token.isdigit():
+                gift_to = await repo.get_user(session, int(token))
+            else:
+                gift_to = await repo.get_user_by_username(session, token)
+        if gift_to is None:
+            raise ValidationError(
+                "Не нашли такого друга: пусть сначала запустит бота (/start)"
+            )
+        if gift_to.id == user_id:
+            raise ValidationError("Себе дарить не надо — оформите абонемент как обычно")
+
     if _bot is None:
         raise FeatureUnavailable(
             "Оплата звёздами временно недоступна",
@@ -2241,7 +2263,10 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
             status="bot_unavailable",
         )
 
-    title = "Абонемент на 1 месяц" if months == 1 else f"Абонемент на {months} мес."
+    if gift_to is not None:
+        title = f"Подарок: абонемент на {months} мес."
+    else:
+        title = "Абонемент на 1 месяц" if months == 1 else f"Абонемент на {months} мес."
     amount = stars_amount(months)
     discount = 0
     description = STARS_DESCRIPTION
@@ -2260,7 +2285,11 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
             title=title,
             description=description,
             # Формат читает хендлер successful_payment в боте — менять нельзя.
-            payload=f"sub:{user_id}:{months}",
+            payload=(
+                f"gift:{user_id}:{gift_to.id}:{months}"
+                if gift_to is not None
+                else f"sub:{user_id}:{months}"
+            ),
             provider_token="",  # для Stars платёжный токен не нужен
             currency="XTR",
             prices=[LabeledPrice(label=title, amount=amount)],
@@ -2285,6 +2314,7 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
             "currency": "XTR",
             "autorenew": autorenew,
             "discount_percent": discount,
+            "gift_to": gift_to.id if gift_to is not None else None,
         }
     )
 

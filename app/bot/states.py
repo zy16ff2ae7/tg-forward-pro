@@ -35,6 +35,12 @@ class PromoStates(StatesGroup):
     waiting_code = State()
 
 
+class GiftStates(StatesGroup):
+    """Подарок: следующим сообщением — кому (id или @username)."""
+
+    waiting_friend = State()
+
+
 class OwnerStates(StatesGroup):
     """Панель владельца: кому выдать абонемент и что разослать."""
 

@@ -39,6 +39,21 @@ MAX_COLLECTED_ROWS = 10_000
 # ──────────────────────────────── Пользователи ────────────────────────────────
 
 
+async def get_user_by_username(session: AsyncSession, username: str) -> User | None:
+    """Пользователь по юзернейму: с @ или без, регистр не важен.
+
+    Нужен подаркам: даритель знает друга как @nick, а не как цифры id.
+    В базе человек появляется первым /start — незнакомцу дарить нечего.
+    """
+    cleaned = (username or "").strip().lstrip("@").lower()
+    if not cleaned:
+        return None
+    result = await session.execute(
+        select(User).where(func.lower(User.username) == cleaned)
+    )
+    return result.scalars().first()
+
+
 async def get_user(session: AsyncSession, user_id: int) -> User | None:
     return await session.get(User, user_id)
 
