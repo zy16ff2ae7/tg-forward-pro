@@ -237,6 +237,24 @@ class DeliveryQueue:
 
     # ───────────────────────────────── Отправка ───────────────────────────────
 
+    @staticmethod
+    def _delay_for(rule: RuleSnapshot, delay_override: int | None = None) -> int:
+        """Сколько ждать перед отправкой: задержка правила плюс тихие часы.
+
+        Восстановление после перезапуска идёт мимо: там задержка уже лежит в
+        строке БД (``due_at``), и окно в неё посчитали при постановке.
+        """
+        if delay_override is not None:
+            return max(0, int(delay_override))
+        delay = max(0, int(getattr(rule, "delay_seconds", 0) or 0))
+        # Тихо ждут только пересылки: модерации и подпискам ночь не помеха —
+        # спам в три часа ночи мутить надо, а не откладывать до утра.
+        if getattr(rule, "kind", "forward") in ("forward", "clone"):
+            from app.telegram_client.jobs import quiet_wait_seconds
+
+            delay += quiet_wait_seconds(getattr(rule, "filters", None))
+        return delay
+
     def submit(
         self,
         client: Any,
@@ -256,10 +274,7 @@ class DeliveryQueue:
         job = _Job(client=client, message=message, rule=rule, delivery_id=delivery_id)
         if delivery_id is not None:
             self._inflight.add(int(delivery_id))
-        if delay_override is None:
-            delay = max(0, int(getattr(rule, "delay_seconds", 0) or 0))
-        else:
-            delay = max(0, int(delay_override))
+        delay = self._delay_for(rule, delay_override)
         if delay:
             self._spawn_delayed(job, delay)
             return True
@@ -283,7 +298,7 @@ class DeliveryQueue:
         from app.db.database import session_scope
 
         message_id = int(getattr(message, "id", 0) or 0)
-        delay = max(0, int(getattr(rule, "delay_seconds", 0) or 0))
+        delay = self._delay_for(rule)
         delivery_id: int | None = None
         if message_id:
             try:

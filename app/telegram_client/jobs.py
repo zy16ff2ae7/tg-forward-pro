@@ -391,6 +391,53 @@ def window_now_sec(tz_minutes: int | None, now: float | None = None) -> int:
     return int((moment + tz_minutes * 60) % SECONDS_IN_DAY)
 
 
+def hhmm_to_sec(value: Any) -> int:
+    """«ЧЧ:ММ» → секунды от начала суток. Невалидное значение → 0."""
+    try:
+        hours, minutes = str(value).split(":")
+        return max(0, min(23, int(hours))) * 3600 + max(0, min(59, int(minutes))) * 60
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def in_window(now_sec: int, start: int, end: int) -> bool:
+    """Попадает ли момент в окно. Окно через полночь (23:00→01:00) тоже ок."""
+    if start <= end:
+        return start <= now_sec <= end
+    return now_sec >= start or now_sec <= end
+
+
+def window_allows(config: Any, *, now: float | None = None) -> bool:
+    """Окно отправки открыто прямо сейчас?
+
+    Окно одно на всех: постер ждёт его кругами, рассылка — тиком, пересылка —
+    задержкой. Часы — хозяина задачи (``window_tz``), а не сервера.
+    """
+    start = hhmm_to_sec(getattr(config, "window_start", "00:00"))
+    end = hhmm_to_sec(getattr(config, "window_end", "23:59"))
+    now_sec = window_now_sec(window_tz_minutes(getattr(config, "window_tz", None)), now)
+    return in_window(now_sec, start, end)
+
+
+def quiet_wait_seconds(config: Any, *, now: float | None = None) -> int:
+    """Сколько секунд ждать до открытия окна отправки. 0 — слать сейчас.
+
+    Нужна пересылке: она событийная, «пропустить тик» ей нечего — сообщение
+    уже пришло, и его надо отложить до утра, а не выбросить.
+    """
+    tz = window_tz_minutes(getattr(config, "window_tz", None))
+    now_sec = window_now_sec(tz, now)
+    start = hhmm_to_sec(getattr(config, "window_start", "00:00"))
+    end = hhmm_to_sec(getattr(config, "window_end", "23:59"))
+    if in_window(now_sec, start, end):
+        return 0
+    if start <= end:
+        # Закрыто до старта сегодня — или до старта завтра, если он прошёл.
+        return (start - now_sec) % SECONDS_IN_DAY
+    # Ночное окно: закрытая зона — между концом и стартом, старт сегодня.
+    return start - now_sec
+
+
 def mailing_recipients(rule: Any) -> list[int]:
     """Получатели рассылки — те же чаты задачи, что у пересылки и постинга.
 

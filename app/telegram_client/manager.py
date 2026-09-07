@@ -179,19 +179,17 @@ def _normalize_ref(query: str) -> str:
 
 
 def _hhmm_to_sec(value: str) -> int:
-    """«ЧЧ:ММ» → секунды от начала суток. Невалидное значение → 0."""
-    try:
-        hours, minutes = str(value).split(":")
-        return max(0, min(23, int(hours))) * 3600 + max(0, min(59, int(minutes))) * 60
-    except Exception:  # noqa: BLE001
-        return 0
+    """«ЧЧ:ММ» → секунды от начала суток. Логика — в jobs, тут совместимость."""
+    from app.telegram_client.jobs import hhmm_to_sec
+
+    return hhmm_to_sec(value)
 
 
 def _in_window(now_sec: int, start: int, end: int) -> bool:
-    """Попадает ли момент в окно. Окно через полночь (23:00→01:00) тоже ок."""
-    if start <= end:
-        return start <= now_sec <= end
-    return now_sec >= start or now_sec <= end
+    """Попадает ли момент в окно. Логика — в jobs, тут совместимость."""
+    from app.telegram_client.jobs import in_window
+
+    return in_window(now_sec, start, end)
 
 
 def _dialog_muted(dialog: Any) -> bool:
@@ -1323,6 +1321,7 @@ class ClientManager:
             mailing_position,
             mailing_recipients,
             mailing_send,
+            window_allows,
         )
 
         now = time.time()
@@ -1338,6 +1337,10 @@ class ClientManager:
 
             recipients = mailing_recipients(rule)
             if not recipients:
+                continue
+            # Тихие часы: круг не бросаем, а ждём — позиция живёт в счётчике
+            # и никуда не денется, следующий тик в окне продолжит с того же чата.
+            if not window_allows(rule.filters):
                 continue
 
             st = self._mailing_state.setdefault(
