@@ -139,6 +139,8 @@ class FilterConfig:
     link_preview: bool = False  # оставлять предпросмотр ссылки
     random_pick: bool = False  # случайное сообщение из набора
     library_ids: list[int] = field(default_factory=list)  # id из saved_messages
+    # Закреплять каждое отправленное сообщение (нужны права в приёмнике).
+    pin_on_send: bool = False
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "FilterConfig":
@@ -212,6 +214,7 @@ class FilterConfig:
             "link_preview": self.link_preview,
             "random_pick": self.random_pick,
             "library_ids": self.library_ids,
+            "pin_on_send": self.pin_on_send,
         }
 
 

@@ -1139,6 +1139,7 @@ class ClientManager:
             window_now_sec,
             window_tz_minutes,
         )
+        from app.telegram_client.forwarder import pin_sent
 
         deadline = time.time() + POSTER_TICK_BUDGET
 
@@ -1231,7 +1232,9 @@ class ClientManager:
                 try:
                     # Отправка общая с рассылкой: свои тексты и сохранённые посты
                     # уходят одним путём, поэтому пост с медиа постинг тоже умеет.
-                    await mailing_send(client, rule, item, chat_id)
+                    sent_id = await mailing_send(client, rule, item, chat_id)
+                    if getattr(rule.filters, "pin_on_send", False) and sent_id:
+                        await pin_sent(client, chat_id, sent_id, rule_id=rule.id)
                 except FloodWaitError as exc:
                     # Telegram явно говорит, сколько ждать. Слушаемся: иначе на
                     # следующем тике тот же отказ и поток предупреждений в журнале.
@@ -1323,6 +1326,7 @@ class ClientManager:
             mailing_send,
             window_allows,
         )
+        from app.telegram_client.forwarder import pin_sent
 
         now = time.time()
         async with self._lock:
@@ -1399,7 +1403,9 @@ class ClientManager:
                         await self._mailing_nothing_to_send(rule)
                     continue
                 st["empty"] = False
-                await mailing_send(client, rule, item, target_id)
+                sent_id = await mailing_send(client, rule, item, target_id)
+                if getattr(rule.filters, "pin_on_send", False) and sent_id:
+                    await pin_sent(client, target_id, sent_id, rule_id=rule.id)
             except FloodWaitError as exc:
                 # Telegram явно сказал, сколько ждать, — слушаемся, иначе на
                 # следующем тике тот же отказ и поток предупреждений в журнале.
@@ -1509,6 +1515,7 @@ class ClientManager:
             record_pruned_chats,
             scheduled_pending,
         )
+        from app.telegram_client.forwarder import pin_sent
 
         st = self._poster_state.setdefault(
             rule.id,
@@ -1538,7 +1545,9 @@ class ClientManager:
             if len(processed) >= POSTER_BATCH or time.time() >= deadline:
                 break
             try:
-                await mailing_send(client, rule, item, chat_id)
+                sent_id = await mailing_send(client, rule, item, chat_id)
+                if getattr(rule.filters, "pin_on_send", False) and sent_id:
+                    await pin_sent(client, chat_id, sent_id, rule_id=rule.id)
             except FloodWaitError as exc:
                 # Чат не обработан — вернёмся к нему после паузы.
                 wait = int(getattr(exc, "seconds", 30)) + 1

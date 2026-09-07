@@ -536,9 +536,10 @@ def own_text_item(text: str) -> SimpleNamespace:
     return SimpleNamespace(id=0, title="", text=text, chat_id=0, message_id=0)
 
 
-async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: int) -> None:
+async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: int) -> int | None:
     """Отправляет одно сохранённое сообщение в один чат.
 
+    Возвращает id отправленного (нужен закрепу и автоудалению) или None.
     Ошибки не перехватываем: паузы, повторы и запись в журнал — дело
     планировщика (``manager._mailing_tick``), как и у авто-постера.
     """
@@ -559,29 +560,30 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
     else:
         text = transform_text(getattr(item, "text", "") or "", filters)
 
-    async def _send() -> None:
+    async def _send() -> Any:
         if message is not None:
-            await send_copy(
+            return await send_copy(
                 client, target_id, message, text,
                 link_preview=bool(filters.link_preview),
                 buttons=getattr(filters, "buttons", None),
             )
-        else:
-            await client.send_message(
-                target_id,
-                text or "",
-                parse_mode=None,
-                link_preview=bool(filters.link_preview),
-            )
+        return await client.send_message(
+            target_id,
+            text or "",
+            parse_mode=None,
+            link_preview=bool(filters.link_preview),
+        )
 
     if filters.typing:
         # «Печатает» видно в чате — так рассылка не выглядит ботом. Пауза
         # внутри блока: вышли из него — индикатор погас.
         async with client.action(target_id, "typing"):
             await asyncio.sleep(MAILING_TYPING_SECONDS)
-            await _send()
-        return
-    await _send()
+            sent = await _send()
+    else:
+        sent = await _send()
+    sent_id = getattr(sent, "id", None)
+    return int(sent_id) if sent_id else None
 
 
 # ─────────── Запланированные посты: слоты с датой вместо кругов ───────────

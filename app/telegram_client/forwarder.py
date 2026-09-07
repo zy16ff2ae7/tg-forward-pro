@@ -117,6 +117,22 @@ async def send_copy(
             pass
 
 
+async def pin_sent(
+    client: Any, target_id: int, message_id: int, *, rule_id: int = 0
+) -> bool:
+    """Закрепляет отправленное сообщение. Закреп — украшение, а не доставка:
+    не вышло (нет прав админа в приёмнике) — сообщение всё равно ушло."""
+    try:
+        await client.pin_message(target_id, message_id)
+        return True
+    except Exception as exc:  # noqa: BLE001 — закреп не роняет отправку
+        logger.warning(
+            "Правило #{}: не закрепили {} в {} ({}): {}",
+            rule_id, message_id, target_id, type(exc).__name__, exc,
+        )
+        return False
+
+
 async def _send_once(client: Any, rule: RuleSnapshot, message: Any, text: str) -> Any:
     if rule.mode == "forward":
         return await client.forward_messages(rule.target_id, message)
@@ -181,6 +197,8 @@ async def deliver(client: Any, message: Any, rule: RuleSnapshot) -> DeliveryResu
     sent = await _send_once(client, rule, message, text)
 
     target_msg_id = getattr(sent, "id", None)
+    if filters.pin_on_send and target_msg_id:
+        await pin_sent(client, rule.target_id, int(target_msg_id), rule_id=rule.id)
     async with session_scope() as session:
         await repo.bump_forwarded(session, rule.id)
         await repo.log_forward(
