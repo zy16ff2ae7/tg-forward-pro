@@ -248,6 +248,22 @@ def clean_menu(rule_id: int, filters: dict) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def cabinet_button() -> InlineKeyboardMarkup | None:
+    """Одна кнопка «Открыть кабинет» — для писем, где меню ни к чему.
+
+    Без публичного адреса мини-аппа кнопки нет: письмо уходит с текстом,
+    а не с битой клавиатурой.
+    """
+    mini_url = settings.mini_app_url
+    if not mini_url:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🖥 Открыть кабинет", web_app=WebAppInfo(url=mini_url))]
+        ]
+    )
+
+
 def payment_menu(user_id: int | None = None) -> InlineKeyboardMarkup:
     """Способы оплаты: показываем только те, что реально работают.
 

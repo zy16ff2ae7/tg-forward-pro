@@ -250,6 +250,63 @@ async def notify_winback(bot: Bot) -> None:
             logger.debug("Не смогли позвать пользователя {} обратно", user_id)
 
 
+def onboard_text(day: int) -> str:
+    """Письмо дня онбординга. День 0 — сразу после подарка, дальше по сроку."""
+    days = settings.bonus_days
+    if day == 0:
+        return (
+            f"🎁 <b>Подарок активен: {days} дн.</b>\n\n"
+            "Пересылка и постинг уже включены — создайте первую задачу "
+            "в кабинете, это займёт минуту."
+        )
+    if day == 1:
+        return (
+            "📡 <b>У вас пока нет ни одной задачи.</b>\n\n"
+            "Бонусные дни тикают, а без задач им нечего включать. "
+            "Откройте кабинет — первая задача собирается за минуту."
+        )
+    return (
+        "⏳ <b>Бонус кончается завтра.</b>\n\n"
+        "Чтобы задачи не встали, оплатите абонемент — все настройки "
+        "и подключённые аккаунты сохранятся."
+    )
+
+
+async def notify_onboarding(bot: Bot) -> None:
+    """Ведёт бонусника: подарок → первая задача → оплата до конца бонуса.
+
+    Человек взял три дня за канал и потерялся — самый дешёвый трафик сервиса
+    сгорал молча. День 0 подтверждает подарок и зовёт в кабинет, день 1
+    напоминает тем, кто так ничего и не создал, день 2 предупреждает
+    неплативших, что бонус кончается завтра. Платящие в эту цепочку не
+    попадают: у них свои письма (см. ``_bonus_only_chain``).
+
+    Метки ставятся до отправки, младшие дни — молча: после простоя человек
+    получает одно актуальное письмо, а не всю пачку задним числом.
+    """
+    async with SessionLocal() as session:
+        notices: list[tuple[int, str, int]] = []
+        for user_id, day, send in await repo.onboarding_due(session):
+            for handled in range(day):
+                await repo.mark_onboarded(session, user_id, handled)
+            await repo.mark_onboarded(session, user_id, day)
+            if send:
+                notices.append((user_id, onboard_text(day), day))
+        await session.commit()
+
+    from app.bot.keyboards import cabinet_button, payment_menu
+
+    cabinet = cabinet_button()
+    for user_id, text, day in notices:
+        try:
+            await bot.send_message(
+                user_id, text,
+                reply_markup=payment_menu(user_id) if day == 2 else cabinet,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Не смогли написать новичку {}", user_id)
+
+
 async def trim_logs(_bot: Bot) -> None:
     """Подрезает журнал пересылок и убирает строки удалённых задач.
 
@@ -290,6 +347,7 @@ async def run_background_checks(bot: Bot) -> None:
         ("последний день", notify_last_day),
         ("конец абонемента", notify_expired),
         ("возврат ушедших", notify_winback),
+        ("онбординг новичков", notify_onboarding),
         ("выпавшие аккаунты", notify_dead_accounts),
         ("уборка базы", trim_logs),
     )

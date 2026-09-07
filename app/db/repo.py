@@ -6,7 +6,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Sequence
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -655,12 +655,33 @@ def _reminder_is_premature(sub: Subscription, now: datetime) -> bool:
     return (sub.active_until - now) > (sub.active_until - start) / 2
 
 
+def _bonus_only_chain() -> exists:
+    """Бонусник, который ещё ни разу не платил.
+
+    Такого ведёт онбординг («создай задачу», «бонус кончается завтра»), а не
+    общие письма платящим: иначе человек через пять минут после подарка
+    получал бы «абонемент заканчивается» — так было до этой правки.
+    Заплативший хоть раз возвращается в общую цепочку.
+    """
+    paid = select(Payment.id).where(
+        Payment.user_id == User.id, Payment.status == "paid"
+    )
+    return exists(
+        select(User.id).where(
+            User.id == Subscription.user_id,
+            User.channel_bonus_at.is_not(None),
+            ~exists(paid),
+        )
+    )
+
+
 async def expiring_soon(session: AsyncSession) -> Sequence[Subscription]:
     """Живые абонементы, которым пора напомнить о продлении.
 
     Два условия, а не одно: остаток меньше ``RENEW_REMIND_DAYS`` и позади хотя
     бы половина периода (см. ``_reminder_is_premature``). Уже напомненные и уже
     истёкшие сюда не попадают — про конец срока говорит ``notify_expired``.
+    Бонусники без оплат идут мимо: у них своя цепочка (``onboarding_due``).
     """
     now = utcnow()
     threshold = now + timedelta(days=settings.renew_remind_days)
@@ -669,6 +690,7 @@ async def expiring_soon(session: AsyncSession) -> Sequence[Subscription]:
             Subscription.active_until > now,
             Subscription.active_until <= threshold,
             Subscription.reminded_at.is_(None),
+            ~_bonus_only_chain(),
         )
     )
     return [sub for sub in result.scalars().all() if not _reminder_is_premature(sub, now)]
@@ -741,6 +763,7 @@ async def expiring_last_day(session: AsyncSession) -> Sequence[Subscription]:
             Subscription.active_until <= now + timedelta(days=1),
             Subscription.reminded_at.is_not(None),
             Subscription.lastday_notified_at.is_(None),
+            ~_bonus_only_chain(),
         )
     )
     return result.scalars().all()
@@ -773,6 +796,67 @@ async def subscriptions_awaiting_winback(
         .order_by(Subscription.user_id)
     )
     return result.scalars().all()
+
+
+async def has_paid(session: AsyncSession, user_id: int) -> bool:
+    """Платил ли человек хоть раз. Разделяет клиентов и бонусников."""
+    result = await session.execute(
+        select(Payment.id).where(
+            Payment.user_id == user_id, Payment.status == "paid"
+        )
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def onboarding_due(session: AsyncSession) -> list[tuple[int, int, bool]]:
+    """Бонусники, которым пора писать, и надо ли слать письмо.
+
+    Возвращает ``(user_id, день, слать_ли)``. День — старший из созревших: если
+    сервис лежал трое суток, человек получит одно актуальное письмо, а не три
+    подряд. Младшие дни вызывающий помечает молча. Письмо шлётся не всегда:
+    день 1 — только без единой задачи, день 2 — только неплатившим с живым
+    сроком («бонус кончается завтра» заплатившему на месяц — враньё).
+    """
+    now = utcnow()
+    # «Кончается завтра» — за сутки до конца бонусного периода.
+    day2_age = timedelta(days=max(1, settings.bonus_days - 1))
+    result = await session.execute(
+        select(User).where(User.channel_bonus_at.is_not(None))
+    )
+    due: list[tuple[int, int, bool]] = []
+    for user in result.scalars().all():
+        granted = user.channel_bonus_at
+        assert granted is not None
+        age = now - granted
+        day = -1
+        if user.onboard_day0_at is None:
+            day = 0
+        elif user.onboard_day1_at is None and age >= timedelta(days=1):
+            day = 1
+        elif user.onboard_day2_at is None and age >= day2_age:
+            day = 2
+        if day < 0:
+            continue
+        send = True
+        if day == 1:
+            send = await count_rules(session, user.id) == 0
+        elif day == 2:
+            sub = await session.get(Subscription, user.id)
+            send = (
+                not await has_paid(session, user.id)
+                and sub is not None
+                and sub.active_until > now
+            )
+        due.append((user.id, day, send))
+    return due
+
+
+async def mark_onboarded(session: AsyncSession, user_id: int, day: int) -> None:
+    """Помечает день онбординга обработанным — письмо ушло или не положено."""
+    user = await session.get(User, user_id)
+    if user is not None:
+        setattr(user, f"onboard_day{day}_at", utcnow())
+        await session.flush()
 
 
 async def mark_winback_notified(session: AsyncSession, sub: Subscription) -> None:

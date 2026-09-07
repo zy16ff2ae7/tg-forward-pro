@@ -40,6 +40,13 @@ class User(Base):
     # Когда человек забрал подарок за подписку на канал. Метка одна на аккаунт:
     # подарок разовый, и отписка-подписка второго раза не даёт.
     channel_bonus_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Онбординг бонусника: день 0 — «подарок активен, создай задачу», день 1 —
+    # «задач всё нет» (только если их правда нет), день 2 — «бонус кончается
+    # завтра» (только если ещё не платил). Метка «обработано» ставится, даже
+    # если письмо не ушло: условия со временем только слабеют.
+    onboard_day0_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    onboard_day1_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    onboard_day2_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Кто привёл: Telegram id пригласившего. Первый зашедший по ссылке
     # фиксируется навсегда — перепривязка открыла бы лазейку
     # лазейку «ходить по кругу и собирать дни с каждого».

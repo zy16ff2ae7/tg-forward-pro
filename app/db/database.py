@@ -89,6 +89,9 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         # связи уже оплачены. Новым строкам ORM пишет свой default=False:
         # единица в DDL нужна только для доливки, дальше её перекрывает модель.
         "referred_rewarded": "BOOLEAN NOT NULL DEFAULT 1",
+        "onboard_day0_at": "DATETIME",
+        "onboard_day1_at": "DATETIME",
+        "onboard_day2_at": "DATETIME",
     },
     "promo_codes": {
         "percent": "INTEGER NOT NULL DEFAULT 0",
