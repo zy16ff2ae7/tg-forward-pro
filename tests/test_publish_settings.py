@@ -257,3 +257,32 @@ async def test_partial_update_preserves_publish_settings(
     assert edit["topic"] == 7
     assert edit["delay_jitter"] == 30
     assert edit["daily_cap"] == 200
+
+
+async def test_mode_toggle_refuses_forward_with_topic(
+    client, auth_headers, create_account, login_open, chats_resolved
+):
+    """Тумблер режима — не лазейка мимо запрета «ветка только в копии»."""
+    task = await _make(
+        client,
+        auth_headers,
+        create_account,
+        {
+            "command": "copy_channel",
+            "source": "@src",
+            "target": "@dst",
+            "mode": "copy",
+            "topic": 5,
+        },
+    )
+    response = await client.post(f"/api/tasks/{task['id']}/mode", headers=auth_headers)
+    assert response.status == 409
+    assert "Ветка" in (await response.json())["error"]
+    # Ветку убрали — тумблер снова работает.
+    cleared = await client.patch(
+        f"/api/tasks/{task['id']}", json={"topic": 0}, headers=auth_headers
+    )
+    assert cleared.status == 200
+    switched = await client.post(f"/api/tasks/{task['id']}/mode", headers=auth_headers)
+    assert switched.status == 200
+    assert (await switched.json())["task"]["mode"] == "forward"

@@ -1491,6 +1491,12 @@ async def switch_mode(request: web.Request) -> web.Response:
             return _json(
                 {"error": "Режим переключается только у обычной пересылки"}, status=409
             )
+        if rule.mode == "copy" and int((rule.filters or {}).get("topic_id") or 0):
+            # Тот же запрет, что при создании и правке: тумблер — не лазейка.
+            return _json(
+                {"error": "Ветка работает только в режиме «копия» — сначала уберите ветку"},
+                status=409,
+            )
         rule.mode = "forward" if rule.mode == "copy" else "copy"
         await session.commit()
 

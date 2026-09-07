@@ -292,6 +292,13 @@ async def switch_mode(callback: CallbackQuery) -> None:
         rule = await repo.get_rule(session, rule_id, callback.from_user.id)
         if rule is None:
             return
+        if rule.mode == "copy" and int((rule.filters or {}).get("topic_id") or 0):
+            # Ветка держит режим: форвард в топик Telegram не примет.
+            await callback.answer(
+                "Ветка работает только в режиме «копия» — сначала уберите ветку",
+                show_alert=True,
+            )
+            return
         rule.mode = "forward" if rule.mode == "copy" else "copy"
         await session.commit()
         rule = await repo.get_rule(session, rule_id, callback.from_user.id)

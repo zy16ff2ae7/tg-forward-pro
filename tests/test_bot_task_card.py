@@ -276,3 +276,34 @@ def test_broadcast_card_shows_pruned_chats():
         filters={"targets": [1, 2, 3], "chats_pruned": 2},
     )
     assert "🧹 Мёртвых чатов вычищено: 2" in text
+
+
+async def test_mode_toggle_refuses_forward_with_topic(create_user, create_account):
+    """Ветка держит режим: тумблер в боте не переключает, а объясняет."""
+    from app.db import repo
+    from app.db.database import session_scope
+    from tests.helpers import TEST_USER_ID
+
+    user_id = await create_user(id=TEST_USER_ID)
+    account_id = await create_account(user_id)
+    async with session_scope() as session:
+        rule = Rule(
+            user_id=user_id,
+            account_id=account_id,
+            source_id=-1001,
+            target_id=-1002,
+            kind="forward",
+            mode="copy",
+            filters={"topic_id": 5},
+        )
+        session.add(rule)
+        await session.flush()
+        rule_id = rule.id
+
+    callback = FakeCallback(f"rule:mode:{rule_id}", RecordingBot())
+    await bot_rules.switch_mode(callback)
+
+    assert "Ветка" in callback.alerts
+    async with session_scope() as session:
+        kept = await repo.get_rule(session, rule_id, user_id)
+        assert kept is not None and kept.mode == "copy"
