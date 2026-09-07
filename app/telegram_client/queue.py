@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -253,6 +254,13 @@ class DeliveryQueue:
             from app.telegram_client.jobs import quiet_wait_seconds
 
             delay += quiet_wait_seconds(getattr(rule, "filters", None))
+            # Джиттер прибавляется, а не разбрасывается: задержка из правила —
+            # минимум, уходить ниже него — прямой путь под ограничения.
+            spread = max(
+                0, int(getattr(getattr(rule, "filters", None), "delay_jitter", 0) or 0)
+            )
+            if spread > 0:
+                delay += int(random.uniform(0, spread))
         return delay
 
     def submit(

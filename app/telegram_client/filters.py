@@ -145,6 +145,10 @@ class FilterConfig:
     autodelete_hours: float = 0
     # Топик приёмника: id темы форума (0 — корень чата, как раньше).
     topic_id: int = 0
+    # Джиттер задержки пересылки: случайная добавка 0..N секунд.
+    delay_jitter: int = 0
+    # Дневной лимит отправок аккаунта (0 — лимит сервиса с прогревом).
+    daily_cap: int = 0
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "FilterConfig":
@@ -221,6 +225,8 @@ class FilterConfig:
             "pin_on_send": self.pin_on_send,
             "autodelete_hours": self.autodelete_hours,
             "topic_id": self.topic_id,
+            "delay_jitter": self.delay_jitter,
+            "daily_cap": self.daily_cap,
         }
 
 

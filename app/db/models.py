@@ -6,6 +6,7 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -245,6 +246,24 @@ class ForwardLog(Base):
     status: Mapped[str] = mapped_column(String(16), default="ok", nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
+class SendCounter(Base):
+    """Сколько аккаунт отправил за сутки. Антибан-лимит считает по этим строкам.
+
+    Одна строка на аккаунт в сутки: вчерашние стираются при записи сегодняшних,
+    таблица не растёт.
+    """
+
+    __tablename__ = "send_counters"
+    __table_args__ = (
+        UniqueConstraint("account_id", "day", name="ux_send_counter_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    day: Mapped[Date] = mapped_column(Date, nullable=False)
+    count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class ScheduledDelete(Base):

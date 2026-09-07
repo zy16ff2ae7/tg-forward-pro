@@ -45,6 +45,7 @@ SKIP_FILTER = "filtered"              # не прошло фильтры пра�
 SKIP_NO_SUBSCRIPTION = "no_subscription"
 SKIP_FILTER_ERROR = "filter_error"    # сам фильтр упал — правило надо править
 SKIP_JOB = "job"                      # это не пересылка, а задача из jobs.py
+SKIP_DAILY_CAP = "daily_cap"            # дневной лимит отправок исчерпан
 
 
 @dataclass(frozen=True, slots=True)

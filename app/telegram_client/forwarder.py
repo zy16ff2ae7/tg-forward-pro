@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from loguru import logger
@@ -22,6 +23,7 @@ from app.telegram_client.filters import (
 )
 from app.telegram_client.types import (
     SENT,
+    SKIP_DAILY_CAP,
     SKIP_EMPTY,
     SKIP_FILTER,
     SKIP_FILTER_ERROR,
@@ -35,6 +37,85 @@ from app.telegram_client.types import (
 
 # Если медиа весит больше — не качаем, а делаем обычный форвард
 MAX_MEDIA_BYTES = 50 * 1024 * 1024
+
+
+# Отправок в сутки на прогретый аккаунт. Лимит — предохранитель, а не цель:
+# при нормальном темпе его не видно, а разогнавшуюся рассылку он останавливает
+# раньше, чем аккаунт заметит Telegram.
+DAILY_CAP_DEFAULT = 1000
+# Прогрев новичка: (возраст аккаунта в днях включительно, лимит). Свежий
+# аккаунт, выстреливший тысячей сообщений в первый день, живёт недолго.
+WARMUP_CAPS: tuple[tuple[int, int], ...] = ((1, 50), (3, 150), (7, 400))
+
+
+def send_cap_for(created_at, override: int = 0) -> int:
+    """Дневной лимит отправок: свой из задачи или сервисный с прогревом."""
+    override = max(0, int(override or 0))
+    if override:
+        return override
+    if created_at is None:
+        return DAILY_CAP_DEFAULT
+    try:
+        age_days = max(0, (datetime.now(timezone.utc) - created_at).days)
+    except TypeError:
+        # Наивная дата из БД — считаем её UTC.
+        naive_now = datetime.now(timezone.utc).replace(tzinfo=None)
+        age_days = max(0, (naive_now - created_at).days)
+    for max_age, cap in WARMUP_CAPS:
+        if age_days <= max_age:
+            return cap
+    return DAILY_CAP_DEFAULT
+
+
+def tomorrow_ts() -> float:
+    """Полночь UTC: когда дневной лимит обнулится."""
+    now = datetime.now(timezone.utc)
+    midnight = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return midnight.timestamp()
+
+
+async def check_send_cap(rule) -> tuple[bool, int, int]:
+    """Исчерпан ли дневной лимит аккаунта. Возвращает (пора_стоять, ушло, лимит)."""
+    async with session_scope() as session:
+        account = await repo.get_account(session, rule.account_id, rule.user_id)
+        created = getattr(account, "created_at", None) if account is not None else None
+        cap = send_cap_for(created, getattr(rule.filters, "daily_cap", 0))
+        used = await repo.send_count_today(session, rule.account_id)
+        return used >= cap, used, cap
+
+
+# Кому уже сказали про лимит сегодня: (rule_id, дата). Письмо одно в сутки —
+# дальше задача тихо стоит до полуночи, а не красит журнал каждой отправкой.
+_cap_warned: set[tuple[int, str]] = set()
+_cap_warned_day: str = ""
+
+
+async def note_cap_hit(rule, used: int, cap: int, source_msg_id: int = 0) -> None:
+    """Пишет в журнал, что задача встала по лимиту. Раз в сутки на задачу."""
+    global _cap_warned_day
+    today = datetime.now(timezone.utc).date().isoformat()
+    if today != _cap_warned_day:
+        _cap_warned.clear()
+        _cap_warned_day = today
+    key = (int(rule.id), today)
+    if key in _cap_warned:
+        return
+    _cap_warned.add(key)
+    async with session_scope() as session:
+        await repo.log_forward(
+            session,
+            rule_id=rule.id,
+            user_id=rule.user_id,
+            source_msg_id=int(source_msg_id or 0),
+            target_msg_id=None,
+            status="error",
+            error=(
+                f"Дневной лимит отправок исчерпан ({used}/{cap}). "
+                "Продолжим после полуночи UTC."
+            ),
+        )
 
 
 async def subscription_active(user_id: int) -> bool:
@@ -214,6 +295,11 @@ async def deliver(client: Any, message: Any, rule: RuleSnapshot) -> DeliveryResu
         logger.debug("Правило #{}: у пользователя нет активной подписки", rule.id)
         return skipped(SKIP_NO_SUBSCRIPTION)
 
+    hit, used, cap = await check_send_cap(rule)
+    if hit:
+        await note_cap_hit(rule, used, cap, int(getattr(message, "id", 0) or 0))
+        return skipped(SKIP_DAILY_CAP)
+
     if rule.mode != "forward" and filters.translate_to:
         # Переводим исходник, а не готовый текст: подпись и замены уже на
         # языке читателя, гонять их туда-обратно не надо. Фильтры при этом
@@ -229,6 +315,7 @@ async def deliver(client: Any, message: Any, rule: RuleSnapshot) -> DeliveryResu
         await pin_sent(client, rule.target_id, int(target_msg_id), rule_id=rule.id)
     async with session_scope() as session:
         await repo.bump_forwarded(session, rule.id)
+        await repo.bump_send_count(session, rule.account_id)
         await repo.log_forward(
             session,
             rule_id=rule.id,

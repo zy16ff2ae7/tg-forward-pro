@@ -747,6 +747,7 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
                 struck[target] = type(exc).__name__
     if sent:
         await record_ok(rule, message, count=sent)
+        await note_sends(rule, sent)
     else:
         await record_error(rule, message, "Сообщение не удалось доставить ни в один чат")
     # Мёртвые чаты копятся в счётчике и уходят из получателей сами — иначе
@@ -867,7 +868,11 @@ async def clone_backfill_tick(client: Any, rule: RuleSnapshot) -> str:
         # Успевшее — в базу, остаток — в очередь: повтор начнётся с места
         # остановки, а не с начала порции.
         await persist(chunk[sent_count:] + rest, None, None)
+        if sent_count:
+            await note_sends(rule, sent_count)
         raise
+    if sent_count:
+        await note_sends(rule, sent_count)
     rest = chunk[sent_count:] + rest if sent_count < len(chunk) else rest
     await persist(rest, None, not rest)
     return "done" if not rest else "progress"
@@ -1044,6 +1049,7 @@ async def _dialogs(client: Any, message: Any, rule: RuleSnapshot) -> None:
         topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
     )
     await record_ok(rule, message)
+    await note_sends(rule)
 
 
 async def _listener(client: Any, message: Any, rule: RuleSnapshot) -> None:
@@ -1066,6 +1072,7 @@ async def _listener(client: Any, message: Any, rule: RuleSnapshot) -> None:
         topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
     )
     await record_ok(rule, message)
+    await note_sends(rule)
 
 
 async def _checks(client: Any, message: Any, rule: RuleSnapshot) -> None:
@@ -1100,6 +1107,7 @@ async def _checks(client: Any, message: Any, rule: RuleSnapshot) -> None:
             buttons=getattr(rule.filters, "buttons", None),
             topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
         )
+        await note_sends(rule)
     if capped:
         logger.warning(
             "Ловец чеков #{}: хранилище переполнено ({}), новые находки отброшены",
@@ -1788,6 +1796,22 @@ async def schedule_autodelete(rule: RuleSnapshot, chat_id: int, msg_id: int) -> 
         )
 
 
+async def note_sends(rule: RuleSnapshot, count: int = 1) -> None:
+    """Считает отправки в дневной лимит аккаунта.
+
+    Для задач, которые шлют мимо record_batch (веер, догрузка клона,
+    уведомления): у них свой учёт журнала, а лимит общий. Ошибка учёта задачу
+    не роняет — лимит чуть недосчитает, только и всего.
+    """
+    from app.db.database import session_scope
+
+    try:
+        async with session_scope() as session:
+            await repo.bump_send_count(session, rule.account_id, count)
+    except Exception as exc:  # noqa: BLE001 — учёт не роняет задачу
+        logger.warning("Задача #{}: не посчитали отправки: {}", rule.id, exc)
+
+
 async def record_ok(rule: RuleSnapshot, message: Any, count: int = 1) -> None:
     """Отмечает успешное срабатывание задачи."""
     async with SessionLocal() as session:
@@ -1878,6 +1902,9 @@ async def record_batch(
     if not sent and not failed:
         return
     async with SessionLocal() as session:
+        if sent:
+            # Учёт раньше журнала: дневной лимит считает реальные отправки.
+            await repo.bump_send_count(session, rule.account_id, sent)
         if failed:
             await repo.log_forward(
                 session,

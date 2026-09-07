@@ -25,6 +25,7 @@ from app.db.models import (
     Rule,
     SavedMessage,
     ScheduledDelete,
+    SendCounter,
     Subscription,
     TelegramAccount,
     User,
@@ -2538,3 +2539,45 @@ async def bump_delete_attempt(session: AsyncSession, delete_id: int) -> int:
     row.attempts = int(row.attempts or 0) + 1
     await session.flush()
     return int(row.attempts)
+
+
+async def bump_send_count(session: AsyncSession, account_id: int, count: int = 1) -> int:
+    """Прибавляет отправки к дневному счётчику аккаунта. Возвращает итог.
+
+    Вставка под savepoint: два воркера в одну секунду иначе роняли бы друг
+    друга конфликтом уникальности — а откат зацепил бы и журнал отправки,
+    который пишется в той же сессии.
+    """
+    today = utcnow().date()
+    await session.execute(
+        delete(SendCounter).where(
+            SendCounter.account_id == account_id, SendCounter.day < today
+        )
+    )
+    try:
+        async with session.begin_nested():
+            session.add(SendCounter(account_id=account_id, day=today, count=0))
+            await session.flush()
+    except IntegrityError:
+        pass  # строка уже есть — её создал соседний воркер
+    row = (
+        await session.execute(
+            select(SendCounter).where(
+                SendCounter.account_id == account_id, SendCounter.day == today
+            )
+        )
+    ).scalar_one()
+    row.count = int(row.count or 0) + max(1, int(count))
+    await session.flush()
+    return int(row.count)
+
+
+async def send_count_today(session: AsyncSession, account_id: int) -> int:
+    """Сколько аккаунт уже отправил за текущие сутки (UTC)."""
+    today = utcnow().date()
+    result = await session.execute(
+        select(SendCounter.count).where(
+            SendCounter.account_id == account_id, SendCounter.day == today
+        )
+    )
+    return int(result.scalar() or 0)

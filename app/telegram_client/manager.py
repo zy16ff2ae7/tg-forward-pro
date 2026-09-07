@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1197,7 +1198,12 @@ class ClientManager:
             window_now_sec,
             window_tz_minutes,
         )
-        from app.telegram_client.forwarder import pin_sent
+        from app.telegram_client.forwarder import (
+            check_send_cap,
+            note_cap_hit,
+            pin_sent,
+            tomorrow_ts,
+        )
 
         deadline = time.time() + POSTER_TICK_BUDGET
 
@@ -1246,6 +1252,12 @@ class ClientManager:
             # Спрашиваем до чтения библиотеки: тик идёт раз в 20 секунд, и лишний
             # запрос на каждую задачу в каждом проходе ничем не оправдан.
             if not st.get("queue") and time.time() - st["last"] < interval:
+                continue
+
+            hit, used, cap = await check_send_cap(rule)
+            if hit:
+                st["not_before"] = tomorrow_ts()
+                await note_cap_hit(rule, used, cap)
                 continue
 
             # Что постить: записи библиотеки — те же, что у рассылки. Старая
@@ -1330,7 +1342,10 @@ class ClientManager:
                 st["runs"] += 1
                 sent += 1
                 if st["queue"] and time.time() < deadline:
-                    await asyncio.sleep(POSTER_CHAT_GAP)
+                    spread = max(0, int(getattr(rule.filters, "gap_jitter", 0) or 0))
+                    await asyncio.sleep(
+                        POSTER_CHAT_GAP + (random.uniform(0, spread) if spread else 0)
+                    )
 
             # Счётчик отправок и итог прохода — одним заходом в базу: по нему в
             # кабинете видно и работу задачи, и потерянные чаты.
@@ -1387,7 +1402,12 @@ class ClientManager:
             schedule_autodelete,
             window_allows,
         )
-        from app.telegram_client.forwarder import pin_sent
+        from app.telegram_client.forwarder import (
+            check_send_cap,
+            note_cap_hit,
+            pin_sent,
+            tomorrow_ts,
+        )
 
         now = time.time()
         async with self._lock:
@@ -1438,6 +1458,14 @@ class ClientManager:
             repeats = max(0, int(rule.filters.repeats or 0))
             if repeats and st["cycle"] >= repeats:
                 await self._finish_mailing(rule, st["cycle"])
+                continue
+
+            # Дневной лимит: стоим до полуночи UTC, круг не ломаем — позиция
+            # выводится из счётчика и продолжит с того же чата.
+            hit, used, cap = await check_send_cap(rule)
+            if hit:
+                st["not_before"] = tomorrow_ts()
+                await note_cap_hit(rule, used, cap)
                 continue
 
             target_id = recipients[st["pos"] % len(recipients)]
@@ -1579,7 +1607,12 @@ class ClientManager:
             schedule_autodelete,
             scheduled_pending,
         )
-        from app.telegram_client.forwarder import pin_sent
+        from app.telegram_client.forwarder import (
+            check_send_cap,
+            note_cap_hit,
+            pin_sent,
+            tomorrow_ts,
+        )
 
         st = self._poster_state.setdefault(
             rule.id,
@@ -1597,6 +1630,11 @@ class ClientManager:
         if item is None:
             # Запись библиотеки удалили — слот сам не разблокируется никогда.
             await self._skip_scheduled_slot(rule, slot, "запись библиотеки удалена")
+            return
+        hit, used, cap = await check_send_cap(rule)
+        if hit:
+            st["not_before"] = tomorrow_ts()
+            await note_cap_hit(rule, used, cap)
             return
         processed: list[int] = []
         failed: list[str] = []
@@ -1641,7 +1679,10 @@ class ClientManager:
             processed.append(chat_id)
             st["runs"] += 1
             if time.time() < deadline:
-                await asyncio.sleep(POSTER_CHAT_GAP)
+                spread = max(0, int(getattr(rule.filters, "gap_jitter", 0) or 0))
+                await asyncio.sleep(
+                    POSTER_CHAT_GAP + (random.uniform(0, spread) if spread else 0)
+                )
         if not processed:
             return
         async with session_scope() as session:
