@@ -985,6 +985,40 @@ async def mark_onboarded(session: AsyncSession, user_id: int, day: int) -> None:
         await session.flush()
 
 
+# Сколько задача может молчать после создания, прежде чем спросить хозяина.
+# Сутки — компромисс: меньше — ложные тревоги на тихих каналах, больше —
+# человек уже забил и ушёл.
+SILENT_RULE_AFTER_HOURS = 24
+
+
+async def silent_rules(session: AsyncSession) -> list[Rule]:
+    """Включённые задачи старше суток без единой доставки.
+
+    Кандидаты в письмо «задача молчит»: создали, а постов нет. Выключенные
+    и архивные молчат по воле хозяина — их не трогаем. Живы ли абонемент
+    и аккаунт, решает вызывающий: там уже есть сессия и пул.
+    """
+    cutoff = utcnow() - timedelta(hours=SILENT_RULE_AFTER_HOURS)
+    delivered = select(ForwardLog.id).where(
+        ForwardLog.rule_id == Rule.id, ForwardLog.status == "ok"
+    )
+    result = await session.execute(
+        select(Rule).where(
+            Rule.enabled.is_(True),
+            Rule.archived.is_(False),
+            Rule.created_at <= cutoff,
+            Rule.silent_notified_at.is_(None),
+            ~exists(delivered),
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def mark_silent_notified(session: AsyncSession, rule: Rule) -> None:
+    rule.silent_notified_at = utcnow()
+    await session.flush()
+
+
 async def mark_winback_notified(session: AsyncSession, sub: Subscription) -> None:
     sub.winback_notified_at = utcnow()
     await session.flush()

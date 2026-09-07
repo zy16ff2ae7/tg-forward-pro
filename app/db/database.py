@@ -100,6 +100,7 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "rules": {
         "kind": "TEXT NOT NULL DEFAULT 'forward'",
         "archived": "BOOLEAN NOT NULL DEFAULT 0",
+        "silent_notified_at": "DATETIME",
     },
     "subscriptions": {
         "banked_days": "INTEGER NOT NULL DEFAULT 0",

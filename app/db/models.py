@@ -139,6 +139,9 @@ class Rule(Base):
     filters: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     forwarded_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+    # Когда сказали хозяину, что задача молчит сутки. Письмо одно: дальше
+    # либо починили, либо это тихий источник — и так задумано.
+    silent_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="rules")
     account: Mapped["TelegramAccount"] = relationship(back_populates="rules")

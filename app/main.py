@@ -363,6 +363,50 @@ async def notify_abandoned_payments(bot: Bot) -> None:
             logger.debug("Не смогли напомнить пользователю {} про счёт", user_id)
 
 
+def silent_rule_text(title: str) -> str:
+    """Письмо «задача молчит»: что случилось и три типовые причины."""
+    return (
+        f"🔇 <b>{title}</b> молчит сутки.\n\n"
+        "Ни одной доставки за 24 часа. Три типовые причины:\n"
+        "1. В источнике тихо — тогда всё в порядке, писать не о чем.\n"
+        "2. Аккаунт не видит чат: вышел, выгнали, ссылку отозвали.\n"
+        "3. Фильтры режут всё: слова, типы сообщений.\n\n"
+        "Загляните в журнал задачи — там видно, что приходило, а что отсеялось."
+    )
+
+
+async def notify_silent_rules(bot: Bot) -> None:
+    """Говорит, что созданная сутки назад задача так ничего и не доставила.
+
+    Дожимает онбординг до первой пользы: человек собрал задачу (может, даже
+    мастером), а она молчит — и он решает, что сервис не работает. Пишем
+    один раз за задачу, только если абонемент жив и аккаунт в сети: про
+    конец срока и выпавший аккаунт говорят другие письма, дубли ни к чему.
+    Тихий источник — тоже ответ: письмо честно называет его первой причиной.
+    """
+    from app.telegram_client.jobs import task_title
+
+    async with SessionLocal() as session:
+        notices: list[tuple[int, str]] = []
+        for rule in await repo.silent_rules(session):
+            await repo.mark_silent_notified(session, rule)
+            if not await repo.has_active_subscription(session, rule.user_id):
+                continue
+            if not manager.is_online(rule.account_id):
+                continue
+            notices.append((rule.user_id, silent_rule_text(task_title(rule))))
+        await session.commit()
+
+    from app.bot.keyboards import cabinet_button
+
+    cabinet = cabinet_button()
+    for user_id, text in notices:
+        try:
+            await bot.send_message(user_id, text, reply_markup=cabinet)
+        except Exception:  # noqa: BLE001
+            logger.debug("Не смогли сказать пользователю {} про молчащую задачу", user_id)
+
+
 async def trim_logs(_bot: Bot) -> None:
     """Подрезает журнал пересылок и убирает строки удалённых задач.
 
@@ -405,6 +449,7 @@ async def run_background_checks(bot: Bot) -> None:
         ("возврат ушедших", notify_winback),
         ("онбординг новичков", notify_onboarding),
         ("брошенные счета", notify_abandoned_payments),
+        ("молчащие задачи", notify_silent_rules),
         ("выпавшие аккаунты", notify_dead_accounts),
         ("уборка базы", trim_logs),
     )
