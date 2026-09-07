@@ -552,6 +552,11 @@ const DEMO_COMMANDS = [
     needs: ['account', 'source', 'target'], optional: ['keywords'],
     description: 'Ловит чеки и подарочные ссылки в чатах и складывает в одно место.',
     tags: ['чеки и подарки', 'в один чат'] },
+  { id: 'listener', group: 'inbox', kind: 'listener', emoji: '👂', title: 'Слушатель слов', status: 'ready',
+    needs: ['account', 'source', 'target'], optional: ['keywords'],
+    description: 'Следит за чатом и присылает посты с вашими словами.',
+    hint: 'Слова — через запятую: «скидка, акция, розыгрыш». Совпадение ищется без учёта регистра, пост приходит с названием чата.',
+    tags: ['свои слова', 'в один чат'] },
   { id: 'dialogs', group: 'inbox', kind: 'dialogs', emoji: '💬', title: 'Уведомления из диалогов', status: 'ready',
     needs: ['account', 'target'], optional: ['keywords', 'ignore_bots', 'ignore_archived', 'ignore_muted'],
     description: 'Присылает входящие личные сообщения в выбранный чат.',
@@ -2153,6 +2158,7 @@ function taskMetaLines(task) {
   if (task.buttons_count) lines.push(`🔘 ${task.buttons_count} кн.`);
   if (task.translate_to) lines.push(`🌐 →${String(task.translate_to).toUpperCase()}`);
   if (task.uniquify) lines.push('✨ уник.');
+  if (task.keywords_count) lines.push(`🔎 ${task.keywords_count} сл.`);
   if (task.kind === 'clone' && !task.clone_done) {
     const total = Number(task.clone_history || 0);
     const left = Number(task.clone_left || 0);

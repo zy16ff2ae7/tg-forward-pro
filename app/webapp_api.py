@@ -781,6 +781,16 @@ async def _apply_task_settings(
     elif kind in ("checks", "mute"):
         if given("keywords"):
             filters["keywords"] = _as_list(payload.get("keywords"))
+    elif kind == "listener":
+        if given("keywords"):
+            filters["keywords"] = _as_list(payload.get("keywords"))
+        # Слова — смысл задачи: слушатель без слов — это пересылка, а молча
+        # созданный «слушатель всего» завалил бы чат каждым постом источника.
+        # Проверяем создание и явную очистку; чужие правки не трогаем.
+        if (not partial or "keywords" in payload) and not [
+            word for word in (filters.get("keywords") or []) if str(word).strip()
+        ]:
+            raise ValidationError("Слушателю нужны ключевые слова — без них это пересылка")
     elif kind == "dialogs":
         if given("keywords"):
             filters["keywords"] = _as_list(payload.get("keywords"))
@@ -2605,6 +2615,10 @@ def _task_view(
     )
     view["translate_to"] = conf.translate_to or ""
     view["uniquify"] = bool(conf.uniquify)
+    if kind == "listener":
+        view["keywords_count"] = len(
+            [word for word in (conf.keywords or []) if str(word).strip()]
+        )
     if kind == "clone":
         view["clone_done"] = bool(conf.clone_done)
         view["clone_left"] = len(conf.clone_ids or [])
@@ -2768,6 +2782,8 @@ def _edit_view(
     elif kind == "baiting":
         edit["reaction"] = conf.reaction
     elif kind in ("checks", "mute"):
+        edit["keywords"] = ", ".join(conf.keywords or [])
+    elif kind == "listener":
         edit["keywords"] = ", ".join(conf.keywords or [])
     elif kind == "dialogs":
         edit["keywords"] = ", ".join(conf.keywords or [])
@@ -2950,6 +2966,19 @@ COMMANDS: list[dict] = [
         "needs": ["account", "source", "target"],
         "optional": ["keywords"],
         "tags": ["чеки и подарки", "в один чат"],
+    },
+    {
+        "id": "listener",
+        "group": "inbox",
+        "kind": "listener",
+        "emoji": "👂",
+        "title": "Слушатель слов",
+        "description": "Следит за чатом и присылает посты с вашими словами.",
+        "status": "ready",
+        "needs": ["account", "source", "target"],
+        "optional": ["keywords"],
+        "hint": "Слова — через запятую: «скидка, акция, розыгрыш». Совпадение ищется без учёта регистра, пост приходит с названием чата.",
+        "tags": ["свои слова", "в один чат"],
     },
     {
         "id": "dialogs",

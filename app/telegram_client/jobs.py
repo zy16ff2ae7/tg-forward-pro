@@ -75,6 +75,8 @@ KIND_LABELS: dict[str, str] = {
     # отличие: у постинга расписание, у рассылки обход чатов по одному.
     "poster": "постинг по расписанию",
     "mailing": "рассылка по очереди",
+    "clone": "клон канала",
+    "listener": "слушатель слов",
 }
 
 # Ссылки на подарки и чеки, которые ищет «ловец чеков»
@@ -155,6 +157,10 @@ def task_title(rule: Any) -> str:
         return f"Уведомления из ЛС → {target}"
     if kind == "checks":
         return f"Ловец чеков: {source} → {target}"
+    if kind == "listener":
+        words = len([word for word in (filters.get("keywords") or []) if str(word).strip()])
+        head = f"Слушатель: {source} → {target}"
+        return head + (f" · {words} сл." if words else "")
     if kind == "clone":
         if filters.get("clone_done"):
             return f"Клон: {source} → {target}"
@@ -846,6 +852,27 @@ async def _dialogs(client: Any, message: Any, rule: RuleSnapshot) -> None:
     await record_ok(rule, message)
 
 
+async def _listener(client: Any, message: Any, rule: RuleSnapshot) -> None:
+    """Ловит ключевые слова в источнике и присылает совпадения в чат.
+
+    От уведомлений из диалогов отличается источником: те слушают все ЛС
+    аккаунта, а слушатель — один указанный чат. Пустых слов не бывает: задача
+    без слов — это пересылка, и API её не создаёт.
+    """
+    raw_text = message_text(message)
+    if not raw_text:
+        return
+    if not _matches_keywords(rule.filters.keywords, raw_text):
+        return
+    where = rule.source_title or "Источник"
+    text = f"🔔 {where}\n\n" + transform_text(raw_text, rule.filters)
+    await send_copy(
+        client, rule.target_id, message, text,
+        buttons=getattr(rule.filters, "buttons", None),
+    )
+    await record_ok(rule, message)
+
+
 async def _checks(client: Any, message: Any, rule: RuleSnapshot) -> None:
     """Ловит чеки и подарочные ссылки, складывает их в одно место."""
     raw_text = message_text(message)
@@ -918,6 +945,7 @@ _HANDLERS: dict[str, Callable[[Any, Any, RuleSnapshot], Awaitable[None]]] = {
     "baiting": _baiting,
     "mute": _mute,
     "dialogs": _dialogs,
+    "listener": _listener,
     "checks": _checks,
     "autosubscribe": _autosubscribe,
 }
