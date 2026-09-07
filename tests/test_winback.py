@@ -1,7 +1,7 @@
 """Возврат ушедших: «последний день» и письмо с промокодом через неделю.
 
 Цепочка конца срока: «скоро конец» → «последний день» → «кончился» →
-через неделю личный промокод на −10%. Проверяем:
+через неделю личный промокод на −5%. Проверяем:
 
 * «последний день» уходит раз и только после первого письма;
 * продление снимает все метки цепочки;
@@ -99,7 +99,7 @@ async def test_renewal_resets_the_chain(create_user):
 
 
 async def test_winback_brings_a_working_code(create_user, create_account):
-    """Возврат: личный код на −10%, код активируется."""
+    """Возврат: личный код на −5%, код активируется."""
     user_id = await create_user()
     await _rule(user_id, create_account)
     await _rule(user_id, create_account)
@@ -110,7 +110,7 @@ async def test_winback_brings_a_working_code(create_user, create_account):
     bot = FakeBot()
     await notify_winback(bot)
     assert len(bot.dms) == 1
-    assert "задач — 2" in bot.dms[0][1] and "−10%" in bot.dms[0][1]
+    assert "задач — 2" in bot.dms[0][1] and "−5%" in bot.dms[0][1]
     async with session_scope() as session:
         codes = await repo.owner_discount_codes(session, user_id)
         assert len(codes) == 1 and codes[0].code in bot.dms[0][1]
