@@ -1,4 +1,4 @@
-"""Подключение личных Telegram-аккаунтов в боте (вход по номеру телефона).
+"""Подключение личных Telegram-аккаунтов в боте (номер или QR-код).
 
 Сами шаги входа живут в ``app/accounts_login.py`` — тот же сценарий работает в
 кабинете, а состояние шага лежит в БД, а не в памяти процесса. Здесь остаётся
@@ -13,10 +13,12 @@
 """
 from __future__ import annotations
 
+import base64
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from app import accounts_login as login
 from app.bot import keyboards as kb
@@ -30,6 +32,16 @@ from app.telegram_client.manager import manager
 
 router = Router(name="accounts")
 
+CHOICE_TEXT = (
+    "🔑 <b>Как подключить аккаунт?</b>\n\n"
+    "📱 <b>По номеру</b> — Telegram пришлёт код, введёте его сюда.\n"
+    "📷 <b>По QR-коду</b> — отсканируете код приложением, номер набирать не нужно."
+)
+QR_CAPTION = (
+    "📷 Наведите камеру: в приложении Telegram откройте Настройки → Устройства → "
+    "Связать устройство.\n\n"
+    "Код живёт 5 минут. Отсканировали — жмите «Проверить»."
+)
 PHONE_PROMPT = (
     "📱 Введите номер телефона в международном формате:\n\n"
     "<code>+79001234567</code>\n\n"
@@ -72,10 +84,10 @@ async def _delete_secret(message: Message) -> None:
 
 SETUP_TEXT = (
     "⚙️ <b>Подключение аккаунта пока недоступно</b>\n\n"
-    "Кабинет, меню, подписка и платежи уже работают. Вход личных аккаунтов по "
-    "телефону включится, когда сервис подключит MTProto-шлюз.\n\n"
-    "Сценарий будет такой: номер телефона → код из Telegram → облачный пароль "
-    "2FA, если он включён."
+    "Кабинет, меню, подписка и платежи уже работают. Вход личных аккаунтов "
+    "включится, когда сервис подключит MTProto-шлюз.\n\n"
+    "Сценарий будет такой: номер телефона или QR-код → код из Telegram или "
+    "скан → облачный пароль 2FA, если он включён."
 )
 
 async def _accounts_text(user_id: int) -> tuple[str, object]:
@@ -97,8 +109,8 @@ async def _accounts_text(user_id: int) -> tuple[str, object]:
         lines += [
             "",
             "⚙️ <b>Подключение аккаунтов временно на настройке</b>",
-            "Кабинет, меню, подписки и платежи работают. Вход по номеру "
-            "откроется после подключения MTProto-шлюза сервиса.",
+            "Кабинет, меню, подписки и платежи работают. Вход (номер или "
+            "QR-код) откроется после подключения MTProto-шлюза сервиса.",
         ]
     return "\n".join(lines), kb.accounts_menu(accounts, pending_login=pending is not None)
 
@@ -135,8 +147,8 @@ async def _open_login(user_id: int, state: FSMContext) -> tuple[str, object]:
 
     pending = await login.pending(user_id)
     if pending is None:
-        await state.set_state(LoginStates.phone)
-        return PHONE_PROMPT, kb.cancel_kb()
+        await state.set_state(LoginStates.choice)
+        return CHOICE_TEXT, kb.login_choice_kb()
 
     if pending.stage == "password":
         await state.set_state(LoginStates.password)
@@ -156,7 +168,7 @@ async def add_account_start(callback: CallbackQuery, state: FSMContext) -> None:
     assert callback.from_user is not None
     text, markup = await _open_login(callback.from_user.id, state)
     if not settings.public_login_enabled:
-        await callback.answer("Вход по номеру пока на настройке", show_alert=True)
+        await callback.answer("Подключение аккаунтов пока на настройке", show_alert=True)
     else:
         await callback.answer()
     if callback.message is not None:
@@ -187,6 +199,99 @@ async def cmd_resume_login(message: Message, state: FSMContext) -> None:
 async def resume_account_login(callback: CallbackQuery, state: FSMContext) -> None:
     """Продолжает вход после перезапуска бота или потери FSM."""
     await add_account_start(callback, state)
+
+
+# ───────────────────────────── Выбор способа входа ────────────────────────────
+
+
+@router.callback_query(F.data == "acc:method:phone")
+async def choose_phone_login(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(LoginStates.phone)
+    if callback.message is not None:
+        await smart_edit(callback.message, PHONE_PROMPT, reply_markup=kb.cancel_kb())
+
+
+def _qr_png(data_uri: str) -> bytes:
+    """Картинка из сервиса — data URI, а боту для отправки нужны сырые байты."""
+    _, _, payload = data_uri.partition(",")
+    return base64.b64decode(payload or data_uri)
+
+
+@router.callback_query(F.data == "acc:method:qr")
+async def choose_qr_login(callback: CallbackQuery, state: FSMContext) -> None:
+    """QR-ветка: код — новым сообщением с фото, проверка — кнопкой под ним."""
+    assert callback.from_user is not None
+    await callback.answer("Готовлю код…")
+    try:
+        begun = await login.qr_start(callback.from_user.id)
+    except AppError as exc:
+        await state.clear()
+        if callback.message is not None:
+            await smart_edit(
+                callback.message,
+                f"❌ {exc.message}",
+                reply_markup=kb.back_to_main(),
+            )
+        return
+    if callback.message is None:
+        # Без сообщения код некуда отправить — вход не начинаем, а гасим.
+        await state.clear()
+        await login.qr_cancel(callback.from_user.id)
+        await callback.answer("Не получилось показать код, попробуйте ещё раз.")
+        return
+    await state.set_state(LoginStates.qr)
+    await smart_edit(
+        callback.message,
+        "⬇️ Код — в следующем сообщении. Наведите на него камеру из "
+        "«Настроек → Устройства → Связать устройство».",
+    )
+    await callback.message.answer_photo(
+        BufferedInputFile(_qr_png(begun["image"]), filename="qr.png"),
+        caption=QR_CAPTION,
+        reply_markup=kb.login_qr_kb(),
+    )
+
+
+@router.callback_query(F.data == "acc:qr:check")
+async def check_qr_login(callback: CallbackQuery, state: FSMContext) -> None:
+    """«Я отсканировал» — спрашивает у вотчера, что уже случилось.
+
+    Скана ещё нет — остаёмся: кнопка бесплатная, жать можно сколько угодно.
+    Всё остальное (протух, не начинали) — конец попытки, начинаем заново.
+    """
+    assert callback.from_user is not None
+    try:
+        status = await login.qr_status(callback.from_user.id)
+    except AppError as exc:
+        await state.clear()
+        await callback.answer(exc.message, show_alert=True)
+        if callback.message is not None:
+            await smart_edit(
+                callback.message, f"❌ {exc.message}", reply_markup=kb.back_to_main()
+            )
+        return
+    if isinstance(status, login.LoginStep):
+        await state.clear()
+        await callback.answer("Готово!")
+        if callback.message is not None:
+            await smart_edit(
+                callback.message,
+                _finish_text(status),
+                reply_markup=kb.back_to_main(),
+            )
+        return
+    if status.get("stage") == "password":
+        await state.set_state(LoginStates.qr_password)
+        await callback.answer()
+        if callback.message is not None:
+            await smart_edit(
+                callback.message,
+                f"✅ Код отсканирован.\n\n{PASSWORD_PROMPT}",
+                reply_markup=kb.cancel_kb(),
+            )
+        return
+    await callback.answer("Пока не вижу сканирования — наведите камеру на код.")
 
 
 # ──────────────────────────────── Шаги входа ──────────────────────────────────
@@ -322,6 +427,22 @@ async def process_password(message: Message, state: FSMContext) -> None:
     wait_msg = await message.answer("⏳ Проверяю пароль…")
     try:
         step = await login.submit_password(message.from_user.id, message.text or "")
+    except AppError as exc:
+        await _step_failed(exc, wait_msg, state, stay=isinstance(exc, ValidationError))
+        return
+
+    await state.clear()
+    await wait_msg.edit_text(_finish_text(step), reply_markup=kb.back_to_main())
+
+
+@router.message(LoginStates.qr_password)
+async def process_qr_password(message: Message, state: FSMContext) -> None:
+    """Облачный пароль после сканирования: принимает его QR-ветка сервиса."""
+    assert message.from_user is not None
+    await _delete_secret(message)
+    wait_msg = await message.answer("⏳ Проверяю пароль…")
+    try:
+        step = await login.qr_password(message.from_user.id, message.text or "")
     except AppError as exc:
         await _step_failed(exc, wait_msg, state, stay=isinstance(exc, ValidationError))
         return

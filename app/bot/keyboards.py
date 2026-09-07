@@ -425,6 +425,35 @@ def bank_menu(banked_days: int, active_days: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def login_choice_kb() -> InlineKeyboardMarkup:
+    """Выбор, как входить: код на номер или скан QR-кода."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📱 По номеру", callback_data="acc:method:phone")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📷 По QR-коду", callback_data="acc:method:qr")
+    )
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="nav:cancel"))
+    return builder.as_markup()
+
+
+def login_qr_kb() -> InlineKeyboardMarkup:
+    """Под QR-кодом: человек сам говорит, когда отсканировал.
+
+    Кнопка — честная проверка статуса, а не «подождать ещё»: вотчер на сервере
+    уже всё знает, бот только спрашивает.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="🔄 Я отсканировал — проверить", callback_data="acc:qr:check"
+        )
+    )
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="nav:cancel"))
+    return builder.as_markup()
+
+
 def cancel_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="nav:cancel"))
@@ -454,8 +483,8 @@ def back_to_main() -> InlineKeyboardMarkup:
 def relogin_notice() -> InlineKeyboardMarkup:
     """Кнопки под сообщением «аккаунт выпал»: вход сразу, а не поиск по меню.
 
-    ``acc:add`` ведёт на шаг номера и сам подхватывает незавершённый вход, если
-    человек его уже начал.
+    ``acc:add`` ведёт на выбор способа входа и сам подхватывает незавершённый
+    вход, если человек его уже начал.
     """
     builder = InlineKeyboardBuilder()
     builder.row(

@@ -226,7 +226,14 @@ async def cancel_action(callback: CallbackQuery, state: FSMContext) -> None:
     # «продолжить вход» на номер, от которого человек уже отказался.
     current = await state.get_state()
     await state.clear()
-    if current in {LoginStates.phone.state, LoginStates.code.state, LoginStates.password.state}:
+    if current in {
+        LoginStates.choice.state,
+        LoginStates.phone.state,
+        LoginStates.code.state,
+        LoginStates.password.state,
+        LoginStates.qr.state,
+        LoginStates.qr_password.state,
+    }:
         from app import accounts_login
 
         if callback.from_user is not None:

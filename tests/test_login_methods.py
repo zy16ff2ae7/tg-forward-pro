@@ -280,3 +280,167 @@ async def test_qr_cancel_and_single_login(create_user, ready, gateway, monkeypat
     await accounts_login.qr_start(user_id)
     async with session_scope() as session:
         assert await repo.get_pending_login(session, user_id) is None
+
+
+# ─────────────────────────── бот: разговор про QR ─────────────────────────────
+#
+# Сервис умеет ждать сканирования, но боту нечего опрашивать: вместо таймера —
+# кнопка «Я отсканировал — проверить». Проверяем разговор: выбор способа, код
+# фото, проверка до и после скана, пароль после скана, протухший код.
+
+from aiogram.fsm.context import FSMContext  # noqa: E402
+from aiogram.fsm.storage.base import StorageKey  # noqa: E402
+from aiogram.fsm.storage.memory import MemoryStorage  # noqa: E402
+
+from app.bot.handlers import accounts as bot_accounts  # noqa: E402
+from app.bot.states import LoginStates  # noqa: E402
+
+
+class FakeBotMessage:
+    """Сообщение меню в объёме QR-разговора: правка текста и фото с кодом."""
+
+    def __init__(self) -> None:
+        self.photo = None
+        self.document = None
+        self.video = None
+        self.animation = None
+        self.edited: list[str] = []
+        self.photos: list[dict] = []
+        self.replies: list[dict] = []
+
+    async def edit_text(self, text, reply_markup=None, **_kwargs):
+        self.edited.append(text)
+        return self
+
+    async def edit_caption(self, caption, reply_markup=None, **_kwargs):
+        self.edited.append(caption)
+        return self
+
+    async def answer_photo(self, photo, caption=None, reply_markup=None, **_kwargs):
+        self.photos.append({"photo": photo, "caption": caption, "markup": reply_markup})
+        return self
+
+    async def answer(self, text, reply_markup=None, **_kwargs):
+        self.replies.append({"text": text, "markup": reply_markup})
+        return self
+
+
+class FakeCallback:
+    """Нажатие кнопки: автор, данные и сообщение, откуда жали."""
+
+    def __init__(self, user_id: int, data: str, message=None) -> None:
+        self.from_user = SimpleNamespace(id=user_id)
+        self.data = data
+        self.message = message if message is not None else FakeBotMessage()
+        self.answers: list[str] = []
+
+    async def answer(self, text=None, show_alert=None, **_kwargs):
+        self.answers.append(text or "")
+
+
+def _fsm(user_id: int) -> FSMContext:
+    return FSMContext(
+        storage=MemoryStorage(),
+        key=StorageKey(bot_id=1, chat_id=user_id, user_id=user_id),
+    )
+
+
+async def test_bot_offers_login_choice(create_user, ready):
+    """Без начатого входа бот спрашивает способ, а не номер сразу."""
+    user_id = await create_user()
+    state = _fsm(user_id)
+
+    text, _markup = await bot_accounts._open_login(user_id, state)
+
+    assert await state.get_state() == LoginStates.choice.state
+    assert "По номеру" in text and "QR-коду" in text
+
+
+async def test_bot_qr_shows_photo_with_check_button(create_user, ready, gateway, monkeypatch):
+    """Выбор QR: код уходит фото с подпиской-инструкцией и кнопкой проверки."""
+    user_id = await create_user()
+    _login_client(monkeypatch, FakeLoginClient())
+    state = _fsm(user_id)
+    callback = FakeCallback(user_id, "acc:method:qr")
+
+    await bot_accounts.choose_qr_login(callback, state)
+
+    assert await state.get_state() == LoginStates.qr.state
+    assert len(callback.message.photos) == 1
+    assert "Наведите камеру" in callback.message.photos[0]["caption"]
+    assert "Связать устройство" in callback.message.photos[0]["caption"]
+    assert callback.message.photos[0]["photo"].filename == "qr.png"
+
+
+async def test_bot_qr_check_before_scan_keeps_waiting(create_user, ready, gateway, monkeypatch):
+    """Проверку до скана бот переживает: остаёмся и жмём снова."""
+    user_id = await create_user()
+    _login_client(monkeypatch, FakeLoginClient(qr=FakeQr(error=asyncio.CancelledError())))
+    state = _fsm(user_id)
+    await bot_accounts.choose_qr_login(FakeCallback(user_id, "acc:method:qr"), state)
+    # Сканирования нет: вотчер висит, соединение живо.
+    status = await accounts_login.qr_status(user_id)
+    assert status == {"stage": "waiting"}
+
+    check = FakeCallback(user_id, "acc:qr:check")
+    await bot_accounts.check_qr_login(check, state)
+
+    assert await state.get_state() == LoginStates.qr.state
+    assert "не вижу сканирования" in check.answers[-1]
+
+
+async def test_bot_qr_check_after_scan_finishes(create_user, ready, gateway, monkeypatch):
+    """Скан + проверка: аккаунт подключён, бот поздравляет с номером."""
+    user_id = await create_user()
+    _login_client(monkeypatch, FakeLoginClient())
+    state = _fsm(user_id)
+    await bot_accounts.choose_qr_login(FakeCallback(user_id, "acc:method:qr"), state)
+    await asyncio.wait_for(accounts_login._qr_sessions[user_id].task, timeout=5)
+
+    check = FakeCallback(user_id, "acc:qr:check")
+    await bot_accounts.check_qr_login(check, state)
+
+    assert await state.get_state() is None
+    assert PHONE in check.message.edited[-1]
+    assert "подключён" in check.message.edited[-1]
+
+
+async def test_bot_qr_with_2fa_asks_password(create_user, ready, gateway, monkeypatch):
+    """QR со 2FA: после скана бот просит облачный пароль и принимает его."""
+    user_id = await create_user()
+    _login_client(monkeypatch, FakeLoginClient(qr=FakeQr(password=True)))
+    state = _fsm(user_id)
+    await bot_accounts.choose_qr_login(FakeCallback(user_id, "acc:method:qr"), state)
+    await asyncio.wait_for(accounts_login._qr_sessions[user_id].task, timeout=5)
+
+    check = FakeCallback(user_id, "acc:qr:check")
+    await bot_accounts.check_qr_login(check, state)
+    assert await state.get_state() == LoginStates.qr_password.state
+    assert "отсканирован" in check.message.edited[-1]
+
+    answer_box = FakeBotMessage()
+    password_message = SimpleNamespace(
+        from_user=SimpleNamespace(id=user_id),
+        text="secret",
+        delete=lambda: asyncio.sleep(0),
+        answer=answer_box.answer,
+    )
+    await bot_accounts.process_qr_password(password_message, state)
+
+    assert await state.get_state() is None
+    assert "подключён" in answer_box.edited[-1]
+
+
+async def test_bot_qr_expired_says_restart(create_user, ready, gateway, monkeypatch):
+    """Протухший код: проверка честно отправляет за новым, а не виснет."""
+    user_id = await create_user()
+    _login_client(monkeypatch, FakeLoginClient(qr=FakeQr(error=TimeoutError())))
+    state = _fsm(user_id)
+    await bot_accounts.choose_qr_login(FakeCallback(user_id, "acc:method:qr"), state)
+    await asyncio.wait_for(accounts_login._qr_sessions[user_id].task, timeout=5)
+
+    check = FakeCallback(user_id, "acc:qr:check")
+    await bot_accounts.check_qr_login(check, state)
+
+    assert await state.get_state() is None
+    assert "заново" in check.message.edited[-1]

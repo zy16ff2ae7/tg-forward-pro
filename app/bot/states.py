@@ -5,11 +5,14 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class LoginStates(StatesGroup):
-    """Вход в личный аккаунт Telegram."""
+    """Вход в личный аккаунт Telegram: номер или QR-код."""
 
+    choice = State()
     phone = State()
     code = State()
     password = State()
+    qr = State()
+    qr_password = State()
 
 
 class RuleStates(StatesGroup):
