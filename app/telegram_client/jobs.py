@@ -19,6 +19,7 @@ import asyncio
 import random
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -29,6 +30,7 @@ from telethon.errors import FloodWaitError, RPCError
 from telethon.tl.types import ChannelParticipantsAdmins
 
 from app.db import repo
+from app.errors import ValidationError
 from app.db.database import SessionLocal
 from app.telegram_client.filters import FilterConfig, message_text, transform_text
 from app.telegram_client.forwarder import send_copy, subscription_active
@@ -156,9 +158,16 @@ def task_title(rule: Any) -> str:
     # а имя чата показываем только когда он один: перечислять двести имён некуда.
     if kind == "poster":
         total = len(chat_recipients(rule))
+        raw_filters = getattr(rule, "filters", None)
+        dated = (
+            raw_filters.get("schedule_only")
+            if isinstance(raw_filters, dict)
+            else getattr(raw_filters, "schedule_only", False)
+        )
+        head = "Постинг по датам" if dated else "Постинг по расписанию"
         if total > 1:
-            return f"Постинг по расписанию: {total} чат."
-        return f"Постинг по расписанию → {target}" if target else "Постинг по расписанию"
+            return f"{head}: {total} чат."
+        return f"{head} → {target}" if target else head
     if kind == "mailing":
         total = len(chat_recipients(rule))
         if total > 1:
@@ -492,6 +501,129 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
             await _send()
         return
     await _send()
+
+
+# ─────────── Запланированные посты: слоты с датой вместо кругов ───────────
+
+# Слотов на задачу: календарь, а не склад. Кому мало — вторая задача.
+SCHEDULED_SLOT_CAP = 50
+
+
+def parse_slot_at(raw: Any) -> datetime | None:
+    """Дата слота → наивный UTC. Наивная считается UTC: кабинет шлёт ISO с зоной."""
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def normalize_scheduled_posts(raw: Any) -> list[dict]:
+    """Слоты из формы — в хранимый вид, отсортированные по дате.
+
+    Мусор не чиним, а отклоняем с понятной причиной: молча выкинутая дата —
+    это пост, который человек ждёт, а задача о нём «не знает». Прошедшие даты
+    разрешены: такой слот уйдёт на ближайшем проходе, а не потеряется.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValidationError("Расписание — списком дат")
+    slots: list[dict] = []
+    for pos, entry in enumerate(raw, start=1):
+        if len(slots) >= SCHEDULED_SLOT_CAP:
+            raise ValidationError(f"Не больше {SCHEDULED_SLOT_CAP} дат на задачу")
+        if not isinstance(entry, dict):
+            raise ValidationError(f"Дата №{pos}: нужна дата и текст")
+        moment = parse_slot_at(entry.get("at"))
+        if moment is None:
+            raise ValidationError(f"Дата №{pos}: не разобрать «{entry.get('at')}»")
+        text = str(entry.get("text") or "").strip()
+        library_id: int | None = None
+        if entry.get("library_id") is not None:
+            try:
+                library_id = int(entry.get("library_id"))
+            except (TypeError, ValueError):
+                raise ValidationError(f"Дата №{pos}: неверная запись библиотеки")
+            if library_id <= 0:
+                library_id = None
+        if not text and library_id is None:
+            raise ValidationError(f"Дата №{pos}: нужен текст или запись библиотеки")
+        slot_id = str(entry.get("id") or "").strip() or uuid.uuid4().hex[:8]
+        slots.append(
+            {
+                "id": slot_id,
+                "at": moment.isoformat(timespec="minutes"),
+                "text": text,
+                "library_id": library_id,
+                "sent": False,
+                "sent_to": [],
+            }
+        )
+    slots.sort(key=lambda slot: slot["at"])
+    return slots
+
+
+def merge_scheduled_state(
+    old: Sequence[dict] | None, fresh: list[dict]
+) -> list[dict]:
+    """Переносит состояние отправки на пересохранённые слоты.
+
+    Правка формы присылает все даты заново, и normalize помечает их
+    неотправленными — без слияния уже ушедшие посты воскресали бы и уходили
+    по второму кругу. Слоты стыкуются по id: совпал — забираем sent/sent_to.
+    """
+    known = {
+        slot.get("id"): slot
+        for slot in (old or [])
+        if isinstance(slot, dict) and slot.get("id")
+    }
+    for slot in fresh:
+        prev = known.get(slot.get("id"))
+        if not prev:
+            continue
+        if prev.get("sent"):
+            slot["sent"] = True
+            slot["sent_to"] = list(prev.get("sent_to") or [])
+            if prev.get("skipped"):
+                slot["skipped"] = prev["skipped"]
+    return fresh
+
+
+def due_scheduled_slot(slots: Sequence[dict], now: datetime) -> dict | None:
+    """Первый слот, которому пора: не отправлен и дата прошла."""
+    for slot in slots:
+        if not isinstance(slot, dict) or slot.get("sent"):
+            continue
+        moment = parse_slot_at(slot.get("at"))
+        if moment is not None and moment <= now:
+            return slot
+    return None
+
+
+def scheduled_pending(slots: Sequence[dict]) -> list[dict]:
+    """Слоты, которые ещё не ушли (для карточки и формы правки)."""
+    return [slot for slot in slots if isinstance(slot, dict) and not slot.get("sent")]
+
+
+async def load_scheduled_item(user_id: int, slot: dict) -> Any | None:
+    """Что уходит по слоту: запись библиотеки — или свой текст строкой.
+
+    Отправка дальше общая (``mailing_send``): сохранённый пост с медиа слот
+    тоже умеет, отдельным путём не ходим.
+    """
+    library_id = slot.get("library_id")
+    if library_id:
+        items = await load_mailing_library(user_id, [int(library_id)])
+        return items[0] if items else None
+    return own_text_item(str(slot.get("text") or ""))
 
 
 async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:

@@ -95,6 +95,11 @@ class FilterConfig:
     # None — часы сервера, как у задач, созданных до появления настройки
     # (см. jobs.window_now_sec).
     window_tz: int | None = None
+    # Только по расписанию: круги по интервалу выключены, шлём слоты из
+    # scheduled_posts (каждый — {"id", "at" (UTC ISO), "text"/"library_id",
+    # "sent", "sent_to"}). Прошедшие даты уходят на ближайшем проходе.
+    schedule_only: bool = False
+    scheduled_posts: list = field(default_factory=list)
     # ── Рассылка по чатам (kind="mailing") ──
     gap_seconds: int = 5  # пауза между получателями
     gap_jitter: int = 0  # случайная добавка к паузе между получателями
@@ -153,6 +158,8 @@ class FilterConfig:
             "window_start": self.window_start,
             "window_end": self.window_end,
             "window_tz": self.window_tz,
+            "schedule_only": self.schedule_only,
+            "scheduled_posts": self.scheduled_posts,
             "gap_seconds": self.gap_seconds,
             "gap_jitter": self.gap_jitter,
             "cycle_seconds": self.cycle_seconds,

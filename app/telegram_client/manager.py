@@ -1033,6 +1033,10 @@ class ClientManager:
             chats = chat_recipients(rule)
             if not chats:
                 continue
+            if getattr(f, "schedule_only", False):
+                # Расписание вместо кругов: окно и интервал к датам не относятся.
+                await self._poster_scheduled(rule, client, chats, deadline)
+                continue
             start = _hhmm_to_sec(f.window_start if hasattr(f, "window_start") else "00:00")
             end = _hhmm_to_sec(f.window_end if hasattr(f, "window_end") else "23:59")
             # Окно сверяем с часами хозяина задачи, а не сервера: сервер стоит в
@@ -1305,6 +1309,141 @@ class ClientManager:
         await self._nothing_to_send(
             rule, "рассылать нечего: в библиотеке не осталось сообщений"
         )
+
+    async def _poster_scheduled(
+        self, rule: RuleSnapshot, client: Any, chats: list[int], deadline: float
+    ) -> None:
+        """Один проход расписания: слот, которому пора, — в чаты.
+
+        Темп тот же, что у кругов: не больше ``POSTER_BATCH`` за проход, пауза
+        между чатами, FloodWait — паузой, а не сбоем. Прогресс (кому уже ушло)
+        пишется в слот сразу: перезапуск посреди рассылки продолжает с того же
+        чата, а не шлёт всё заново. Когда все даты ушли — задача сама встаёт
+        на паузу, как рассылка после заданных кругов.
+        """
+        from app.telegram_client.jobs import (
+            POSTER_BATCH,
+            POSTER_CHAT_GAP,
+            MailingMessageGone,
+            due_scheduled_slot,
+            load_scheduled_item,
+            mailing_send,
+            record_batch,
+            scheduled_pending,
+        )
+
+        st = self._poster_state.setdefault(
+            rule.id,
+            {"last": 0.0, "idx": 0, "step": 0, "runs": 0, "not_before": 0.0, "queue": []},
+        )
+        if time.time() < st.get("not_before", 0.0):
+            return
+        slots = list(getattr(rule.filters, "scheduled_posts", None) or [])
+        slot = due_scheduled_slot(slots, repo.utcnow())
+        if slot is None:
+            if slots and not scheduled_pending(slots):
+                await self._finish_schedule(rule)
+            return
+        item = await load_scheduled_item(rule.user_id, slot)
+        if item is None:
+            # Запись библиотеки удалили — слот сам не разблокируется никогда.
+            await self._skip_scheduled_slot(rule, slot, "запись библиотеки удалена")
+            return
+        processed: list[int] = []
+        failed: list[str] = []
+        sent_to = set(slot.get("sent_to") or [])
+        for chat_id in chats:
+            if chat_id in sent_to or chat_id in processed:
+                continue
+            if len(processed) >= POSTER_BATCH or time.time() >= deadline:
+                break
+            try:
+                await mailing_send(client, rule, item, chat_id)
+            except FloodWaitError as exc:
+                # Чат не обработан — вернёмся к нему после паузы.
+                wait = int(getattr(exc, "seconds", 30)) + 1
+                st["not_before"] = time.time() + wait
+                logger.warning(
+                    "Постер #{}: Telegram просит подождать {} сек — ставлю паузу",
+                    rule.id,
+                    wait,
+                )
+                break
+            except MailingMessageGone as exc:
+                # Пост снесли посреди рассылки: остальным чатам он тоже не уйдёт.
+                await self._skip_scheduled_slot(rule, slot, str(exc))
+                return
+            except Exception as exc:  # noqa: BLE001 — не спамим при ошибке
+                # Мёртвый чат — тоже обработанный: иначе слот никогда не
+                # закроется, а тик будет спотыкаться об один и тот же чат.
+                logger.warning("Постер #{} не отправил в {}: {}", rule.id, chat_id, exc)
+                failed.append(f"{chat_id}: {type(exc).__name__}")
+                processed.append(chat_id)
+                continue
+            processed.append(chat_id)
+            st["runs"] += 1
+            if time.time() < deadline:
+                await asyncio.sleep(POSTER_CHAT_GAP)
+        if not processed:
+            return
+        async with session_scope() as session:
+            alive = await repo.update_scheduled_slot(
+                session, rule.id, slot.get("id", ""), sent_to=processed
+            )
+            await session.commit()
+        if not alive:
+            # Форму пересохранили поверх — отправленное не трогаем.
+            return
+        # Снимок правила живёт до обновления кэша: правим его тоже, иначе
+        # следующий тик в той же минуте отправит те же чаты повторно.
+        slot["sent_to"] = sorted(sent_to | set(processed))
+        await record_batch(rule, sent=len(processed) - len(failed), failed=failed)
+        if set(chats) <= set(slot["sent_to"]):
+            await self._close_scheduled_slot(rule, slot)
+
+    async def _close_scheduled_slot(self, rule: RuleSnapshot, slot: dict) -> None:
+        """Слот разошёлся по всем чатам: закрываем и проверяем финиш."""
+        from app.telegram_client.jobs import scheduled_pending
+
+        async with session_scope() as session:
+            await repo.update_scheduled_slot(session, rule.id, slot.get("id", ""), done=True)
+            await session.commit()
+        slot["sent"] = True
+        slots = list(getattr(rule.filters, "scheduled_posts", None) or [])
+        if slots and not scheduled_pending(slots):
+            await self._finish_schedule(rule)
+
+    async def _skip_scheduled_slot(self, rule: RuleSnapshot, slot: dict, reason: str) -> None:
+        """Слот не отправится никогда: закрываем с причиной в журнале."""
+        async with session_scope() as session:
+            await repo.update_scheduled_slot(
+                session, rule.id, slot.get("id", ""), skipped=reason
+            )
+            await session.commit()
+        slot["sent"] = True
+        slot["skipped"] = reason
+        logger.warning("Постер #{}: слот пропущен: {}", rule.id, reason)
+        await self._nothing_to_send(rule, f"запланированный пост пропущен: {reason}")
+        slots = list(getattr(rule.filters, "scheduled_posts", None) or [])
+        if slots:
+            from app.telegram_client.jobs import scheduled_pending
+
+            if not scheduled_pending(slots):
+                await self._finish_schedule(rule)
+
+    async def _finish_schedule(self, rule: RuleSnapshot) -> None:
+        """Останавливает постер, чьи даты ушли: расписание выполнено.
+
+        Та же остановка, что у рассылки после заданных кругов: задача остаётся
+        в списке, но «работает» на карточке было бы враньём. Новые даты
+        заводятся правкой — снятая с паузы задача ждёт их, а не шлёт круги.
+        """
+        logger.info("Постер #{}: расписание выполнено — останавливаю", rule.id)
+        async with session_scope() as session:
+            db_rule = await repo.get_rule(session, rule.id, rule.user_id)
+            if db_rule is not None:
+                db_rule.enabled = False
+        await self.refresh_rules()
 
     async def _poster_nothing_to_send(self, rule: RuleSnapshot) -> None:
         """То же для постинга: его тексты лежат в той же библиотеке."""

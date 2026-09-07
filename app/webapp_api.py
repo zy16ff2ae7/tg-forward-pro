@@ -42,6 +42,9 @@ from app.task_health import chat_names, error_text
 from app.telegram_client.jobs import (
     MAX_PARSER_LIMIT,
     ONE_SHOT_KINDS,
+    merge_scheduled_state,
+    normalize_scheduled_posts,
+    scheduled_pending,
     task_title,
     window_tz_minutes,
 )
@@ -798,6 +801,18 @@ async def _apply_task_settings(
         # московское «окно 10:00–20:00» работало 13:00–23:00 по Москве.
         if given("tz"):
             filters["window_tz"] = window_tz_minutes(payload.get("tz"))
+        # Расписание по датам вместо кругов: слоты проверяет normalize,
+        # мусор отклоняется понятной ошибкой, а не чинится молча.
+        if given("schedule_only"):
+            value = payload.get("schedule_only")
+            filters["schedule_only"] = _as_bool(value) if "schedule_only" in payload else False
+        if "scheduled_posts" in payload or not partial:
+            # Уже ушедшие даты правка присылает вместе с новыми — их состояние
+            # переносим, иначе они воскресают и уходят по второму кругу.
+            fresh = normalize_scheduled_posts(payload.get("scheduled_posts"))
+            filters["scheduled_posts"] = merge_scheduled_state(
+                filters.get("scheduled_posts"), fresh
+            )
     elif kind == "mailing":
         for field, name, default in (
             ("gap", "gap_seconds", 5),
@@ -882,8 +897,12 @@ async def create_task(request: web.Request) -> web.Response:
     if "message" in needs and not str(payload.get("message") or "").strip():
         # Рассылке и постингу текст в форме не нужен, если сообщения выбраны из
         # библиотеки: оттуда их и берёт планировщик, а копия того же текста в
-        # поле только плодила бы дубли записей.
-        if not (kind in OWN_TEXT_KINDS and _as_ids(payload.get("library_ids"))):
+        # поле только плодила бы дубли записей. Постеру по расписанию текст не
+        # нужен вовсе: каждый слот несёт свой.
+        has_schedule = kind == "poster" and bool(payload.get("scheduled_posts"))
+        if not has_schedule and not (
+            kind in OWN_TEXT_KINDS and _as_ids(payload.get("library_ids"))
+        ):
             missing.append("сообщение")
     if missing:
         return _json({"error": "Укажите: " + ", ".join(missing)}, status=400)
@@ -1110,7 +1129,11 @@ async def update_task(request: web.Request) -> web.Response:
     if "message" in payload and "message" in needs and not _split_messages(payload.get("message")):
         # Текст в поле не нужен, если сообщения взяты из библиотеки (рассылка,
         # постинг): пустое поле при выбранных записях — это «шлём выбранное».
-        if not (kind in OWN_TEXT_KINDS and _as_ids(payload.get("library_ids"))):
+        # Постеру по расписанию текст не нужен, если правка несёт даты.
+        has_schedule = kind == "poster" and bool(payload.get("scheduled_posts"))
+        if not has_schedule and not (
+            kind in OWN_TEXT_KINDS and _as_ids(payload.get("library_ids"))
+        ):
             missing.append("сообщение")
     if missing:
         return _json({"error": "Укажите: " + ", ".join(missing)}, status=400)
@@ -2534,6 +2557,13 @@ def _task_view(
         view["window_tz"] = window_tz_minutes(conf.window_tz)
         # Тексты постинга лежат в библиотеке — как у рассылки, тем же счётом.
         view.update(_own_texts_state(conf, texts))
+        # Расписание по датам: сколько дат всего, сколько ждут, ближайшая.
+        slots = [s for s in (conf.scheduled_posts or []) if isinstance(s, dict)]
+        pending = scheduled_pending(slots)
+        view["schedule_only"] = bool(conf.schedule_only)
+        view["scheduled_total"] = len(slots)
+        view["scheduled_pending"] = len(pending)
+        view["scheduled_next"] = pending[0].get("at") if pending else None
 
     # Полоса выполнения. total заполняем ТОЛЬКО там, где «всего» существует в
     # настройках задачи: у парсера это лимит участников, у автоподписки —
@@ -2550,6 +2580,11 @@ def _task_view(
         # С источником список пополняется ссылками из его постов — тогда
         # «всего» заранее неизвестно.
         total = len(conf.subscribe_to)
+    elif kind == "poster" and conf.schedule_only and conf.scheduled_posts:
+        # У расписания «всего» — число дат: полоса показывает, сколько ушло.
+        slots = [s for s in conf.scheduled_posts if isinstance(s, dict)]
+        total = len(slots)
+        done = sum(1 for s in slots if s.get("sent"))
     elif kind == "mailing":
         # У рассылки «всего» есть: получатели × число кругов. Без ограничения
         # кругов (repeats=0) конца нет — тогда и total остаётся null, как у
@@ -2683,6 +2718,20 @@ def _edit_view(
         edit["typing"] = bool(conf.typing)
         edit["random_pick"] = bool(conf.random_pick)
         edit["link_preview"] = bool(conf.link_preview)
+        # Расписание — как есть, для редактора дат (уже ушедшие — с меткой,
+        # чтобы форма не предлагала править прошлое).
+        edit["schedule_only"] = bool(conf.schedule_only)
+        edit["scheduled_posts"] = [
+            {
+                "id": s.get("id"),
+                "at": s.get("at"),
+                "text": s.get("text") or "",
+                "library_id": s.get("library_id"),
+                "sent": bool(s.get("sent")),
+            }
+            for s in (conf.scheduled_posts or [])
+            if isinstance(s, dict)
+        ]
     elif kind == "mailing":
         # Текст рассылки лежит в библиотеке, но правят его здесь: поле показывает
         # то, что уйдёт, — как у постинга. Раньше поле стояло пустым, а набранный
@@ -2727,7 +2776,7 @@ COMMANDS: list[dict] = [
         "description": "Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.",
         "status": "ready",
         "needs": ["account", "targets", "message"],
-        "optional": ["send_mode", "interval", "start", "end", "gap", "cycle", "repeats", "typing", "random_pick", "link_preview"],
+        "optional": ["send_mode", "schedule_only", "scheduled_posts", "interval", "start", "end", "gap", "cycle", "repeats", "typing", "random_pick", "link_preview"],
         "hint": "Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.",
         "tags": ["ваш текст", "расписание или очередь"],
     },

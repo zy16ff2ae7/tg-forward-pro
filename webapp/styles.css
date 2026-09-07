@@ -1309,6 +1309,17 @@ button { border: none; background: none; cursor: pointer; }
   color: var(--text); font-size: 15px; letter-spacing: .08em; text-transform: uppercase; }
 .promo__input:focus { border-color: var(--accent); outline: none; }
 .promo__input::placeholder { color: var(--muted); letter-spacing: normal; text-transform: none; }
+/* Редактор дат постинга: строки «дата + текст», в узком экране — столбиком. */
+.sched { display: grid; gap: 8px; margin: 8px 0; }
+.sched__row { display: grid; grid-template-columns: 168px minmax(0, 1fr) 32px; gap: 6px; align-items: center; }
+.sched__row.is-sent { opacity: .55; }
+.sched__at, .sched__text { width: 100%; box-sizing: border-box; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px; background: rgba(255,255,255,.04);
+  color: var(--text); font-size: 14px; color-scheme: dark; }
+.sched__at:focus, .sched__text:focus { border-color: var(--accent); outline: none; }
+.sched__x { border: none; background: none; color: var(--muted); font-size: 14px;
+  cursor: pointer; padding: 6px; border-radius: 8px; }
+.sched__x:hover { color: var(--text); }
 
 /* ══════════════════════════ Настройки в шторке ══════════════════════════ */
 

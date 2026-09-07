@@ -127,6 +127,8 @@ const FIELD_SPEC = {
   random_pick: { label: 'Брать сообщение наугад, а не по очереди', control: 'check' },
   link_preview: { label: 'Оставлять предпросмотр ссылок', control: 'check' },
   send_mode: { label: 'Как отправлять', control: 'send_mode' },
+  schedule_only: { label: 'Только по датам (вместо кругов и окна)', control: 'check' },
+  scheduled_posts: { label: 'Даты', control: 'schedule' },
 };
 
 /* Заголовок шторки результатов для каждого типа задачи. */
@@ -489,7 +491,7 @@ const DEMO_COMMAND_GROUPS = [
 const DEMO_COMMANDS = [
   { id: 'sender', group: 'own', kind: 'poster', kinds: ['poster', 'mailing'], emoji: '📤', title: 'Постинг и рассылка', status: 'ready',
     needs: ['account', 'targets', 'message'],
-    optional: ['send_mode', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview'],
+    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview'],
     description: 'Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.',
     hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
     tags: ['ваш текст', 'расписание или очередь'] },
@@ -2102,6 +2104,14 @@ function taskAlertHtml(task) {
     </div>`;
 }
 
+/* Ближайшая дата расписания местным временем: «10.09, 19:00». */
+function fmtSchedNext(iso) {
+  const moment = new Date(String(iso || '') + 'Z');
+  if (Number.isNaN(moment.getTime())) return '';
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${pad(moment.getDate())}.${pad(moment.getMonth() + 1)}, ${pad(moment.getHours())}:${pad(moment.getMinutes())}`;
+}
+
 /* Строка под названием: что это за задача и как настроена. */
 function taskMetaLines(task) {
   const kind = task.kind || 'forward';
@@ -2111,7 +2121,14 @@ function taskMetaLines(task) {
   // Сколько чатов у задачи — первым делом: у постинга и рассылки это главное
   // число задачи, и в заголовке оно есть только когда чатов больше одного.
   if (task.targets_count) lines.push(`${task.targets_count} ${chatWord(task.targets_count)}`);
-  if (kind === 'poster') {
+  if (kind === 'poster' && task.schedule_only) {
+    // Постер по датам: сколько дат ждут и ближайшая — местным временем.
+    const pending = Number(task.scheduled_pending) || 0;
+    const total = Number(task.scheduled_total) || 0;
+    lines.push(pending ? `📅 ${pending} из ${total} дат` : '📅 все даты ушли');
+    if (task.scheduled_next) lines.push(`ближайшая ${fmtSchedNext(task.scheduled_next)}`);
+  }
+  if (kind === 'poster' && !task.schedule_only) {
     // Авто-постер: показываем расписание вместо «задержки в секундах».
     lines.push(`каждые ${task.interval_min || 1} мин`);
     if (task.window_start && task.window_end) {
@@ -3353,6 +3370,15 @@ function fieldHtml(key) {
         <button type="button" class="seg" data-send-mode="queue">По очереди</button>
       </div></div>`;
   }
+  if (spec.control === 'schedule') {
+    // Редактор дат: строки «дата + текст» и кнопка. Даты уходят на сервер
+    // UTC-строками: datetime-local отдаёт местное время устройства.
+    return `<div class="field"><span>${spec.label}</span>
+      <div class="sched" id="scheduleList"></div>
+      <button type="button" class="btn btn--pick" id="scheduleAdd">${icon('i-plus')} Добавить дату</button>
+      <i class="field__note">прошедшие даты уйдут на ближайшем проходе</i>
+    </div>`;
+  }
   if (spec.control === 'parser_mode') {
     // Парсер: состав чата — это все, включая мёртвые души; авторы сообщений —
     // только те, кто пишет, то есть живая аудитория.
@@ -3431,6 +3457,7 @@ function fieldValue(key) {
   if (spec.control === 'mode') return state.mode;
   if (spec.control === 'send_mode') return state.sendMode || 'schedule';
   if (spec.control === 'parser_mode') return state.parserMode || 'participants';
+  if (key === 'scheduled_posts') return collectScheduleSlots();
   const node = $(`task_${key}`);
   if (spec.control === 'check') return node ? node.checked : false;
   return node && node.value ? String(node.value).trim() : '';
@@ -3662,7 +3689,7 @@ function applyTaskPrefill(prefill) {
   ['keywords', 'reaction', 'limit', 'scan', 'online_within_hours', 'api_delay',
     'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats']
     .forEach((key) => setValue(key, prefill[key]));
-  ['typing', 'random_pick', 'link_preview',
+  ['typing', 'random_pick', 'link_preview', 'schedule_only',
     'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only',
     'ignore_bots', 'ignore_archived', 'ignore_muted']
     .forEach((key) => {
@@ -3688,6 +3715,10 @@ function applyTaskPrefill(prefill) {
     });
   }
   applySendModeVisibility();
+  // Даты — строками редактора (ушедшие — недоступными, но с id: по нему сервер
+  // переносит состояние отправки, см. merge_scheduled_state).
+  renderScheduleRows(prefill.scheduled_posts);
+  applyScheduleVisibility();
   // Аккаунт задачи не меняется: другой аккаунт — это другие чаты и другая
   // задача. Показываем его и запираем, чтобы это было видно, а не угадывалось.
   const account = $('taskAccount');
@@ -3712,9 +3743,85 @@ function applyTaskPrefill(prefill) {
    не попадает (см. collectTaskPayload), а его значение лежит в задаче и ждёт
    переключения режима обратно. */
 const SEND_MODE_FIELDS = {
-  schedule: ['interval', 'start', 'end'],
+  schedule: ['schedule_only', 'interval', 'start', 'end'],
   queue: ['gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview'],
 };
+
+/* ─────────────── Редактор дат постинга ─────────────── */
+
+/* Даты живут прямо в DOM строк — отдельного состояния нет и рассинхрона тоже:
+   префилл строит строки, сборка читает их же. Пустые строки пропускаем молча:
+   недописанная дата — не ошибка, а черновик. */
+function schedRowHtml(slot) {
+  const sent = Boolean(slot && slot.sent);
+  return `<div class="sched__row${sent ? ' is-sent' : ''}" data-slot-id="${esc(slot.id || '')}">
+    <input type="datetime-local" class="sched__at" value="${esc(slot.localAt || '')}"${sent ? ' disabled' : ''}
+           aria-label="Дата и время"${sent ? ' title="Уже ушло"' : ''}>
+    <input type="text" class="sched__text" value="${esc(slot.text || '')}"${sent ? ' disabled' : ''}
+           placeholder="${sent ? '✓ уже ушло' : 'Текст поста'}" autocomplete="off" aria-label="Текст поста">
+    ${sent ? '' : `<button type="button" class="sched__x" data-sched-drop="1" aria-label="Убрать дату">${icon('i-x')}</button>`}
+  </div>`;
+}
+
+/* UTC-строка сервера («2026-09-10T16:00», наивная) → значение datetime-local. */
+function utcToLocalInput(iso) {
+  const moment = new Date(String(iso || '') + 'Z');
+  if (Number.isNaN(moment.getTime())) return '';
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${moment.getFullYear()}-${pad(moment.getMonth() + 1)}-${pad(moment.getDate())}`
+    + `T${pad(moment.getHours())}:${pad(moment.getMinutes())}`;
+}
+
+/* Значение datetime-local (местное) → UTC-строка серверу. */
+function localInputToUtc(value) {
+  if (!value) return '';
+  const moment = new Date(value);
+  return Number.isNaN(moment.getTime()) ? '' : moment.toISOString();
+}
+
+function renderScheduleRows(slots) {
+  const holder = $('scheduleList');
+  if (!holder) return;
+  const rows = (Array.isArray(slots) && slots.length ? slots : [{}]).map((slot) => ({
+    id: slot.id || '',
+    localAt: utcToLocalInput(slot.at),
+    text: slot.text || '',
+    sent: Boolean(slot.sent),
+  }));
+  // Ушедшие — сверху недоступными: их состояние хранит сервер, и слияние идёт
+  // по id (см. merge_scheduled_state) — удалять их из формы нельзя.
+  holder.innerHTML = rows.map(schedRowHtml).join('');
+}
+
+function collectScheduleSlots() {
+  const rows = [...document.querySelectorAll('#scheduleList .sched__row')];
+  const slots = [];
+  for (const row of rows) {
+    const at = row.querySelector('.sched__at');
+    const input = row.querySelector('.sched__text');
+    const text = input ? input.value.trim() : '';
+    const stamp = at ? localInputToUtc(at.value) : '';
+    if (!stamp && !text && !row.dataset.slotId) continue; // пустой черновик
+    slots.push({ id: row.dataset.slotId || undefined, at: stamp, text });
+  }
+  return slots;
+}
+
+/* Даты видны, только когда включены: режим «по расписанию» и галочка.
+   Заодно прячем интервал и окно — в режиме дат они ничего не решают, а
+   спрятанное поле в запрос не попадает (см. collectTaskPayload). */
+function applyScheduleVisibility() {
+  const holder = $('taskFields');
+  if (!holder) return;
+  const box = $('task_schedule_only');
+  const on = (state.sendMode || 'schedule') === 'schedule' && Boolean(box && box.checked);
+  holder.querySelectorAll('[data-field]').forEach((node) => {
+    if (node.dataset.field === 'scheduled_posts') node.hidden = !on;
+    if (on && ['interval', 'start', 'end'].includes(node.dataset.field)) node.hidden = true;
+  });
+  if (!on) applySendModeVisibility();
+}
+
 
 function applySendModeVisibility() {
   const holder = $('taskFields');
@@ -3747,6 +3854,24 @@ function bindSheetFields() {
       applySendModeVisibility();
     });
   });
+  const schedBox = $('task_schedule_only');
+  if (schedBox) {
+    schedBox.addEventListener('change', () => {
+      buzz('light');
+      applyScheduleVisibility();
+    });
+  }
+  const schedAdd = $('scheduleAdd');
+  if (schedAdd) {
+    schedAdd.addEventListener('click', (event) => {
+      event.preventDefault();
+      const holder = $('scheduleList');
+      if (!holder) return;
+      holder.insertAdjacentHTML('beforeend', schedRowHtml({}));
+      const input = holder.lastElementChild && holder.lastElementChild.querySelector('.sched__at');
+      if (input) input.focus();
+    });
+  }
   document.querySelectorAll('#taskParserMode .seg').forEach((seg) => {
     seg.addEventListener('click', () => {
       buzz('light');
@@ -4129,9 +4254,21 @@ function collectTaskPayload() {
     // Сообщение можно не набирать, если выбрано из библиотеки: рассылка и
     // постинг возьмут тексты оттуда, и требовать копию того же текста в поле
     // незачем.
-    .filter((key) => !values[key] && !(key === 'message' && state.libraryPick.length))
+    .filter((key) => !values[key]
+      && !(key === 'message'
+        && (state.libraryPick.length
+          || (values.schedule_only && (values.scheduled_posts || []).length))))
     .map((key) => (FIELD_SPEC[key] ? FIELD_SPEC[key].label.toLowerCase() : key));
   if (missing.length) return { error: 'Заполните: ' + missing.join(', ') };
+  // Режим дат без дат — не задача; недописанная строка — ошибка, а не молчаливый
+  // пропуск: иначе человек будет ждать пост, о котором задача не знает.
+  if (values.schedule_only && values.scheduled_posts !== undefined) {
+    const slots = values.scheduled_posts || [];
+    if (!slots.length) return { error: 'Добавьте хотя бы одну дату' };
+    if (slots.some((slot) => !slot.at || !slot.text)) {
+      return { error: 'Заполните дату и текст у каждой даты' };
+    }
+  }
 
   const body = { command: command.id, account_id: Number(values.account) || 0 };
   const text = (key, value) => {
@@ -4177,6 +4314,8 @@ function collectTaskPayload() {
   number('gap', values.gap);
   number('cycle', values.cycle);
   number('repeats', values.repeats);
+  flag('schedule_only', values.schedule_only);
+  if (values.scheduled_posts !== undefined) body.scheduled_posts = values.scheduled_posts;
   flag('typing', values.typing);
   flag('random_pick', values.random_pick);
   flag('link_preview', values.link_preview);
@@ -4964,6 +5103,13 @@ function bindEvents() {
       const node = $(`task_${key}`);
       if (node) node.value = '';
       renderFieldCount(key);
+      return;
+    }
+    const schedDrop = event.target.closest('[data-sched-drop]');
+    if (schedDrop) {
+      event.preventDefault();
+      const row = schedDrop.closest('.sched__row');
+      if (row) row.remove();
       return;
     }
     const button = event.target.closest('[data-pick]');

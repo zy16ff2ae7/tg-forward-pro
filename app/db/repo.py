@@ -1,6 +1,7 @@
 """Репозиторий: типовые запросы к БД."""
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timedelta
 from typing import Sequence
 
@@ -713,6 +714,46 @@ async def count_rules(
         query = query.where(Rule.archived.is_(False))
     result = await session.execute(query)
     return int(result.scalar() or 0)
+
+
+async def update_scheduled_slot(
+    session: AsyncSession,
+    rule_id: int,
+    slot_id: str,
+    *,
+    sent_to: Sequence[int] | None = None,
+    done: bool = False,
+    skipped: str | None = None,
+) -> bool:
+    """Пишет прогресс слота расписания: кому ушло, готов ли.
+
+    Возвращает False, если слота уже нет (форму пересохранили поверх): тогда
+    отправленное не переотправляем и чужой слот не трогаем. Мутацию видит и
+    база (filters перезаписывается целиком — иначе JSON-колонка не заметит),
+    и вызывающий обязан поправить свой снимок правила.
+    """
+    rule = await session.get(Rule, rule_id)
+    if rule is None:
+        return False
+    # Копия обязательно глубокая: слоты лежат вложенными словарями, и правка
+    # общей с объектом вложенности с последующим присваиванием даёт UPDATE со
+    # старым значением — ORM не замечает подмены (поймано тестом расписания).
+    filters = copy.deepcopy(rule.filters or {})
+    slots = filters.get("scheduled_posts") or []
+    for slot in slots:
+        if not isinstance(slot, dict) or slot.get("id") != slot_id:
+            continue
+        if sent_to:
+            slot["sent_to"] = sorted(set(slot.get("sent_to") or []) | set(sent_to))
+        if done:
+            slot["sent"] = True
+        if skipped:
+            slot["skipped"] = skipped
+            slot["sent"] = True
+        rule.filters = filters
+        await session.flush()
+        return True
+    return False
 
 
 async def set_rule_archived(session: AsyncSession, rule: Rule, archived: bool) -> None:
