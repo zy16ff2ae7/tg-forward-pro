@@ -28,6 +28,7 @@ import io
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from loguru import logger
 from telethon.errors import (
@@ -239,6 +240,50 @@ def _too_early(phone: str, wait: int, pending: object | None) -> ConflictError:
     )
 
 
+def _api_keys_refused(
+    user_id: int, creds: LoginCreds | None, exc: Exception
+) -> ConflictError | FeatureUnavailable | ValidationError:
+    """Отказ Telegram по ключам API — словами про ключи, а не про номер.
+
+    Общий для входа по номеру и по QR: отказ один и тот же, и тексты совпадают
+    намеренно — человек чинит одно и то же место (свои ключи или .env сервиса).
+    """
+    published = isinstance(exc, ApiIdPublishedFloodError)
+    if creds is not None:
+        if published:
+            return ValidationError(
+                "Telegram не даёт входить по этим ключам: пара опубликована. "
+                "Возьмите свои api_id и api_hash на my.telegram.org/apps."
+            )
+        return ValidationError(
+            "Telegram не принял эти ключи API. Сверьте api_id и api_hash "
+            "с my.telegram.org/apps."
+        )
+    if published:
+        # Отказ не человеку, а сервису: ключи api_id/api_hash взяты из
+        # официального клиента, и Telegram не даёт входить по опубликованной
+        # паре. Номер тут ни при чём, менять его бессмысленно.
+        logger.error(
+            "Вход #{}: Telegram отказал — ключи API опубликованы. Нужны свои "
+            "API_ID/API_HASH с my.telegram.org/apps",
+            user_id,
+        )
+        return FeatureUnavailable(
+            "Подключение аккаунтов сейчас невозможно: у сервиса публичные ключи "
+            "Telegram API. Владельцу — получить свои api_id и api_hash на "
+            "my.telegram.org/apps и прописать в .env.",
+            feature="account_login",
+            status="api_keys_public",
+        )
+    logger.error("Вход #{}: Telegram не принял API_ID/API_HASH сервиса", user_id)
+    return FeatureUnavailable(
+        "Подключение аккаунтов сейчас невозможно: Telegram не принял ключи "
+        "API сервиса. Владельцу — проверить API_ID и API_HASH в .env.",
+        feature="account_login",
+        status="api_keys_invalid",
+    )
+
+
 async def start(
     user_id: int,
     phone_raw: str,
@@ -284,40 +329,8 @@ async def start(
         raise ValidationError("Telegram не знает такой номер. Проверьте и введите заново.") from None
     except PhoneNumberBannedError:
         raise ValidationError("Этот номер заблокирован в Telegram. Подключите другой.") from None
-    except ApiIdPublishedFloodError:
-        # Отказ не человеку, а сервису: ключи api_id/api_hash взяты из
-        # официального клиента, и Telegram не даёт входить по опубликованной
-        # паре. Номер тут ни при чём, менять его бессмысленно.
-        if creds is not None:
-            raise ValidationError(
-                "Telegram не даёт входить по этим ключам: пара опубликована. "
-                "Возьмите свои api_id и api_hash на my.telegram.org/apps."
-            ) from None
-        logger.error(
-            "Вход #{}: Telegram отказал — ключи API опубликованы. Нужны свои "
-            "API_ID/API_HASH с my.telegram.org/apps",
-            user_id,
-        )
-        raise FeatureUnavailable(
-            "Подключение аккаунтов сейчас невозможно: у сервиса публичные ключи "
-            "Telegram API. Владельцу — получить свои api_id и api_hash на "
-            "my.telegram.org/apps и прописать в .env.",
-            feature="account_login",
-            status="api_keys_public",
-        ) from None
-    except ApiIdInvalidError:
-        if creds is not None:
-            raise ValidationError(
-                "Telegram не принял эти ключи API. Сверьте api_id и api_hash "
-                "с my.telegram.org/apps."
-            ) from None
-        logger.error("Вход #{}: Telegram не принял API_ID/API_HASH сервиса", user_id)
-        raise FeatureUnavailable(
-            "Подключение аккаунтов сейчас невозможно: Telegram не принял ключи "
-            "API сервиса. Владельцу — проверить API_ID и API_HASH в .env.",
-            feature="account_login",
-            status="api_keys_invalid",
-        ) from None
+    except (ApiIdPublishedFloodError, ApiIdInvalidError) as exc:
+        raise _api_keys_refused(user_id, creds, exc) from None
     except FloodWaitError as exc:
         # Точный срок ожидания важнее фразы «попробуйте позже»: иначе человек
         # долбит кнопку и продлевает лимит.
@@ -562,6 +575,9 @@ async def submit_password(user_id: int, password: str) -> LoginStep:
 # Сколько живёт QR-сессия. Сканируют обычно в первую минуту; пять минут —
 # с запасом на «открыть вторую камеру», дальше токен протухает сам.
 QR_TTL_SECONDS = 300
+# Санитарный максимум: дольше держать соединение ради одного кода незачем,
+# даже если токен Telegram формально живёт дольше.
+QR_TTL_MAX_SECONDS = 600
 
 
 @dataclass(slots=True)
@@ -626,20 +642,39 @@ async def qr_start(
     creds = normalize_creds(api_id, api_hash)
     await qr_cancel(user_id)
     await cancel(user_id)
-    client = await manager.create_login_client(creds)
     try:
-        qr = await client.qr_login()
-    except Exception:
+        client = await manager.create_login_client(creds)
         try:
-            await client.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
-        raise
+            qr = await client.qr_login()
+        except Exception:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+    except (ApiIdPublishedFloodError, ApiIdInvalidError) as exc:
+        raise _api_keys_refused(user_id, creds, exc) from None
+    except FloodWaitError as exc:
+        wait = int(getattr(exc, "seconds", 0) or 0)
+        human = f"{wait // 60} мин" if wait >= 60 else f"{wait} сек"
+        raise ConflictError(
+            f"Telegram просит подождать {human} перед новым QR-кодом."
+        ) from None
+    # Срок жизни — из самого токена, а не с потолка: обратный отсчёт
+    # в кабинете должен кончаться вместе с кодом, а не после него.
+    ttl = QR_TTL_SECONDS
+    expires = getattr(qr, "expires", None)
+    if expires is not None:
+        try:
+            left = (expires - datetime.now(timezone.utc)).total_seconds()
+        except TypeError:  # дата без зоны — не умеем, берём потолок
+            left = QR_TTL_SECONDS
+        ttl = max(15, min(int(left), QR_TTL_MAX_SECONDS))
     wait = _QrWait(
         client=client,
         url=str(qr.url),
         creds=creds,
-        expires_at=time.monotonic() + QR_TTL_SECONDS,
+        expires_at=time.monotonic() + ttl,
     )
     wait.task = asyncio.create_task(_qr_watch(user_id, wait, qr))
     _qr_sessions[user_id] = wait
@@ -647,7 +682,7 @@ async def qr_start(
     return {
         "url": wait.url,
         "image": _qr_image(wait.url),
-        "expires_in": QR_TTL_SECONDS,
+        "expires_in": ttl,
     }
 
 

@@ -14,16 +14,22 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from telethon.errors import ApiIdInvalidError, SessionPasswordNeededError
+from telethon.errors import (
+    ApiIdInvalidError,
+    ApiIdPublishedFloodError,
+    FloodWaitError,
+    SessionPasswordNeededError,
+)
 
 from app import accounts_login
 from app.config import settings
 from app.db import repo
 from app.db.database import session_scope
-from app.errors import ConflictError, ValidationError
+from app.errors import ConflictError, FeatureUnavailable, ValidationError
 from app.security import decrypt_session
 from app.telegram_client.manager import LoginCreds, manager
 
@@ -49,10 +55,12 @@ def ready(monkeypatch):
 
 
 class FakeQr:
-    def __init__(self, url="tg://login?token=abc", error=None, password=False):
+    def __init__(self, url="tg://login?token=abc", error=None, password=False,
+                 expires=None):
         self.url = url
         self.error = error
         self.password = password
+        self.expires = expires
 
     async def wait(self):
         if self.password:
@@ -63,14 +71,18 @@ class FakeQr:
 
 
 class FakeLoginClient:
-    def __init__(self, qr=None, phone="79001234567", password_ok=True):
+    def __init__(self, qr=None, phone="79001234567", password_ok=True,
+                 login_error=None):
         self._qr = qr or FakeQr()
+        self._login_error = login_error
         self._phone = phone
         self._password_ok = password_ok
         self.session = SimpleNamespace(save=lambda: SESSION)
         self.disconnected = False
 
     async def qr_login(self):
+        if self._login_error is not None:
+            raise self._login_error
         return self._qr
 
     async def get_me(self):
@@ -444,3 +456,60 @@ async def test_bot_qr_expired_says_restart(create_user, ready, gateway, monkeypa
 
     assert await state.get_state() is None
     assert "заново" in check.message.edited[-1]
+
+
+async def test_qr_bad_custom_keys_blame_keys(create_user, ready, gateway, monkeypatch):
+    """QR с чужими ключами: отказ — словами про ключи, соединение закрыто."""
+    user_id = await create_user()
+    client = FakeLoginClient(login_error=ApiIdInvalidError(request=None))
+    _login_client(monkeypatch, client)
+
+    with pytest.raises(ValidationError, match="эти ключи"):
+        await accounts_login.qr_start(user_id, api_id=API_ID, api_hash=API_HASH)
+    assert client.disconnected
+    assert user_id not in accounts_login._qr_sessions
+
+
+async def test_qr_published_keys_blame_keys(create_user, ready, gateway, monkeypatch):
+    """QR с опубликованной парой: отказ — словами про публикацию."""
+    user_id = await create_user()
+    _login_client(
+        monkeypatch, FakeLoginClient(login_error=ApiIdPublishedFloodError(request=None))
+    )
+
+    with pytest.raises(ValidationError, match="опубликована"):
+        await accounts_login.qr_start(user_id, api_id=API_ID, api_hash=API_HASH)
+
+
+async def test_qr_service_keys_failure_is_service_fault(create_user, ready, gateway, monkeypatch):
+    """QR ключами сервиса: отказ Telegram — вина сервиса, а не человека."""
+    user_id = await create_user()
+    _login_client(
+        monkeypatch, FakeLoginClient(login_error=ApiIdInvalidError(request=None))
+    )
+
+    with pytest.raises(FeatureUnavailable, match="ключ"):
+        await accounts_login.qr_start(user_id)
+
+
+async def test_qr_flood_says_wait(create_user, ready, gateway, monkeypatch):
+    """QR во флуде: честный срок ожидания, а не «попробуйте позже»."""
+    user_id = await create_user()
+    _login_client(monkeypatch, FakeLoginClient(login_error=FloodWaitError(None, 65)))
+
+    with pytest.raises(ConflictError, match="1 мин"):
+        await accounts_login.qr_start(user_id)
+
+
+async def test_qr_countdown_uses_real_expiry(create_user, ready, gateway, monkeypatch):
+    """Обратный отсчёт — из токена Telegram, а не с потолка."""
+    user_id = await create_user()
+    soon = datetime.now(timezone.utc).replace(microsecond=0)
+    from datetime import timedelta
+
+    _login_client(monkeypatch, FakeLoginClient(qr=FakeQr(expires=soon + timedelta(seconds=42))))
+
+    begun = await accounts_login.qr_start(user_id)
+
+    assert 40 <= begun["expires_in"] <= 42
+    await accounts_login.qr_cancel(user_id)
