@@ -289,6 +289,24 @@
         </div>
       </div>
 
+      <div id="promoBlock">
+        <div class="card card--bonus">
+          <div class="bonus__row">
+            <div class="card__emoji" aria-hidden="true">🎟</div>
+            <div class="card__body">
+              <div class="card__title">Промокод</div>
+              <div class="card__desc">Есть код из канала — введите, дни начислятся сразу.</div>
+            </div>
+          </div>
+          <input class="promo__input" type="text" id="promoInput" placeholder="КОД"
+                 autocomplete="off" autocapitalize="characters" aria-label="Промокод">
+          <div class="bonus__actions">
+            <button class="btn btn--primary" id="promoRedeem">✨ Активировать</button>
+          </div>
+          <div class="bonus__note" id="promoNote"></div>
+        </div>
+      </div>
+
       <div class="section-label">аккаунты</div>
       <button class="card card--add" id="addAccountBtn">＋ Добавить аккаунт</button>
       <div class="list" id="accountList"></div>

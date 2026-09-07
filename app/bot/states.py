@@ -29,6 +29,12 @@ class EditStates(StatesGroup):
     replace = State()
 
 
+class PromoStates(StatesGroup):
+    """Ввод промокода следующим сообщением."""
+
+    waiting_code = State()
+
+
 class OwnerStates(StatesGroup):
     """Панель владельца: кому выдать абонемент и что разослать."""
 

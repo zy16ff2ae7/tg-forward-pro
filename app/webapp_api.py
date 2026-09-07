@@ -21,7 +21,7 @@ from aiogram.types import BufferedInputFile, LabeledPrice
 from aiohttp import web
 from loguru import logger
 
-from app import accounts_login, bonus, exports, paylink, referral, webapp_build
+from app import accounts_login, bonus, exports, paylink, promocode, referral, webapp_build
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
@@ -2375,6 +2375,59 @@ async def claim_bonus(request: web.Request) -> web.Response:
         payload["error"] = payload["message"]
     logger.info("Подарок за подписку {}: {}", user_id, result.status)
     return _json(payload, status=bonus.HTTP_STATUS.get(result.status, 503))
+
+
+@routes.post("/api/subscription/promo")
+@require_auth
+async def redeem_promo(request: web.Request) -> web.Response:
+    """Промокод из кабинета: тело ``{"code": "ЛЕТО"}``.
+
+    Начисление — то же, что в боте (``app/promocode.py``): дни и счётчик кода
+    живут в одном месте, а не в двух копиях. Отказы разведены по кодам (см.
+    ``promocode.HTTP_STATUS``): 404 — «нет такого», 409 — «уже ваш / разобран»,
+    410 — «срок вышел».
+    """
+    user_id = request[USER_ID_KEY]
+    tg_user = request[TG_USER_KEY]
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return _json({"error": "Нужен JSON"}, status=400)
+    code = str((body or {}).get("code") or "").strip()
+    if not code:
+        return _json({"error": "Пришлите код", "status": "unknown"}, status=400)
+
+    async with SessionLocal() as session:
+        await repo.get_or_create_user(
+            session,
+            user_id=user_id,
+            username=tg_user.get("username"),
+            full_name=" ".join(
+                part
+                for part in (tg_user.get("first_name"), tg_user.get("last_name"))
+                if part
+            )
+            or tg_user.get("username"),
+        )
+        await session.commit()
+
+        result = await promocode.redeem(session, user_id, code)
+        if result.granted:
+            await session.commit()
+        else:
+            await session.rollback()
+
+    payload: dict[str, Any] = {
+        "status": result.status,
+        "granted": result.granted,
+        "days": result.days,
+        "until": result.until.isoformat() if result.until else None,
+        "message": promocode.message(result),
+    }
+    if not result.granted:
+        payload["error"] = payload["message"]
+    logger.info("Промокод {} от {}: {}", code, user_id, result.status)
+    return _json(payload, status=promocode.HTTP_STATUS.get(result.status, 503))
 
 
 _bot: Any = None

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -13,9 +14,10 @@ from aiogram.types import (
 )
 from loguru import logger
 
-from app import bonus, referral
+from app import bonus, promocode, referral
 from app.bot import keyboards as kb
 from app.bot import texts
+from app.bot.states import PromoStates
 from app.bot.utils import ensure_user, smart_edit
 from app.config import settings
 from app.db import repo
@@ -246,6 +248,57 @@ async def open_referral(callback: CallbackQuery) -> None:
     text, markup = await _referral_card(callback.from_user.id)
     if callback.message is not None:
         await smart_edit(callback.message, text, reply_markup=markup)
+
+
+# ───────────────────── Промокод ──────────────────────
+
+
+async def _redeem_code_message(message: Message, raw: str, state: FSMContext) -> None:
+    """Активирует введённый код и показывает итог с меню оплаты."""
+    assert message.from_user is not None
+    await state.clear()
+    async with SessionLocal() as session:
+        result = await promocode.redeem(session, message.from_user.id, raw)
+        if result.granted:
+            await session.commit()
+        else:
+            await session.rollback()
+    await message.answer(
+        promocode.message(result),
+        reply_markup=kb.payment_menu(message.from_user.id),
+    )
+
+
+@router.message(Command("promo"))
+async def cmd_promo(message: Message, state: FSMContext) -> None:
+    """Активирует код: ``/promo КОД`` — или спрашивает код следующим сообщением."""
+    await ensure_user(message)
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) > 1 and parts[1].strip():
+        await _redeem_code_message(message, parts[1], state)
+        return
+    await state.set_state(PromoStates.waiting_code)
+    await message.answer(
+        "🎟 <b>Промокод</b>\n\nПришлите код следующим сообщением:",
+        reply_markup=kb.cancel_kb(),
+    )
+
+
+@router.message(PromoStates.waiting_code)
+async def promo_code_entered(message: Message, state: FSMContext) -> None:
+    await _redeem_code_message(message, message.text or "", state)
+
+
+@router.callback_query(F.data == "promo:open")
+async def open_promo(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(PromoStates.waiting_code)
+    if callback.message is not None:
+        await smart_edit(
+            callback.message,
+            "🎟 <b>Промокод</b>\n\nПришлите код следующим сообщением:",
+            reply_markup=kb.cancel_kb(),
+        )
 
 
 async def show_subscription_message(message: Message) -> None:

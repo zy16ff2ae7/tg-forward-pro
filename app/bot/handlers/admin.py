@@ -292,6 +292,46 @@ async def grant_access(message: Message) -> None:
     )
 
 
+@router.message(Command("promo_new"))
+async def promo_new(message: Message) -> None:
+    """Создаёт промокод: /promo_new КОД ДНИ [ЛИМИТ] [СРОК_ДНЕЙ].
+
+    Лимит — сколько человек успеют активировать (по умолчанию без лимита),
+    срок — сколько дней код живёт (по умолчанию бессрочно).
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    assert message.from_user is not None
+    if not is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    usage = "Использование: <code>/promo_new LETO 7 100 3</code> — код, дни, лимит, срок в днях."
+    if len(parts) < 3 or not parts[2].isdigit() or int(parts[2]) < 1:
+        await message.answer(usage)
+        return
+    limit = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+    ttl = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else None
+    try:
+        async with SessionLocal() as session:
+            promo = await repo.create_promo_code(
+                session,
+                parts[1],
+                int(parts[2]),
+                max_uses=limit,
+                ttl_days=ttl or None,
+                created_by=message.from_user.id,
+            )
+            await session.commit()
+    except IntegrityError:
+        await message.answer(f"Код <code>{repo.normalize_promo_code(parts[1])}</code> уже существует.")
+        return
+    tail = f", лимит {limit}" if limit else ", без лимита"
+    tail += f", срок {ttl} дн." if ttl else ""
+    await message.answer(
+        f"🎟 Промокод <code>{promo.code}</code> на {promo.days} дн.{tail}."
+    )
+
+
 # ─────────────────────────────── Рассылка ───────────────────────────────
 
 

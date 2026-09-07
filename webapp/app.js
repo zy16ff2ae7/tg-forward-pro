@@ -4462,6 +4462,37 @@ async function copyReferralLink(button) {
   }
 }
 
+/* Промокод из кабинета: код уходит на сервер, дни и счётчик кода считает
+   он же — та же выдача, что в боте. */
+async function redeemPromo(button) {
+  const field = $('promoInput');
+  const note = $('promoNote');
+  const code = (field && field.value || '').trim();
+  if (!code) {
+    toast('Введите код', 'error');
+    return;
+  }
+  try {
+    const data = await withLoading(button, () =>
+      api('/api/subscription/promo', { method: 'POST', body: JSON.stringify({ code }) })
+    );
+    toast(data.message || 'Промокод активирован', 'ok');
+    if (note) {
+      note.textContent = data.message || '';
+      note.classList.add('bonus__note--done');
+    }
+    if (field) field.value = '';
+    // Дни уже в подписке — обновляем копилку, бейдж и шапку одним запросом.
+    await loadAccounts();
+  } catch (error) {
+    toast(error.message, 'error');
+    if (note) {
+      note.textContent = error.message || '';
+      note.classList.remove('bonus__note--done');
+    }
+  }
+}
+
 function shareReferralLink() {
   const link = (state.referral || {}).link;
   if (!link) return;
@@ -4849,6 +4880,13 @@ function bindEvents() {
   });
   $('referralShare').addEventListener('click', () => {
     shareReferralLink();
+  });
+
+  $('promoRedeem').addEventListener('click', (event) => {
+    redeemPromo(event.currentTarget);
+  });
+  $('promoInput').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') redeemPromo($('promoRedeem'));
   });
 
   // шторки

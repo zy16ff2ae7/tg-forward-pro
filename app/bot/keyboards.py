@@ -281,6 +281,10 @@ def payment_menu(user_id: int | None = None) -> InlineKeyboardMarkup:
                 callback_data="ref:open",
             )
         )
+    # Промокод — тоже бесплатные дни, поэтому в одном ряду с подарком.
+    builder.row(
+        InlineKeyboardButton(text="🎟 Ввести промокод", callback_data="promo:open")
+    )
     inline_methods = settings.inline_payment_methods()
     for method in inline_methods:
         builder.row(

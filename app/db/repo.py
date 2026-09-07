@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Sequence
 
 from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -16,6 +17,8 @@ from app.db.models import (
     PendingDelivery,
     PendingLogin,
     PhoneCodeSend,
+    PromoCode,
+    PromoRedemption,
     Rule,
     SavedMessage,
     Subscription,
@@ -288,6 +291,97 @@ async def count_referrals(session: AsyncSession, user_id: int) -> int:
         .where(User.referred_by == user_id)
     )
     return int(result.scalar() or 0)
+
+
+def normalize_promo_code(raw: str) -> str:
+    """Код одним видом: верхний регистр, без пробелов по краям и внутри."""
+    return "".join((raw or "").split()).upper()
+
+
+async def create_promo_code(
+    session: AsyncSession,
+    code: str,
+    days: int,
+    *,
+    max_uses: int = 0,
+    ttl_days: int | None = None,
+    created_by: int | None = None,
+) -> PromoCode:
+    """Создаёт промокод. Повторный код — IntegrityError, пусть решает вызывающий."""
+    promo = PromoCode(
+        code=normalize_promo_code(code),
+        days=max(1, days),
+        max_uses=max(0, max_uses),
+        expires_at=utcnow() + timedelta(days=ttl_days) if ttl_days else None,
+        created_by=created_by,
+    )
+    session.add(promo)
+    await session.flush()
+    return promo
+
+
+async def get_promo_code(session: AsyncSession, code: str) -> PromoCode | None:
+    """Промокод по введённому — регистр и пробелы не важны."""
+    result = await session.execute(
+        select(PromoCode).where(PromoCode.code == normalize_promo_code(code))
+    )
+    return result.scalar_one_or_none()
+
+
+async def list_promo_codes(session: AsyncSession) -> Sequence[PromoCode]:
+    """Все коды — для панели владельца. Новых первыми."""
+    result = await session.execute(
+        select(PromoCode).order_by(PromoCode.id.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def redeem_promo_code(
+    session: AsyncSession, user_id: int, code: str
+) -> tuple[str, int, datetime | None]:
+    """Активирует промокод: дни человеку, счётчик коду.
+
+    Возвращает итог, число дней и (при выдаче) новый срок абонемента:
+    ``granted`` — начислено, ``unknown`` — такого кода нет или он выключен,
+    ``expired`` — срок вышел, ``exhausted`` — лимит активаций исчерпан,
+    ``already`` — этот человек код уже активировал.
+    """
+    promo = await get_promo_code(session, code)
+    if promo is None or not promo.active:
+        return "unknown", 0, None
+    if promo.expires_at is not None and promo.expires_at <= utcnow():
+        return "expired", 0, None
+    if promo.max_uses > 0 and promo.used_count >= promo.max_uses:
+        return "exhausted", 0, None
+    existing = await session.execute(
+        select(PromoRedemption.id).where(
+            PromoRedemption.code_id == promo.id,
+            PromoRedemption.user_id == user_id,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        return "already", promo.days, None
+    # Счётчик — условным UPDATE: два одновременных запроса на последний слот
+    # дают одну выдачу, второй видит чужой инкремент.
+    if promo.max_uses > 0:
+        bumped = await session.execute(
+            update(PromoCode)
+            .where(PromoCode.id == promo.id, PromoCode.used_count < promo.max_uses)
+            .values(used_count=PromoCode.used_count + 1)
+        )
+        if bumped.rowcount != 1:
+            return "exhausted", 0, None
+    else:
+        promo.used_count += 1
+    session.add(PromoRedemption(code_id=promo.id, user_id=user_id))
+    try:
+        await session.flush()
+    except IntegrityError:
+        # Гонка с самим собой: параллельный запрос уже вставил эту пару.
+        await session.rollback()
+        return "already", promo.days, None
+    until = await add_subscription_days(session, user_id, promo.days)
+    return "granted", promo.days, until
 
 
 async def count_active_subscriptions(session: AsyncSession) -> int:

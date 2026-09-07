@@ -14,6 +14,7 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -343,3 +344,43 @@ class PhoneCodeSend(Base):
 
     phone: Mapped[str] = mapped_column(String(32), primary_key=True)
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
+class PromoCode(Base):
+    """Промокод на дни абонемента: акции вида «код на выходных».
+
+    Код хранится верхним регистром без пробелов — вводить можно как угодно.
+    ``max_uses`` — сколько человек успеют активировать (0 — без лимита),
+    ``used_count`` считает активации, ``expires_at`` — срок жизни.
+    Выключенный код (``active=False``) ведёт себя как несуществующий: нечего
+    подсказывать перебору, что такой код вообще был.
+    """
+
+    __tablename__ = "promo_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    days: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_uses: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
+class PromoRedemption(Base):
+    """Кто какой промокод активировал. Пара код+человек — одна на свете:
+    повторная активация того же кода тем же человеком запрещена схемой,
+    а не проверкой «если» — гонку двух одновременных запросов держит база.
+    """
+
+    __tablename__ = "promo_redemptions"
+    __table_args__ = (UniqueConstraint("code_id", "user_id", name="uq_promo_user"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("promo_codes.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    redeemed_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)

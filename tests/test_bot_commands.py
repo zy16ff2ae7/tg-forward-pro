@@ -73,7 +73,7 @@ def test_admin_menu_is_not_poorer_than_the_common_one():
     for_admin = [item.command for item in bot_commands.admin_commands()]
 
     assert for_admin[: len(common)] == common
-    assert set(for_admin) - set(common) == {"admin", "users", "grant"}
+    assert set(for_admin) - set(common) == {"admin", "users", "grant", "promo_new"}
 
 
 def test_admin_commands_are_hidden_from_everyone_else():
