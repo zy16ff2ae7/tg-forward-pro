@@ -88,6 +88,56 @@ async def count_users(session: AsyncSession) -> int:
     return int(result.scalar() or 0)
 
 
+async def revenue_since(
+    session: AsyncSession, days: int = 30
+) -> dict[str, float]:
+    """Выручка за дни по валютам. «Деньги были» — тот же предикат, что везде:
+    статус paid либо старый след звёзд с чеком. Дата — создания строки:
+    у зачтённых платежей она и есть момент оплаты."""
+    cutoff = utcnow() - timedelta(days=max(1, days))
+    result = await session.execute(
+        select(Payment.currency, func.sum(Payment.amount)).where(
+            _money_was_paid(), Payment.created_at >= cutoff
+        ).group_by(Payment.currency)
+    )
+    return {currency: float(total or 0) for currency, total in result.all()}
+
+
+async def count_bonus_claimed(session: AsyncSession) -> int:
+    """Сколько человек забрали подарок за канал — вход воронки."""
+    result = await session.execute(
+        select(func.count()).select_from(User).where(User.channel_bonus_at.is_not(None))
+    )
+    return int(result.scalar() or 0)
+
+
+async def count_ever_paid(session: AsyncSession) -> int:
+    """Сколько человек платили хоть раз — середина воронки."""
+    result = await session.execute(
+        select(func.count(func.distinct(Payment.user_id))).where(_money_was_paid())
+    )
+    return int(result.scalar() or 0)
+
+
+async def count_ended_subscriptions(session: AsyncSession) -> int:
+    """Абонементы с вышедшим сроком — ушедшие (и уходящие без продления)."""
+    result = await session.execute(
+        select(func.count()).select_from(Subscription).where(
+            Subscription.active_until <= utcnow()
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+async def count_new_users(session: AsyncSession, days: int = 7) -> int:
+    """Новые пользователи за дни — верх воронки роста."""
+    cutoff = utcnow() - timedelta(days=max(1, days))
+    result = await session.execute(
+        select(func.count()).select_from(User).where(User.created_at >= cutoff)
+    )
+    return int(result.scalar() or 0)
+
+
 async def list_user_ids(session: AsyncSession) -> Sequence[int]:
     result = await session.execute(select(User.id).where(User.is_banned.is_(False)))
     return result.scalars().all()

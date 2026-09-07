@@ -185,3 +185,57 @@ def test_parse_user_id():
     assert owner._parse_user_id(" 123456789 ") == 123456789
     assert owner._parse_user_id("@username") is None
     assert owner._parse_user_id("") is None
+
+
+async def test_stats_shows_money_and_funnel(create_user, monkeypatch):
+    """Сводка: выручка за 30 дней, воронка подарок→оплата, ушедшие."""
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    from app.db.models import Payment, Subscription, User
+    from app.timeutil import utcnow
+
+    await _with_admin(monkeypatch)
+    await create_user(id=TEST_USER_ID)
+    friend = await create_user()
+    stranger = await create_user()
+    async with session_scope() as session:
+        await session.execute(
+            update(User).where(User.id.in_([friend, stranger])).values(
+                channel_bonus_at=utcnow() - timedelta(days=2)
+            )
+        )
+        session.add(Payment(
+            user_id=friend, provider="stars", amount=500,
+            currency="XTR", months=1, status="paid",
+        ))
+        session.add(Subscription(
+            user_id=friend, active_until=utcnow() + timedelta(days=30)
+        ))
+        session.add(Subscription(
+            user_id=stranger, active_until=utcnow() - timedelta(days=1)
+        ))
+        await session.commit()
+    callback = FakeCallback("admin:stats", RecordingBot())
+
+    await owner.admin_stats(callback)
+
+    text, _markup = callback.message.edits[-1]
+    assert "Выручка за 30 дней: <b>500 ⭐</b>" in text
+    assert "подарков <b>2</b> → платили <b>1</b> (50%)" in text
+    assert "кончились: <b>1</b>" in text
+    assert "новых за 7 дней: <b>3</b>" in text
+
+
+async def test_stats_without_money_is_honest(create_user, monkeypatch):
+    """Без выручки и подарков — «пока нет» и нули, а не деление на ноль."""
+    await _with_admin(monkeypatch)
+    await create_user(id=TEST_USER_ID)
+    callback = FakeCallback("admin:stats", RecordingBot())
+
+    await owner.admin_stats(callback)
+
+    text, _markup = callback.message.edits[-1]
+    assert "Выручка за 30 дней: <b>пока нет</b>" in text
+    assert "подарков <b>0</b> → платили <b>0</b> → активны" in text

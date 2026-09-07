@@ -52,6 +52,27 @@ async def _dashboard() -> str:
     )
 
 
+_CURRENCY_LABELS = {"XTR": "⭐", "RUB": "₽", "USDT": "USDT"}
+
+
+def _money_line(revenue: dict[str, float]) -> str:
+    """Выручка одной строкой: «500 ⭐ · 990 ₽». Пустая — честное «пока нет»."""
+    parts = []
+    for currency in ("XTR", "RUB", "USDT"):
+        total = revenue.get(currency, 0)
+        if total > 0:
+            shown = int(total) if total == int(total) else round(total, 2)
+            parts.append(f"{shown} {_CURRENCY_LABELS[currency]}")
+    return " · ".join(parts) if parts else "пока нет"
+
+
+def _conversion(bonus: int, paid: int) -> str:
+    """Конверсия подарка в оплату — в скобках, если есть из чего считать."""
+    if bonus <= 0:
+        return ""
+    return f" ({paid * 100 // bonus}%)"
+
+
 def _user_line(user_id: int, name: str, sub_until, created) -> str:
     sub = f"до {sub_until:%d.%m.%Y}" if sub_until else "—"
     return (
@@ -156,16 +177,24 @@ async def admin_stats(callback: CallbackQuery) -> None:
         rules = await repo.count_rules_all(session)
         accounts = await repo.count_accounts_all(session)
         day = await repo.forward_stats(session, None, 1)
+        revenue = await repo.revenue_since(session, 30)
+        bonus = await repo.count_bonus_claimed(session)
+        paid = await repo.count_ever_paid(session)
+        ended = await repo.count_ended_subscriptions(session)
+        new_week = await repo.count_new_users(session, 7)
 
     online = len(list(manager.online_ids()))
     text = (
         "📊 <b>Статистика</b>\n\n"
-        f"Пользователей: <b>{users}</b>\n"
-        f"Активных абонементов: <b>{active_subs}</b>\n"
+        f"Пользователей: <b>{users}</b> (новых за 7 дней: <b>{new_week}</b>)\n"
+        f"Активных абонементов: <b>{active_subs}</b> · кончились: <b>{ended}</b>\n"
         f"Задач: <b>{rules}</b>\n"
         f"Аккаунтов: <b>{accounts}</b> (в сети: <b>{online}</b>)\n"
         f"Переслано всего: <b>{forwarded}</b>\n"
         f"Переслано за 24 ч: <b>{day['total']}</b>\n"
+        f"💰 Выручка за 30 дней: <b>{_money_line(revenue)}</b>\n"
+        f"📉 Воронка: подарков <b>{bonus}</b> → платили <b>{paid}</b>"
+        f"{_conversion(bonus, paid)} → активны <b>{active_subs}</b>\n"
     )
     if callback.message is not None:
         await smart_edit(callback.message, text, reply_markup=kb.admin_menu())
