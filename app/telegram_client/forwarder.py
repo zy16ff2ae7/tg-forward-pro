@@ -6,6 +6,7 @@ import tempfile
 from typing import Any
 
 from loguru import logger
+from telethon import Button
 
 from app.db import repo
 from app.db.database import SessionLocal, session_scope
@@ -39,18 +40,33 @@ async def subscription_active(user_id: int) -> bool:
 
 
 async def send_copy(
-    client: Any, target_id: int, message: Any, text: str, link_preview: bool = True
+    client: Any,
+    target_id: int,
+    message: Any,
+    text: str,
+    link_preview: bool = True,
+    buttons: Any = None,
 ) -> Any:
     """Публикует сообщение как своё — без метки «Переслано от».
 
     ``link_preview=False`` убирает блок предпросмотра у ссылок в тексте.
     Относится только к текстовым сообщениям: у медиа предпросмотра нет, зато у
     ``send_file`` такого аргумента и вовсе может не быть.
+
+    ``buttons`` — кнопки-ссылки из настроек ([{'text', 'url'}]): каждая своей
+    строкой. Форвард кнопок не умеет, поэтому слишком большое медиа уходит без
+    них — предупредили в форме, а не промолчали.
     """
+    rows = [
+        [Button.url(str(item.get("text") or ""), str(item.get("url") or ""))]
+        for item in (buttons or [])
+        if isinstance(item, dict) and item.get("text") and item.get("url")
+    ] or None
     media = getattr(message, "media", None)
     if media is None:
         return await client.send_message(
-            target_id, text or "", parse_mode=None, link_preview=link_preview
+            target_id, text or "", parse_mode=None, link_preview=link_preview,
+            buttons=rows,
         )
 
     size = getattr(media, "size", None)
@@ -90,6 +106,7 @@ async def send_copy(
             file_name=file_name,
             parse_mode=None,
             supports_streaming=True,
+            buttons=rows,
         )
     finally:
         try:
@@ -101,7 +118,10 @@ async def send_copy(
 async def _send_once(client: Any, rule: RuleSnapshot, message: Any, text: str) -> Any:
     if rule.mode == "forward":
         return await client.forward_messages(rule.target_id, message)
-    return await send_copy(client, rule.target_id, message, text)
+    return await send_copy(
+        client, rule.target_id, message, text,
+        buttons=getattr(rule.filters, "buttons", None),
+    )
 
 
 async def deliver(client: Any, message: Any, rule: RuleSnapshot) -> DeliveryResult:

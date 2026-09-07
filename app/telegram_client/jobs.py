@@ -483,7 +483,9 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
     async def _send() -> None:
         if message is not None:
             await send_copy(
-                client, target_id, message, text, link_preview=bool(filters.link_preview)
+                client, target_id, message, text,
+                link_preview=bool(filters.link_preview),
+                buttons=getattr(filters, "buttons", None),
             )
         else:
             await client.send_message(
@@ -637,7 +639,10 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
     sent = 0
     for target in targets:
         try:
-            await send_copy(client, target, message, text)
+            await send_copy(
+                client, target, message, text,
+                buttons=getattr(rule.filters, "buttons", None),
+            )
             sent += 1
         except FloodWaitError:
             # «Подождите» — не отказ чата, а пауза всего задания: отдаём её
@@ -723,7 +728,10 @@ async def _dialogs(client: Any, message: Any, rule: RuleSnapshot) -> None:
 
     header = await _sender_header(message)
     text = header + transform_text(raw_text, rule.filters)
-    await send_copy(client, rule.target_id, message, text)
+    await send_copy(
+        client, rule.target_id, message, text,
+        buttons=getattr(rule.filters, "buttons", None),
+    )
     await record_ok(rule, message)
 
 
@@ -754,7 +762,10 @@ async def _checks(client: Any, message: Any, rule: RuleSnapshot) -> None:
     # сохранена и не потеряется вместе с ошибкой.
     _, capped = await _store(rule, "checks", payloads)
     if rule.target_id:
-        await send_copy(client, rule.target_id, message, transform_text(raw_text, rule.filters))
+        await send_copy(
+            client, rule.target_id, message, transform_text(raw_text, rule.filters),
+            buttons=getattr(rule.filters, "buttons", None),
+        )
     if capped:
         logger.warning(
             "Ловец чеков #{}: хранилище переполнено ({}), новые находки отброшены",

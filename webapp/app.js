@@ -127,6 +127,12 @@ const FIELD_SPEC = {
   random_pick: { label: 'Брать сообщение наугад, а не по очереди', control: 'check' },
   link_preview: { label: 'Оставлять предпросмотр ссылок', control: 'check' },
   send_mode: { label: 'Как отправлять', control: 'send_mode' },
+  buttons: {
+    label: 'Кнопки под постами',
+    control: 'textarea',
+    placeholder: 'Подписаться | https://t.me/mychannel\nКупить | https://shop.example/buy',
+    note: 'строка — кнопка: текст | ссылка. В форварде кнопок нет — только в копии',
+  },
   schedule_only: { label: 'Только по датам (вместо кругов и окна)', control: 'check' },
   scheduled_posts: { label: 'Даты', control: 'schedule' },
 };
@@ -491,16 +497,16 @@ const DEMO_COMMAND_GROUPS = [
 const DEMO_COMMANDS = [
   { id: 'sender', group: 'own', kind: 'poster', kinds: ['poster', 'mailing'], emoji: '📤', title: 'Постинг и рассылка', status: 'ready',
     needs: ['account', 'targets', 'message'],
-    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview'],
+    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview'],
     description: 'Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.',
     hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
     tags: ['ваш текст', 'расписание или очередь'] },
   { id: 'copy_channel', group: 'publish', kind: 'forward', emoji: '🔁', title: 'Копирование канала', status: 'ready',
-    needs: ['account', 'source', 'target'], optional: ['mode'],
+    needs: ['account', 'source', 'target'], optional: ['mode', 'buttons'],
     description: 'Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.',
     tags: ['чужие посты', 'один канал → один'] },
   { id: 'broadcast', group: 'publish', kind: 'broadcast', emoji: '📣', title: 'Пересылка в несколько чатов', status: 'ready',
-    needs: ['account', 'source', 'targets'], optional: [],
+    needs: ['account', 'source', 'targets'], optional: ['buttons'],
     description: 'Тот же канал — сразу в десятки чатов: пост из источника уходит во все выбранные одним залпом, как только вышел.',
     hint: 'Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу. Свой текст здесь не нужен: уходит то, что вышло в источнике.',
     tags: ['чужие посты', 'все чаты разом', 'по факту поста'] },
@@ -2118,6 +2124,7 @@ function taskMetaLines(task) {
   const isForward = kind === 'forward';
   const lines = [task.kind_label || (isForward ? 'пересылка' : kind)];
   if (isForward) lines.push(task.mode === 'copy' ? 'копия без метки' : 'обычный форвард');
+  if (task.buttons_count) lines.push(`🔘 ${task.buttons_count} кн.`);
   // Сколько чатов у задачи — первым делом: у постинга и рассылки это главное
   // число задачи, и в заголовке оно есть только когда чатов больше одного.
   if (task.targets_count) lines.push(`${task.targets_count} ${chatWord(task.targets_count)}`);
@@ -3715,6 +3722,12 @@ function applyTaskPrefill(prefill) {
     });
   }
   applySendModeVisibility();
+  // Кнопки сервер отдаёт списком — форма показывает их строками «текст | ссылка».
+  if (Array.isArray(prefill.buttons)) {
+    setValue('buttons', prefill.buttons
+      .filter((item) => item && (item.text || item.url))
+      .map((item) => `${item.text || ''} | ${item.url || ''}`.trim()).join('\n'));
+  }
   // Даты — строками редактора (ушедшие — недоступными, но с id: по нему сервер
   // переносит состояние отправки, см. merge_scheduled_state).
   renderScheduleRows(prefill.scheduled_posts);
@@ -4294,6 +4307,9 @@ function collectTaskPayload() {
   text('send_mode', values.send_mode);
   text('parser_mode', values.parser_mode);
   text('message', values.message);
+  if (values.buttons !== undefined && (values.buttons || editing)) {
+    body.buttons = String(values.buttons || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  }
   text('start', values.start);
   text('end', values.end);
   // Окно задаётся по часам того, кто его ставит, поэтому вместе с ЧЧ:ММ уходит

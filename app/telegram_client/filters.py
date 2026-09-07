@@ -9,6 +9,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.errors import ValidationError
+
 URL_RE = re.compile(r"(https?://\S+|t\.me/\S+|telegram\.me/\S+)", re.IGNORECASE)
 MENTION_RE = re.compile(r"@[A-Za-z0-9_]{3,}")
 
@@ -60,6 +62,9 @@ class FilterConfig:
     remove_mentions: bool = False
     replace: list[dict[str, str]] = field(default_factory=list)
     append_text: str = ""
+    # Кнопки-ссылки под постом: [{'text', 'url'}]. Форвард их не умеет —
+    # прикладываются только в режиме «копия» (см. send_copy).
+    buttons: list = field(default_factory=list)
     # Настройки задач из app.telegram_client.jobs
     targets: list[int] = field(default_factory=list)
     subscribe_to: list[str] = field(default_factory=list)
@@ -131,6 +136,7 @@ class FilterConfig:
             "remove_mentions": self.remove_mentions,
             "replace": self.replace,
             "append_text": self.append_text,
+            "buttons": self.buttons,
             "targets": self.targets,
             "subscribe_to": self.subscribe_to,
             "reaction": self.reaction,
@@ -252,3 +258,45 @@ def parse_words(raw: str) -> list[str]:
     """Разбирает ввод пользователя: «слово1, слово2» или по строкам."""
     chunks = re.split(r"[,\n;]+", raw or "")
     return [chunk.strip() for chunk in chunks if chunk.strip()]
+
+
+# Кнопок под постом: больше — уже меню, а не подпись.
+BUTTONS_CAP = 6
+BUTTON_TEXT_CAP = 64
+
+
+def normalize_buttons(raw: Any) -> list[dict]:
+    """Кнопки из формы — в хранимый вид [{'text', 'url'}].
+
+    Мусор отклоняется с номером кнопки: молча выкинутая кнопка — это пост без
+    ссылки «Купить», о чём человек узнает от клиентов, а не от нас. Короткие
+    ссылки вида t.me/имя дописываются до полного https.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [line for line in raw.splitlines() if line.strip()]
+    if not isinstance(raw, list):
+        raise ValidationError("Кнопки — списком «текст — ссылка»")
+    buttons: list[dict] = []
+    for pos, entry in enumerate(raw, start=1):
+        if len(buttons) >= BUTTONS_CAP:
+            raise ValidationError(f"Не больше {BUTTONS_CAP} кнопок под постом")
+        if isinstance(entry, str) and "|" in entry:
+            # Строка из кабинета: «Подписаться | https://t.me/канал».
+            name, _, link = entry.partition("|")
+            entry = {"text": name.strip(), "url": link.strip()}
+        if not isinstance(entry, dict):
+            raise ValidationError(f"Кнопка №{pos}: нужны текст и ссылка")
+        name = str(entry.get("text") or "").strip()
+        link = str(entry.get("url") or "").strip()
+        if not name:
+            raise ValidationError(f"Кнопка №{pos}: пустой текст")
+        if len(name) > BUTTON_TEXT_CAP:
+            raise ValidationError(f"Кнопка №{pos}: текст длиннее {BUTTON_TEXT_CAP}")
+        if link.startswith("t.me/"):
+            link = "https://" + link
+        if not re.match(r"^https?://\S+$", link):
+            raise ValidationError(f"Кнопка №{pos}: ссылка должна начинаться с http")
+        buttons.append({"text": name, "url": link})
+    return buttons

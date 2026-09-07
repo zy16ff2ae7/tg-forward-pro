@@ -49,6 +49,7 @@ from app.telegram_client.jobs import (
     window_tz_minutes,
 )
 from app.telegram_client.manager import HOPELESS_ERRORS, manager
+from app.telegram_client.filters import normalize_buttons
 
 # initData считаем свежим в течение суток
 INIT_DATA_TTL = 24 * 60 * 60
@@ -827,6 +828,12 @@ async def _apply_task_settings(
             if given(field):
                 filters[field] = _as_bool(payload.get(field))
         await _own_texts(payload, filters, user_id=user_id, partial=partial)
+
+    # Кнопки-ссылки под постом — у всех, кто публикует копии: пересылка,
+    # веерная отправка, постинг и рассылка. Мусор отклоняется с номером кнопки.
+    if kind in ("forward", "broadcast", "poster", "mailing"):
+        if "buttons" in payload or not partial:
+            filters["buttons"] = normalize_buttons(payload.get("buttons"))
 
 
 @routes.post("/api/tasks")
@@ -2546,6 +2553,9 @@ def _task_view(
     # Чаты задачи считает планировщик — тем же счётом, каким и рассылает.
     # Своя арифметика здесь однажды разошлась бы с настоящим числом получателей.
     chats = chat_recipients(rule)
+    view["buttons_count"] = len(
+        [item for item in (conf.buttons or []) if isinstance(item, dict)]
+    )
     if kind == "poster":
         view["interval_min"] = max(1, conf.interval_seconds // 60)
         view["window_start"] = conf.window_start
@@ -2675,6 +2685,13 @@ def _edit_view(
         edit["target"] = str(rule.target_id)
     if conf.target_user_id:
         edit["target_user"] = str(conf.target_user_id)
+    if kind in ("forward", "broadcast", "poster", "mailing"):
+        # Кнопки под постом — как есть: форма показывает их строками.
+        edit["buttons"] = [
+            {"text": item.get("text"), "url": item.get("url")}
+            for item in (conf.buttons or [])
+            if isinstance(item, dict)
+        ]
     if kind == "forward":
         edit["mode"] = rule.mode
     elif kind == "parser":
@@ -2776,7 +2793,7 @@ COMMANDS: list[dict] = [
         "description": "Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.",
         "status": "ready",
         "needs": ["account", "targets", "message"],
-        "optional": ["send_mode", "schedule_only", "scheduled_posts", "interval", "start", "end", "gap", "cycle", "repeats", "typing", "random_pick", "link_preview"],
+        "optional": ["send_mode", "schedule_only", "scheduled_posts", "buttons", "interval", "start", "end", "gap", "cycle", "repeats", "typing", "random_pick", "link_preview"],
         "hint": "Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.",
         "tags": ["ваш текст", "расписание или очередь"],
     },
@@ -2789,7 +2806,7 @@ COMMANDS: list[dict] = [
         "description": "Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.",
         "status": "ready",
         "needs": ["account", "source", "target"],
-        "optional": ["mode"],
+        "optional": ["mode", "buttons"],
         "tags": ["чужие посты", "один канал → один"],
     },
     {
@@ -2807,7 +2824,7 @@ COMMANDS: list[dict] = [
         # них всё равно становится главным. Два поля под одно и то же заставляли
         # заполнять «приёмник» руками даже при выборе чатов мышкой.
         "needs": ["account", "source", "targets"],
-        "optional": [],
+        "optional": ["buttons"],
         "hint": "Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу. Свой текст здесь не нужен: уходит то, что вышло в источнике.",
         "tags": ["чужие посты", "все чаты разом", "по факту поста"],
     },
