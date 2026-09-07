@@ -120,6 +120,13 @@ class Settings:
     bonus_channel: str | None = None
     bonus_days: int = 3
 
+    # Реферальная программа: друг пришёл по ссылке — обоим плюс столько дней.
+    # Ноль выключает программу целиком: ссылок нет ни в боте, ни в кабинете.
+    referral_days: int = 7
+    # Юзернейм бота без @ — нужен, чтобы собрать ссылку-приглашение
+    # (t.me/<имя>?start=ref_<id>). Пусто — показываем только код.
+    bot_username: str = ""
+
     # Оплата
     # Где пользователь платит:
     #   external (по умолчанию) — внутри Telegram только звёзды, карта и USDT
@@ -278,6 +285,11 @@ class Settings:
     def bonus_enabled(self) -> bool:
         """Есть ли что дарить и где проверять подписку."""
         return bool(self.bonus_chat) and self.bonus_days > 0
+
+    @property
+    def referral_enabled(self) -> bool:
+        """Включена ли реферальная программа: ноль дней — выключена."""
+        return self.referral_days > 0
 
     # ─────────────────────── Готовность способов оплаты ───────────────────────
 
@@ -565,6 +577,8 @@ def load_settings() -> Settings:
         renew_remind_days=_get_int("RENEW_REMIND_DAYS", 3),
         bonus_channel=_get("BONUS_CHANNEL"),
         bonus_days=max(0, _get_int("BONUS_DAYS", 3)),
+        referral_days=max(0, _get_int("REFERRAL_DAYS", 7)),
+        bot_username=(_get("BOT_USERNAME", "") or "").lstrip("@"),
         pay_mode=_get_mode("PAY_MODE", PAY_MODES, "external"),
         external_payments_url=_get("EXTERNAL_PAYMENTS_URL"),
         yookassa_shop_id=_get("YOOKASSA_SHOP_ID"),

@@ -21,7 +21,7 @@ from aiogram.types import BufferedInputFile, LabeledPrice
 from aiohttp import web
 from loguru import logger
 
-from app import accounts_login, bonus, exports, paylink, webapp_build
+from app import accounts_login, bonus, exports, paylink, referral, webapp_build
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
@@ -379,6 +379,7 @@ async def me(request: web.Request) -> web.Response:
             for rule in await repo.list_rules(session, user_id, include_archived=False)
         )
         db_user = await repo.get_user(session, user_id)
+        referral_stats = await referral.info(session, user_id)
 
     days_left = 0
     if until:
@@ -426,6 +427,8 @@ async def me(request: web.Request) -> web.Response:
             # Подарок за подписку на канал сервиса. Выключен настройками —
             # приходит enabled: false, и карточка в кабинете не появляется.
             "bonus": bonus.info(db_user.channel_bonus_at if db_user else None),
+            # Реферальная программа: ссылка-приглашение и счёт.
+            "referral": referral_stats,
         }
     )
 

@@ -13,7 +13,7 @@ from aiogram.types import (
 )
 from loguru import logger
 
-from app import bonus
+from app import bonus, referral
 from app.bot import keyboards as kb
 from app.bot import texts
 from app.bot.utils import ensure_user, smart_edit
@@ -212,6 +212,40 @@ async def check_bonus(callback: CallbackQuery) -> None:
             + await _status_text(user_id),
             reply_markup=kb.payment_menu(user_id),
         )
+
+
+# ───────────────────── Реферальная программа ──────────────────────
+
+
+async def _referral_card(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    async with SessionLocal() as session:
+        stats = await referral.info(session, user_id)
+    text = texts.referral_card(
+        stats["link"], stats["code"], stats["days"], stats["invited"], stats["earned_days"]
+    )
+    return text, kb.referral_menu(stats["link"])
+
+
+async def show_referral_message(message: Message) -> None:
+    """Экран «Пригласи друга». Сюда ведут /ref и диплинк referrals."""
+    await ensure_user(message)
+    assert message.from_user is not None
+    text, markup = await _referral_card(message.from_user.id)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.message(Command("ref"))
+async def cmd_ref(message: Message) -> None:
+    await show_referral_message(message)
+
+
+@router.callback_query(F.data == "ref:open")
+async def open_referral(callback: CallbackQuery) -> None:
+    await callback.answer()
+    assert callback.from_user is not None
+    text, markup = await _referral_card(callback.from_user.id)
+    if callback.message is not None:
+        await smart_edit(callback.message, text, reply_markup=markup)
 
 
 async def show_subscription_message(message: Message) -> None:

@@ -573,6 +573,14 @@ function demoMe() {
       claimed: DEMO_BONUS.claimed,
       claimed_at: DEMO_BONUS.claimed_at,
     },
+    referral: {
+      enabled: true,
+      link: 'https://t.me/docha_demo_bot?start=ref_1',
+      code: 'ref_1',
+      days: 7,
+      invited: 2,
+      earned_days: 14,
+    },
   };
 }
 
@@ -4409,6 +4417,60 @@ async function claimBonus(button) {
   }
 }
 
+/* ───────────────── Реферальная программа ───────────────── */
+
+/* Ссылка, условия и счёт приходят в /api/me → referral. Серверных вызовов
+   тут нет вовсе: скопировать и поделиться кабинет умеет сам. */
+function renderReferral() {
+  const block = $('referralBlock');
+  if (!block) return;
+  const info = (state.me && state.me.referral) || {};
+  state.referral = info;
+  block.hidden = !info.enabled;
+  if (!info.enabled) return;
+
+  const days = Number(info.days) || 0;
+  const invited = Number(info.invited) || 0;
+  $('referralTitle').textContent = `Пригласи друга — обоим +${days} дн.`;
+  $('referralDesc').textContent = info.link
+    ? 'Друг приходит по вашей ссылке — вы оба получаете дни к абонементу.'
+    : 'Ссылка соберётся, когда владелец укажет юзернейм бота.';
+  $('referralNote').textContent =
+    `Пришло друзей: ${invited}. Заработано дней: ${Number(info.earned_days) || 0}.`;
+  $('referralCopy').hidden = !info.link;
+  $('referralShare').hidden = !info.link;
+}
+
+async function copyReferralLink(button) {
+  const link = (state.referral || {}).link;
+  if (!link) return;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await withLoading(button, () => navigator.clipboard.writeText(link));
+    } else {
+      // Старый WebView без Clipboard API: копируем через временное поле.
+      const field = document.createElement('textarea');
+      field.value = link;
+      document.body.appendChild(field);
+      field.select();
+      document.execCommand('copy');
+      field.remove();
+    }
+    toast('Ссылка скопирована', 'ok');
+  } catch (error) {
+    toast('Не получилось скопировать: ' + link, 'error');
+  }
+}
+
+function shareReferralLink() {
+  const link = (state.referral || {}).link;
+  if (!link) return;
+  const url = 'https://t.me/share/url?url=' + encodeURIComponent(link)
+    + '&text=' + encodeURIComponent('ДОЧА — автоматизации Telegram 24/7. Приходи по моей ссылке — нам обоим дадут дни!');
+  if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
+  else openExternal(url);
+}
+
 async function moveBankDays(direction, button) {
   const path = direction === 'freeze' ? '/api/subscription/bank' : '/api/subscription/distribute';
   try {
@@ -4781,6 +4843,14 @@ function bindEvents() {
     claimBonus(event.currentTarget);
   });
 
+  // Рефералка: серверных вызовов нет — копируем и делимся на месте.
+  $('referralCopy').addEventListener('click', (event) => {
+    copyReferralLink(event.currentTarget);
+  });
+  $('referralShare').addEventListener('click', () => {
+    shareReferralLink();
+  });
+
   // шторки
   $('resultsMore').addEventListener('click', (event) => {
     loadMoreResults(event.currentTarget);
@@ -4979,6 +5049,7 @@ async function boot() {
       // Подарок за подписку на канал — тоже по ответу сервера: выключен, и
       // карточки в «Аккаунтах» просто нет.
       renderBonus();
+      renderReferral();
     } catch (error) {
       toast(error.message, 'error');
     }

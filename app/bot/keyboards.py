@@ -6,7 +6,7 @@ from typing import Sequence
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app import bonus, paylink
+from app import bonus, paylink, referral
 from app.config import settings
 from app.db.models import Rule, TelegramAccount
 from app.plans import PERIODS, stars_amount
@@ -273,6 +273,14 @@ def payment_menu(user_id: int | None = None) -> InlineKeyboardMarkup:
         builder.row(
             InlineKeyboardButton(text="🎁 " + bonus.offer(), callback_data="bonus:open")
         )
+    # Друг по ссылке — тоже бесплатные дни, поэтому рядом с подарком.
+    if referral.enabled():
+        builder.row(
+            InlineKeyboardButton(
+                text=f"👥 Пригласить друга: +{referral.days()} дн. обоим",
+                callback_data="ref:open",
+            )
+        )
     inline_methods = settings.inline_payment_methods()
     for method in inline_methods:
         builder.row(
@@ -313,6 +321,21 @@ def bonus_menu(claimed: bool = False) -> InlineKeyboardMarkup:
                 text="🔄 Проверить подписку", callback_data="bonus:check"
             )
         )
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="menu:sub"))
+    return builder.as_markup()
+
+
+def referral_menu(link: str) -> InlineKeyboardMarkup:
+    """Реферальный экран: поделиться ссылкой и назад к абонементу."""
+    from urllib.parse import quote
+
+    builder = InlineKeyboardBuilder()
+    if link:
+        share = "https://t.me/share/url?url=" + quote(link, safe="") + "&text=" + quote(
+            "ДОЧА — автоматизации Telegram 24/7. Приходи по моей ссылке — нам обоим дадут дни!",
+            safe="",
+        )
+        builder.row(InlineKeyboardButton(text="📤 Поделиться", url=share))
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="menu:sub"))
     return builder.as_markup()
 

@@ -35,6 +35,10 @@ class User(Base):
     # Когда человек забрал подарок за подписку на канал. Метка одна на аккаунт:
     # подарок разовый, и отписка-подписка второго раза не даёт.
     channel_bonus_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Кто привёл: Telegram id пригласившего. Первый зашедший по ссылке
+    # фиксируется навсегда — перепривязка открыла бы лазейку
+    # лазейку «ходить по кругу и собирать дни с каждого».
+    referred_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     accounts: Mapped[list["TelegramAccount"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

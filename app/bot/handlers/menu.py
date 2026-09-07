@@ -53,11 +53,9 @@ async def _menu_counts(user_id: int) -> dict:
     }
 
 # Диплинки из мини-аппа: /start <ключ>
+# (referrals тут больше нет: партнёрская программа запущена, и ссылка ведёт
+# на настоящий экран — см. ветку ниже.)
 DEEP_LINKS = {
-    "referrals": (
-        "👥 Рефералы",
-        "Ссылка, зеркала и выплаты появятся здесь после запуска партнёрской программы.",
-    ),
     "messages": (
         "💬 Сообщения",
         "Сохранённые тексты, медиа и репосты настраиваются внутри правила: "
@@ -103,6 +101,46 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         await show_bonus_message(message)
         return
 
+    if deep_link == "referrals":
+        from app.bot.handlers.subscription import show_referral_message
+
+        await show_referral_message(message)
+        return
+
+    referral_note = ""
+    if deep_link.startswith("ref_"):
+        # Друг пришёл по ссылке: дни обоим — но только если друг новичок
+        # (это проверяет сам apply). Итог дописываем к приветствию: ссылка —
+        # повод зайти, а не отдельный экран.
+        from app import referral as referral_program
+
+        try:
+            referrer_id = int(deep_link[4:])
+        except ValueError:
+            referrer_id = 0
+        if referrer_id:
+            async with SessionLocal() as session:
+                result = await referral_program.apply(session, user.id, referrer_id)
+                referrer = await repo.get_user(session, referrer_id)
+                if result.granted:
+                    await session.commit()
+                else:
+                    await session.rollback()
+            friend = (message.from_user.full_name if message.from_user else "") or "друг"
+            referral_note = "\n\n" + referral_program.message(
+                result, referrer.mention if referrer else "друг"
+            )
+            if result.granted:
+                # Пригласившему — радость сразу: иначе он узнает о днях,
+                # только открыв абонемент.
+                try:
+                    await message.bot.send_message(
+                        referrer_id,
+                        referral_program.referrer_message(friend, result.days),
+                    )
+                except Exception:  # noqa: BLE001 — друг свои дни уже получил
+                    pass
+
     if deep_link in ("add_account", "resume_login"):
         # Из кабинета нажали «Подключить аккаунт» — человек должен попасть
         # на сам шаг входа, а не в список аккаунтов: иначе он оказывается в
@@ -123,7 +161,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         await message.answer(f"<b>{title}</b>\n\n{body}", reply_markup=kb.back_to_main())
         return
 
-    caption = texts.welcome(message.from_user.full_name or "друг")
+    caption = texts.welcome(message.from_user.full_name or "друг") + referral_note
     reply = kb.main_menu(is_admin(user.id), **await _menu_counts(user.id))
     await answer_with_banner(message, WELCOME_PHOTO, caption, reply_markup=reply)
 

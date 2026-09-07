@@ -129,6 +129,23 @@ def bonus_card(claimed: bool) -> str:
     )
 
 
+def referral_card(link: str, code: str, days: int, invited: int, earned: int) -> str:
+    """Экран реферальной программы: ссылка, условия и счёт."""
+    if not days:
+        return (
+            "👥 <b>Пригласи друга</b>\n\n"
+            "Программа сейчас выключена — загляните позже."
+        )
+    return (
+        "👥 <b>Пригласи друга — обоим +дни</b>\n\n"
+        f"Друг приходит по вашей ссылке — вы оба получаете "
+        f"<b>+{days} дн.</b> к абонементу. Приглашений без лимита.\n\n"
+        f"🔗 Ваша ссылка:\n<code>{link or code}</code>\n\n"
+        f"Пришло друзей: <b>{invited}</b>. Заработано дней: <b>{earned}</b>."
+        + ("" if link else "\n\nСсылка соберётся, когда владелец укажет юзернейм бота.")
+    )
+
+
 def rule_card(
     rule,
     *,

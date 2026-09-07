@@ -240,6 +240,56 @@ async def claim_channel_bonus(
     return await add_subscription_days(session, user_id, days)
 
 
+# Сколько новичок остаётся новичком: реферальная ссылка срабатывает, только
+# если аккаунт создан не раньше десяти минут назад. Иначе старый пользователь
+# мог бы открыть ссылку друга и подарить дни обоим — программа превратилась
+# бы в обмен днями по кругу.
+REFERRAL_NEWCOMER_WINDOW = timedelta(minutes=10)
+
+
+async def apply_referral(
+    session: AsyncSession, user_id: int, referrer_id: int, days: int
+) -> tuple[str, datetime | None]:
+    """Привязывает новичка к пригласившему и дарит дни обоим.
+
+    Возвращает итог и (при выдаче) новый срок абонемента новичка:
+    ``granted`` — дни начислены, ``self`` — ссылка своя, ``stranger`` —
+    пригласившего нет в базе, ``stale`` — аккаунт не свежий, ``already`` —
+    пригласивший уже записан (включая гонку двух одновременных заходов).
+    """
+    if user_id == referrer_id:
+        return "self", None
+    user = await get_user(session, user_id)
+    if user is None:
+        return "unknown", None
+    if user.referred_by is not None:
+        return "already", None
+    if await get_user(session, referrer_id) is None:
+        return "stranger", None
+    if user.created_at < utcnow() - REFERRAL_NEWCOMER_WINDOW:
+        return "stale", None
+    result = await session.execute(
+        update(User)
+        .where(User.id == user_id, User.referred_by.is_(None))
+        .values(referred_by=referrer_id)
+    )
+    if result.rowcount != 1:
+        return "already", None
+    until = await add_subscription_days(session, user_id, days)
+    await add_subscription_days(session, referrer_id, days)
+    return "granted", until
+
+
+async def count_referrals(session: AsyncSession, user_id: int) -> int:
+    """Сколько новичков пришло по ссылке пользователя."""
+    result = await session.execute(
+        select(func.count())
+        .select_from(User)
+        .where(User.referred_by == user_id)
+    )
+    return int(result.scalar() or 0)
+
+
 async def count_active_subscriptions(session: AsyncSession) -> int:
     now = utcnow()
     result = await session.execute(
