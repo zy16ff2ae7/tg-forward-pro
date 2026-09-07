@@ -4016,9 +4016,11 @@ async function qrBegin() {
     qrCtl.tickId = setInterval(qrTick, 1000);
     qrSchedule();
   } catch (error) {
-    // Плохие ключи — тоже сюда: блок с ними на виду, поправить рядом.
+    // Плохие ключи — тоже сюда: блок с ними на виду, поправить рядом,
+    // а кнопка даёт попробовать снова, не закрывая шторку.
     $('qrHint').textContent = '';
     $('qrError').textContent = error.message;
+    $('qrRefresh').hidden = false;
   }
 }
 
