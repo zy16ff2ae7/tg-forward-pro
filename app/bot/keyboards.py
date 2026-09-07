@@ -472,6 +472,9 @@ def admin_menu() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users"),
     )
     builder.row(
+        InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin:promo"),
+    )
+    builder.row(
         InlineKeyboardButton(text="💳 Выдать абонемент", callback_data="admin:grant"),
         InlineKeyboardButton(text="📣 Рассылка", callback_data="admin:broadcast"),
     )

@@ -111,6 +111,7 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "payments": {
         "tx_id": "TEXT",
         "reminded_at": "DATETIME",
+        "promo_code": "TEXT",
     },
     "pending_logins": {
         "attempts": "INTEGER NOT NULL DEFAULT 0",

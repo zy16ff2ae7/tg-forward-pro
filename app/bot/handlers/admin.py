@@ -73,6 +73,37 @@ def _conversion(bonus: int, paid: int) -> str:
     return f" ({paid * 100 // bonus}%)"
 
 
+# Сколько общих кодов влезает в экран: дальше — счётчик остатка.
+PROMO_SHOWN = 10
+
+
+def _promo_text(rows: list[dict]) -> str:
+    """Конверсия кодов: активации → платящие, у скидочных — выручка."""
+    public = [row for row in rows if row.get("code")]
+    personal = next((row for row in rows if not row.get("code")), None)
+    if not public and not personal:
+        return "🎟 <b>Промокоды</b>\n\nПока нет ни одного кода."
+    lines = []
+    for row in public[:PROMO_SHOWN]:
+        kind = f"−{row['percent']}%" if row["percent"] else f"{row['days']} дн."
+        uses = f"{row['used']}/{row['max_uses']}" if row["max_uses"] else str(row["used"])
+        line = f"• <code>{row['code']}</code> ({kind}): активаций <b>{uses}</b> → платят <b>{row['payers']}</b>"
+        money = _money_line(row["revenue"])
+        if money != "пока нет":
+            line += f" · {money}"
+        if not row["active"]:
+            line += " (выкл)"
+        lines.append(line)
+    if len(public) > PROMO_SHOWN:
+        lines.append(f"…и ещё {len(public) - PROMO_SHOWN}.")
+    if personal:
+        lines.append(
+            f"• личные: <b>{personal['codes']}</b> шт · активаций <b>{personal['used']}</b> "
+            f"→ платят <b>{personal['payers']}</b>"
+        )
+    return "🎟 <b>Промокоды</b>\n\n" + "\n".join(lines)
+
+
 def _user_line(user_id: int, name: str, sub_until, created) -> str:
     sub = f"до {sub_until:%d.%m.%Y}" if sub_until else "—"
     return (
@@ -198,6 +229,17 @@ async def admin_stats(callback: CallbackQuery) -> None:
     )
     if callback.message is not None:
         await smart_edit(callback.message, text, reply_markup=kb.admin_menu())
+
+
+@router.callback_query(F.data == "admin:promo")
+async def admin_promo(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if await _denied(callback):
+        return
+    async with SessionLocal() as session:
+        rows = await repo.promo_stats(session)
+    if callback.message is not None:
+        await smart_edit(callback.message, _promo_text(rows), reply_markup=kb.admin_menu())
 
 
 @router.callback_query(F.data == "admin:users")

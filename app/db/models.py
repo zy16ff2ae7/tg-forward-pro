@@ -210,6 +210,9 @@ class Payment(Base):
     # Когда напомнили о брошенном счёте. Письмо одно: повторные пинги —
     # уже вымогательство, а не забота.
     reminded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Промокод, чья скидка сработала в этом платеже. Пишет гашение скидки
+    # при зачёте — по нему аналитика знает, какой код привёл деньги.
+    promo_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     external_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # Для USDT: уникальная сумма-метка, по которой ищем перевод
     memo: Mapped[str | None] = mapped_column(String(64), nullable=True)

@@ -523,12 +523,15 @@ async def consume_pending_discount(
     provider: str,
     paid_amount: float,
     months: int,
+    payment: Payment | None = None,
 ) -> PromoCode | None:
     """Гасит ожидавшую скидку, если платёж прошёл дешевле тарифа.
 
     Вызывать только тому, кто реально зачёл платёж (победителю ``claim_payment``
     или хендлеру звёзд после сверки): повторный вызов уже ничего не найдёт.
     Ручные выдачи (``manual``) скидок не касаются — там платит не человек.
+    Переданный платёж помечается кодом: аналитика узнает, чья скидка
+    сработала именно здесь.
     """
     full_price = {
         "stars": stars_amount,
@@ -547,6 +550,8 @@ async def consume_pending_discount(
     if promo is None:
         return None
     promo.active = False
+    if payment is not None:
+        payment.promo_code = promo.code
     if promo.owner_id is not None:
         # Личный код учли здесь, а не при активации: только зачёт доказывает,
         # что скидка сработала. Общие уже посчитаны активацией.
@@ -556,6 +561,63 @@ async def consume_pending_discount(
         user.pending_promo_id = None
     await session.flush()
     return promo
+
+
+async def promo_stats(session: AsyncSession) -> list[dict]:
+    """Конверсия промокодов: активации → платящие → выручка.
+
+    Коды — общие (акции) и личные (реферальные скидки, их десятки): общие
+    идут построчно, личные — одной сводной строкой, иначе экран утонет.
+    «Платит» — активировал и оплатил после активации: у кодов на дни это
+    единственный след денег, у скидочных — точная метка на платеже.
+    """
+    result = await session.execute(
+        select(PromoCode).order_by(PromoCode.used_count.desc(), PromoCode.id)
+    )
+    codes = list(result.scalars().all())
+    stats: list[dict] = []
+    personal: dict = {"codes": 0, "used": 0, "payers": 0, "revenue": {}}
+    for promo in codes:
+        payers = await session.execute(
+            select(func.count(func.distinct(PromoRedemption.user_id)))
+            .select_from(PromoRedemption)
+            .join(
+                Payment,
+                and_(
+                    Payment.user_id == PromoRedemption.user_id,
+                    _money_was_paid(),
+                    Payment.created_at >= PromoRedemption.redeemed_at,
+                ),
+            )
+            .where(PromoRedemption.code_id == promo.id)
+        )
+        revenue = await session.execute(
+            select(Payment.currency, func.sum(Payment.amount))
+            .where(Payment.promo_code == promo.code, _money_was_paid())
+            .group_by(Payment.currency)
+        )
+        money = {cur: float(total or 0) for cur, total in revenue.all()}
+        row = {
+            "code": promo.code,
+            "days": promo.days,
+            "percent": promo.percent,
+            "active": promo.active,
+            "max_uses": promo.max_uses,
+            "used": promo.used_count,
+            "payers": int(payers.scalar() or 0),
+            "revenue": money,
+        }
+        if promo.owner_id is not None:
+            personal["codes"] += 1
+            personal["used"] += row["used"]
+            personal["payers"] += row["payers"]
+            for cur, total in money.items():
+                personal["revenue"][cur] = personal["revenue"].get(cur, 0.0) + total
+        else:
+            stats.append(row)
+    if personal["codes"]:
+        stats.append({"code": None, **personal})
+    return stats
 
 
 async def get_promo_code(session: AsyncSession, code: str) -> PromoCode | None:
@@ -1726,6 +1788,7 @@ async def claim_payment(
         provider=payment.provider,
         paid_amount=float(payment.amount or 0),
         months=int(payment.months or 0),
+        payment=payment,
     )
     return True
 

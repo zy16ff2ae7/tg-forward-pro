@@ -773,8 +773,9 @@ async def on_stars_paid(message: Message) -> None:
             # Подарок висящих строк не пишет, но оплаченным быть обязан:
             # раньше статус оставался «pending» навсегда.
             await repo.mark_payment_paid(session, created)
+            paid_row = created
         else:
-            await repo.confirm_stars_payment(
+            paid_row = await repo.confirm_stars_payment(
                 session,
                 user_id=user_id,
                 months=months,
@@ -796,6 +797,7 @@ async def on_stars_paid(message: Message) -> None:
             provider="stars",
             paid_amount=float(payment.total_amount),
             months=months,
+            payment=paid_row,
         )
         # Первый оплаченный абонемент — награда пригласившему (если друга
         # приводили по ссылке). Повторный апдейт сюда не доходит, а второй
