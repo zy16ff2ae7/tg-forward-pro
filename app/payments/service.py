@@ -18,7 +18,13 @@ from app.db import repo
 from app.db.database import SessionLocal
 from app.errors import ConflictError, FeatureUnavailable, ValidationError
 from app.payments import crypto, yookassa
-from app.plans import is_valid_period, periods_text, rub_amount, usdt_amount
+from app.plans import (
+    apply_discount,
+    is_valid_period,
+    periods_text,
+    rub_amount,
+    usdt_amount,
+)
 
 
 def _check_period(months: int) -> int:
@@ -31,6 +37,13 @@ def _check_period(months: int) -> int:
 # (или утёкшая ссылка на страницу оплаты). Каждый счёт USDT занимает уникальную
 # метку-сумму, поэтому бесконечно их плодить нельзя.
 MAX_PENDING_PER_METHOD = 5
+
+
+async def _pending_percent(user_id: int) -> int:
+    """Скидка человека, ждущая оплаты. Нет ожидания — ноль."""
+    async with SessionLocal() as session:
+        pending = await repo.pending_discount(session, user_id)
+    return int(pending.percent or 0) if pending is not None else 0
 
 
 async def _check_not_flooding(user_id: int, provider: str) -> None:
@@ -57,7 +70,8 @@ async def start_yookassa(user_id: int, months: int = 1) -> dict:
         )
     await _check_not_flooding(user_id, "yookassa")
 
-    amount = rub_amount(months)
+    discount = await _pending_percent(user_id)
+    amount = int(apply_discount(rub_amount(months), discount))
     async with SessionLocal() as session:
         payment = await repo.create_payment(
             session,
@@ -98,6 +112,7 @@ async def start_yookassa(user_id: int, months: int = 1) -> dict:
         "amount": amount,
         "currency": "RUB",
         "months": months,
+        "discount_percent": discount,
     }
 
 
@@ -110,7 +125,10 @@ async def start_usdt(user_id: int, months: int = 1) -> dict:
         )
     await _check_not_flooding(user_id, "usdt")
 
+    discount = await _pending_percent(user_id)
     base = usdt_amount(months)
+    if discount:
+        base = float(apply_discount(base, discount))
     async with SessionLocal() as session:
         payment = await repo.create_payment(
             session,
@@ -136,6 +154,7 @@ async def start_usdt(user_id: int, months: int = 1) -> dict:
         "memo": memo,
         "currency": "USDT",
         "months": months,
+        "discount_percent": discount,
     }
 
 

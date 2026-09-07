@@ -136,7 +136,9 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
                 try:
                     await message.bot.send_message(
                         referrer_id,
-                        referral_program.referrer_message(friend, result.days),
+                        referral_program.referrer_message(
+                            friend, result.days, result.referrer_code
+                        ),
                     )
                 except Exception:  # noqa: BLE001 — друг свои дни уже получил
                     pass

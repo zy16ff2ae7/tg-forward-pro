@@ -214,9 +214,16 @@ async function load() {
   }
 }
 
+function discountNote(invoice) {
+  /* Счёт уже дешевле тарифа — называем причину, иначе «почему так» повиснет. */
+  const pct = Number(invoice.discount_percent) || 0;
+  return pct ? `<p class="note">💸 Применена скидка ${pct}% по промокоду.</p>` : '';
+}
+
 function showYookassa(invoice) {
   resultEl.hidden = false;
   resultEl.innerHTML = `<h2>Счёт на ${esc(invoice.amount)} ₽ создан</h2>
+    ${discountNote(invoice)}
     <p class="note">Открываем страницу банка. Если она не открылась —
     <a href="${esc(invoice.url)}">перейдите по ссылке</a>.</p>`;
   /* Переход, а не автоматический popup: браузеры блокируют window.open
@@ -229,6 +236,7 @@ function showUsdt(invoice) {
   resultEl.innerHTML = `<h2>Перевод USDT</h2>
     <div class="row"><span>Сеть</span><b>${esc(invoice.network)}</b></div>
     <div class="row"><span>Сумма</span><b>${esc(invoice.amount.toFixed(3))} USDT</b></div>
+    ${discountNote(invoice)}
     <div class="row"><span>Кошелёк</span><code>${esc(invoice.wallet)}</code></div>
     <p class="note">Отправьте <b>ровно эту сумму</b>: последние три знака —
     идентификатор вашего платежа. Доступ включится автоматически после

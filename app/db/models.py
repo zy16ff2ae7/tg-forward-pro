@@ -28,6 +28,10 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # Telegram user_id
+    # Код скидки, ждущий следующей оплаты: человек активировал промокод на −N%,
+    # и ближайший разовый счёт выставляется дешевле. Гасится в момент зачёта
+    # платежа, а не создания счёта — неоплаченный счёт скидку не сжигает.
+    pending_promo_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -365,6 +369,13 @@ class PromoCode(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     days: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Скидка в процентах к следующей оплате. 0 — обычный код на дни.
+    # У скидочных кодов дни не начисляются вовсе — только ожидание скидки.
+    percent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Владелец личного кода (реферальные скидки). NULL — код общий.
+    # Чужой личный код неотличим от несуществующего: перебору подсказывать
+    # нечего, а другу код не перехватить.
+    owner_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     max_uses: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

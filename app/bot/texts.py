@@ -136,14 +136,24 @@ def bonus_card(claimed: bool) -> str:
     )
 
 
-def referral_card(link: str, code: str, days: int, invited: int, earned: int) -> str:
-    """Экран реферальной программы: ссылка, условия и счёт."""
+def referral_card(
+    link: str,
+    code: str,
+    days: int,
+    invited: int,
+    earned: int,
+    *,
+    discount_percent: int = 0,
+    discount_codes: tuple[str, ...] = (),
+    pending_discount: int = 0,
+) -> str:
+    """Экран реферальной программы: ссылка, условия, счёт и коды на скидку."""
     if not days:
         return (
             "👥 <b>Пригласи друга</b>\n\n"
             "Программа сейчас выключена — загляните позже."
         )
-    return (
+    text = (
         "👥 <b>Пригласи друга — обоим +дни</b>\n\n"
         f"Друг приходит по вашей ссылке — вы оба получаете "
         f"<b>+{days} дн.</b> к абонементу. Приглашений без лимита.\n\n"
@@ -151,6 +161,17 @@ def referral_card(link: str, code: str, days: int, invited: int, earned: int) ->
         f"Пришло друзей: <b>{invited}</b>. Заработано дней: <b>{earned}</b>."
         + ("" if link else "\n\nСсылка соберётся, когда владелец укажет юзернейм бота.")
     )
+    if discount_percent:
+        text += (
+            "\n\n💸 Каждый приход дарит вам обоим личный промокод "
+            f"на <b>−{discount_percent}%</b> к следующей оплате."
+        )
+        if pending_discount:
+            text += f"\nСкидка {pending_discount}% уже ждёт: ближайший счёт станет дешевле."
+        elif discount_codes:
+            codes = ", ".join(f"<code>{c}</code>" for c in discount_codes)
+            text += f"\nВаши коды: {codes} — введите в «Промокод»."
+    return text
 
 
 def rule_card(

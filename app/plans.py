@@ -70,6 +70,19 @@ def usdt_amount(months: int) -> float:
     return round(settings.price_usdt * months, 2)
 
 
+def apply_discount(amount: int | float, percent: int) -> int | float:
+    """Цена со скидкой. Тип сохраняет: звёзды и рубли — целыми вниз.
+
+    Ноль копеек/звёзд не бывает: счёт на ноль провайдер не примет, поэтому
+    целая цена меньше единицы поднимается до неё.
+    """
+    if percent <= 0:
+        return amount
+    if isinstance(amount, float):
+        return round(amount * (100 - percent) / 100, 2)
+    return max(1, amount * (100 - percent) // 100)
+
+
 def periods_text() -> str:
     """Список сроков для сообщения: «1, 3, 6 или 12 месяцев»."""
     head, last = ", ".join(str(item) for item in PERIODS[:-1]), PERIODS[-1]

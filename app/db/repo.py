@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import secrets
 from datetime import datetime, timedelta
 from typing import Sequence
 
@@ -10,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.plans import rub_amount, stars_amount, usdt_amount
 from app.db.models import (
     CollectedItem,
     ForwardLog,
@@ -307,16 +309,127 @@ async def create_promo_code(
     max_uses: int = 0,
     ttl_days: int | None = None,
     created_by: int | None = None,
+    percent: int = 0,
+    owner_id: int | None = None,
 ) -> PromoCode:
-    """Создаёт промокод. Повторный код — IntegrityError, пусть решает вызывающий."""
+    """Создаёт промокод. Повторный код — IntegrityError, пусть решает вызывающий.
+
+    ``percent`` > 0 — код на скидку: дней он не даёт, вместо них ждёт
+    следующей оплаты. ``owner_id`` — личный код: чужой его не активирует.
+    """
     promo = PromoCode(
         code=normalize_promo_code(code),
-        days=max(1, days),
+        days=0 if percent > 0 else max(1, days),
         max_uses=max(0, max_uses),
         expires_at=utcnow() + timedelta(days=ttl_days) if ttl_days else None,
         created_by=created_by,
+        percent=max(0, percent),
+        owner_id=owner_id,
     )
     session.add(promo)
+    await session.flush()
+    return promo
+
+
+# Чем набираются реферальные коды: без похожих друг на друга знаков —
+# код диктуют и вбивают руками, 0/O и 1/I/L в нём делать нечего.
+_REF_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+_REF_CODE_PREFIX = "REF-"
+_REF_CODE_LENGTH = 6
+_REF_MINT_ATTEMPTS = 5
+
+
+async def mint_referral_discount(
+    session: AsyncSession, owner_id: int, percent: int
+) -> PromoCode:
+    """Личный одноразовый код на скидку: друг и пригласивший получают по такому.
+
+    Код случайный и личный: угадать чужой нельзя, активировать — тоже.
+    Одноразовость держит не счётчик, а гашение при зачёте платежа: код гаснет
+    в момент, когда скидка реально сработала, а не когда счёт выставили.
+    """
+    last_error: Exception | None = None
+    for _ in range(_REF_MINT_ATTEMPTS):
+        code = _REF_CODE_PREFIX + "".join(
+            secrets.choice(_REF_CODE_ALPHABET) for _ in range(_REF_CODE_LENGTH)
+        )
+        try:
+            return await create_promo_code(
+                session, code, 0,
+                max_uses=1, percent=percent, owner_id=owner_id,
+            )
+        except IntegrityError as exc:
+            # Код уже занят — пробуем другой. Откат обязателен: упавший
+            # flush отравляет сессию, и следующий был бы уже не в счёт.
+            await session.rollback()
+            last_error = exc
+    raise last_error  # type: ignore[misc]  # pragma: no cover — 34^6 кодов
+
+
+async def pending_discount(session: AsyncSession, user_id: int) -> PromoCode | None:
+    """Скидка, ждущая следующей оплаты. Протухшая ссылка — как будто её нет."""
+    user = await get_user(session, user_id)
+    if user is None or not user.pending_promo_id:
+        return None
+    promo = await session.get(PromoCode, user.pending_promo_id)
+    if promo is None or not promo.active:
+        return None
+    if promo.expires_at is not None and promo.expires_at <= utcnow():
+        return None
+    return promo
+
+
+async def owner_discount_codes(
+    session: AsyncSession, user_id: int
+) -> list[PromoCode]:
+    """Несгоревшие личные коды на скидку — для карточки «Пригласи друга»."""
+    result = await session.execute(
+        select(PromoCode)
+        .where(
+            PromoCode.owner_id == user_id,
+            PromoCode.percent > 0,
+            PromoCode.active.is_(True),
+        )
+        .order_by(PromoCode.id)
+    )
+    return list(result.scalars().all())
+
+
+async def consume_pending_discount(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    provider: str,
+    paid_amount: float,
+    months: int,
+) -> PromoCode | None:
+    """Гасит ожидавшую скидку, если платёж прошёл дешевле тарифа.
+
+    Вызывать только тому, кто реально зачёл платёж (победителю ``claim_payment``
+    или хендлеру звёзд после сверки): повторный вызов уже ничего не найдёт.
+    Ручные выдачи (``manual``) скидок не касаются — там платит не человек.
+    """
+    full_price = {
+        "stars": stars_amount,
+        "yookassa": rub_amount,
+        "usdt": usdt_amount,
+    }.get(provider)
+    if full_price is None:
+        return None
+    try:
+        full = float(full_price(months))
+    except Exception:  # noqa: BLE001 — левый срок: тариф неизвестен, не гасим
+        return None
+    if not paid_amount < full:
+        return None
+    promo = await pending_discount(session, user_id)
+    if promo is None:
+        return None
+    promo.active = False
+    promo.used_count += 1
+    user = await get_user(session, user_id)
+    if user is not None:
+        user.pending_promo_id = None
     await session.flush()
     return promo
 
@@ -345,13 +458,19 @@ async def redeem_promo_code(
     Возвращает итог, число дней и (при выдаче) новый срок абонемента:
     ``granted`` — начислено, ``unknown`` — такого кода нет или он выключен,
     ``expired`` — срок вышел, ``exhausted`` — лимит активаций исчерпан,
-    ``already`` — этот человек код уже активировал.
+    ``already`` — этот человек код уже активировал, ``deferred`` — скидочный
+    код, но у человека уже ждёт другая скидка: сначала надо потратить её.
     """
     promo = await get_promo_code(session, code)
     if promo is None or not promo.active:
         return "unknown", 0, None
+    if promo.owner_id is not None and promo.owner_id != user_id:
+        # Чужой личный код — как несуществующий: ни перёбора, ни перехвата.
+        return "unknown", 0, None
     if promo.expires_at is not None and promo.expires_at <= utcnow():
         return "expired", 0, None
+    if promo.percent > 0:
+        return await _redeem_discount_code(session, user_id, promo)
     if promo.max_uses > 0 and promo.used_count >= promo.max_uses:
         return "exhausted", 0, None
     existing = await session.execute(
@@ -383,6 +502,39 @@ async def redeem_promo_code(
         return "already", promo.days, None
     until = await add_subscription_days(session, user_id, promo.days)
     return "granted", promo.days, until
+
+
+async def _redeem_discount_code(
+    session: AsyncSession, user_id: int, promo: PromoCode
+) -> tuple[str, int, datetime | None]:
+    """Активирует код на скидку: скидка встаёт в ожидание следующей оплаты.
+
+    Дней тут нет — их и не начисляем. Строка в ``promo_redemptions`` всё равно
+    пишется: она не даёт активировать тот же код дважды, а одноразовость
+    самого кода держит гашение при зачёте платежа.
+    """
+    existing = await session.execute(
+        select(PromoRedemption.id).where(
+            PromoRedemption.code_id == promo.id,
+            PromoRedemption.user_id == user_id,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        return "already", 0, None
+    user = await get_user(session, user_id)
+    if user is None:
+        return "unknown", 0, None
+    if await pending_discount(session, user_id) is not None:
+        return "deferred", 0, None
+    # Ссылка могла протухнуть (код погасили мимо зачёта) — чистим, не отказываем.
+    user.pending_promo_id = promo.id
+    session.add(PromoRedemption(code_id=promo.id, user_id=user_id))
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        return "already", 0, None
+    return "granted", 0, None
 
 
 async def count_active_subscriptions(session: AsyncSession) -> int:
@@ -1188,6 +1340,15 @@ async def claim_payment(
         return False
     # В объекте в памяти остались старые значения — подтягиваем записанные.
     await session.refresh(payment)
+    # Зачли дешевле тарифа — значит, сработала ожидавшая скидка: гасим её.
+    # Не зачли (проигравший гонки сюда не доходит), деньги не ушли — скидка цела.
+    await consume_pending_discount(
+        session,
+        payment.user_id,
+        provider=payment.provider,
+        paid_amount=float(payment.amount or 0),
+        months=int(payment.months or 0),
+    )
     return True
 
 

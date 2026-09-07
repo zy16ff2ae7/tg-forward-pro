@@ -1,9 +1,12 @@
-"""Реферальная программа: друг пришёл по ссылке — обоим плюс дни.
+"""Реферальная программа: друг пришёл по ссылке — обоим плюс дни и скидка.
 
 Правило одно на всех: ссылка срабатывает, только если друг — новичок (аккаунт
 создан не раньше десяти минут назад) и ни к кому ещё не привязан. Самому себе,
 по чужой ссылке со старого аккаунта и по второму кругу дни не начисляются —
 иначе программа превратилась бы в обмен днями по кругу.
+
+Кроме дней каждый из двоих получает личный одноразовый промокод на скидку
+к следующей оплате: друг — в приветствии, пригласивший — в сообщении-радости.
 """
 from __future__ import annotations
 
@@ -24,6 +27,10 @@ class Referral:
     status: str  # granted | self | stranger | stale | already | unknown | disabled
     days: int = 0
     until: datetime | None = None
+    # Личные коды на скидку: другу и пригласившему. Пустые — скидки выключены
+    # (ноль процентов) или заход не сработал.
+    friend_code: str = ""
+    referrer_code: str = ""
 
     @property
     def granted(self) -> bool:
@@ -52,6 +59,13 @@ def link(user_id: int) -> str:
     return f"https://t.me/{settings.bot_username}?start={code(user_id)}"
 
 
+def discount_percent() -> int:
+    """Размер скидки за друга. Ноль — скидок нет, только дни."""
+    if not settings.referral_enabled:
+        return 0
+    return max(0, settings.referral_discount_percent)
+
+
 async def apply(
     session: AsyncSession, user_id: int, referrer_id: int
 ) -> Referral:
@@ -61,12 +75,30 @@ async def apply(
     status, until = await repo.apply_referral(
         session, user_id, referrer_id, settings.referral_days
     )
-    return Referral(status, days=settings.referral_days, until=until)
+    friend_code = referrer_code = ""
+    percent = discount_percent()
+    if status == "granted" and percent > 0:
+        # Каждому свой код: один на двоих кончился бы первой активацией.
+        friend_code = (
+            await repo.mint_referral_discount(session, user_id, percent)
+        ).code
+        referrer_code = (
+            await repo.mint_referral_discount(session, referrer_id, percent)
+        ).code
+    return Referral(
+        status,
+        days=settings.referral_days,
+        until=until,
+        friend_code=friend_code,
+        referrer_code=referrer_code,
+    )
 
 
 async def info(session: AsyncSession, user_id: int) -> dict[str, Any]:
     """Блок ``referral`` в ``/api/me``: по нему кабинет рисует карточку."""
     invited = await repo.count_referrals(session, user_id) if enabled() else 0
+    pending = await repo.pending_discount(session, user_id) if enabled() else None
+    codes = await repo.owner_discount_codes(session, user_id) if enabled() else []
     return {
         "enabled": enabled(),
         "link": link(user_id),
@@ -74,6 +106,9 @@ async def info(session: AsyncSession, user_id: int) -> dict[str, Any]:
         "days": days(),
         "invited": invited,
         "earned_days": invited * days(),
+        "discount_percent": discount_percent(),
+        "discount_codes": [promo.code for promo in codes],
+        "pending_discount": int(pending.percent or 0) if pending else 0,
     }
 
 
@@ -82,9 +117,14 @@ def message(result: Referral, name: str = "друг") -> str:
     if result.status == "granted":
         until = result.until
         tail = f" Абонемент действует до {until:%d.%m.%Y %H:%M} (UTC)." if until else ""
-        return (
-            f"Вас пригласил {name} — вам обоим +{result.days} дн.! 🎉{tail}"
-        )
+        text = f"Вас пригласил {name} — вам обоим +{result.days} дн.! 🎉{tail}"
+        if result.friend_code:
+            text += (
+                "\n\nВаш личный промокод на скидку "
+                f"{discount_percent()}%: <code>{result.friend_code}</code>\n"
+                "Введите его в «Промокод» — ближайшая оплата станет дешевле."
+            )
+        return text
     if result.status == "self":
         return "Это ваша собственная ссылка: себе дни не начисляются, зовите друзей 🙂"
     if result.status == "already":
@@ -96,6 +136,13 @@ def message(result: Referral, name: str = "друг") -> str:
     return "Не получилось применить ссылку: пригласивший не найден."
 
 
-def referrer_message(name: str, days: int) -> str:
+def referrer_message(name: str, days: int, code: str = "") -> str:
     """Что уходит пригласившему, когда друг зашёл по его ссылке."""
-    return f"🎉 {name} пришёл по вашей ссылке! Вам +{days} дн. к абонементу."
+    text = f"🎉 {name} пришёл по вашей ссылке! Вам +{days} дн. к абонементу."
+    if code:
+        text += (
+            "\n\nВаш личный промокод на скидку "
+            f"{discount_percent()}%: <code>{code}</code>\n"
+            "Введите его в «Промокод» — ближайшая оплата станет дешевле."
+        )
+    return text

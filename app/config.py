@@ -123,6 +123,9 @@ class Settings:
     # Реферальная программа: друг пришёл по ссылке — обоим плюс столько дней.
     # Ноль выключает программу целиком: ссылок нет ни в боте, ни в кабинете.
     referral_days: int = 7
+    # Скидка каждому из двоих за приход друга: оба получают личный
+    # одноразовый промокод на −N% к следующей оплате. 0 — только дни.
+    referral_discount_percent: int = 5
     # Юзернейм бота без @ — нужен, чтобы собрать ссылку-приглашение
     # (t.me/<имя>?start=ref_<id>). Пусто — показываем только код.
     bot_username: str = ""
@@ -578,6 +581,9 @@ def load_settings() -> Settings:
         bonus_channel=_get("BONUS_CHANNEL"),
         bonus_days=max(0, _get_int("BONUS_DAYS", 3)),
         referral_days=max(0, _get_int("REFERRAL_DAYS", 7)),
+        referral_discount_percent=max(
+            0, min(90, _get_int("REFERRAL_DISCOUNT_PERCENT", 5))
+        ),
         bot_username=(_get("BOT_USERNAME", "") or "").lstrip("@"),
         pay_mode=_get_mode("PAY_MODE", PAY_MODES, "external"),
         external_payments_url=_get("EXTERNAL_PAYMENTS_URL"),

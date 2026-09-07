@@ -4892,6 +4892,28 @@ function renderReferral() {
     : 'Ссылка соберётся, когда владелец укажет юзернейм бота.';
   $('referralNote').textContent =
     `Пришло друзей: ${invited}. Заработано дней: ${Number(info.earned_days) || 0}.`;
+  /* Скидочные коды и ожидание: каждый приход дарит обоим личный промокод
+     на −N% к следующей оплате. Показываем их здесь, а не только в сообщении
+     бота: сообщение теряется, а карточка всегда под рукой. */
+  const deal = $('referralDiscount');
+  const pct = Number(info.discount_percent) || 0;
+  const codes = Array.isArray(info.discount_codes) ? info.discount_codes : [];
+  const waiting = Number(info.pending_discount) || 0;
+  if (deal) {
+    if (waiting) {
+      deal.hidden = false;
+      deal.textContent = `💸 Скидка ${waiting}% ждёт: ближайший разовый счёт станет дешевле.`;
+    } else if (pct && codes.length) {
+      deal.hidden = false;
+      deal.textContent = `💸 Ваши коды на −${pct}%: ${codes.join(', ')} — введите в «Промокод».`;
+    } else if (pct) {
+      deal.hidden = false;
+      deal.textContent = `💸 Каждый приход дарит вам обоим промокод на −${pct}% к оплате.`;
+    } else {
+      deal.hidden = true;
+      deal.textContent = '';
+    }
+  }
   $('referralCopy').hidden = !info.link;
   $('referralShare').hidden = !info.link;
 }

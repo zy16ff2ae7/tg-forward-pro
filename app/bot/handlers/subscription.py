@@ -28,6 +28,7 @@ from app.plans import (
     DEFAULT_MONTHS,
     STARS_DESCRIPTION,
     STARS_SUBSCRIPTION_PERIOD,
+    apply_discount,
     is_valid_period,
     months_from_callback,
     periods_text,
@@ -225,7 +226,10 @@ async def _referral_card(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     async with SessionLocal() as session:
         stats = await referral.info(session, user_id)
     text = texts.referral_card(
-        stats["link"], stats["code"], stats["days"], stats["invited"], stats["earned_days"]
+        stats["link"], stats["code"], stats["days"], stats["invited"], stats["earned_days"],
+        discount_percent=int(stats["discount_percent"] or 0),
+        discount_codes=tuple(stats["discount_codes"] or ()),
+        pending_discount=int(stats["pending_discount"] or 0),
     )
     return text, kb.referral_menu(stats["link"])
 
@@ -420,11 +424,20 @@ async def pay_stars_period(callback: CallbackQuery) -> None:
         return
 
     amount = stars_amount(months)
+    description = STARS_DESCRIPTION
+    async with SessionLocal() as session:
+        pending = await repo.pending_discount(session, callback.from_user.id)
+    if pending is not None:
+        # Скидка применяется здесь, а гаснет при зачёте платежа: неоплаченный
+        # счёт её не сжигает, и кнопки сроков врут в меньшую сторону осознанно —
+        # точную цену человек видит в самом счёте.
+        amount = int(apply_discount(amount, int(pending.percent or 0)))
+        description = f"{STARS_DESCRIPTION} Скидка {pending.percent}% по промокоду."
     title = f"Абонемент на {months} мес."
     await callback.bot.send_invoice(
         chat_id=callback.from_user.id,
         title=title,
-        description=STARS_DESCRIPTION,
+        description=description,
         # Формат читает хендлер successful_payment — менять нельзя.
         payload=f"sub:{callback.from_user.id}:{months}",
         provider_token="",  # для Stars токен не нужен
@@ -444,6 +457,9 @@ async def pay_stars_autorenew(callback: CallbackQuery) -> None:
     await callback.answer()
     assert callback.from_user is not None
 
+    # Автопродление скидок не знает: Telegram списывает по условиям первого
+    # счёта каждый месяц, и разовая скидка стала бы вечной. Хотите дешевле —
+    # платите разовыми счетами.
     amount = stars_amount(1)
     title = "Абонемент с автопродлением"
     await callback.bot.send_invoice(
@@ -475,12 +491,21 @@ async def on_pre_checkout(query: PreCheckoutQuery) -> None:
     except ValueError:
         months = None
 
+    accepted = {stars_amount(months)} if months is not None else set()
+    if months is not None and is_valid_period(months):
+        async with SessionLocal() as session:
+            pending = await repo.pending_discount(session, query.from_user.id)
+        if pending is not None:
+            # Счёт выставили со скидкой — списываем тоже со скидкой. Проверка
+            # повторяется здесь, а не только при создании счёта: между ними
+            # скидку могли уже потратить другим платежом.
+            accepted.add(int(apply_discount(stars_amount(months), int(pending.percent or 0))))
     if (
         months is None
         or not is_valid_period(months)
         or owner_id != query.from_user.id
         or query.currency != "XTR"
-        or query.total_amount != stars_amount(months)
+        or query.total_amount not in accepted
     ):
         logger.warning(
             "Stars pre_checkout отклонён: payload={!r} amount={} {} от {}",
@@ -509,11 +534,19 @@ async def on_stars_paid(message: Message) -> None:
 
     # Финальная сверка уже после списания: pre_checkout мог пройти до смены
     # тарифа, а апдейт — приехать дважды. Молча активировать «что-то» нельзя.
+    full_price = stars_amount(months) if is_valid_period(months) else None
+    async with SessionLocal() as session:
+        stars_pending = await repo.pending_discount(session, message.from_user.id)
+    accepted_amounts = {full_price} if full_price is not None else set()
+    if stars_pending is not None and full_price is not None:
+        accepted_amounts.add(
+            int(apply_discount(full_price, int(stars_pending.percent or 0)))
+        )
     if (
         user_id != message.from_user.id
         or payment.currency != "XTR"
         or not is_valid_period(months)
-        or payment.total_amount != stars_amount(months)
+        or payment.total_amount not in accepted_amounts
     ):
         logger.error(
             "Stars-платёж не сошёлся: payload={!r} amount={} {} payer={}",
@@ -552,6 +585,16 @@ async def on_stars_paid(message: Message) -> None:
             external_id=payment.telegram_payment_charge_id,
         )
         until = await repo.activate_subscription(session, user_id, months)
+        # Уплачено меньше тарифа — сработала ожидавшая скидка: гасим её.
+        # Повторный апдейт сюда не доходит (проверка дубликата выше), поэтому
+        # дважды скидка не гаснет, а чужой платёж её не трогает.
+        await repo.consume_pending_discount(
+            session,
+            user_id,
+            provider="stars",
+            paid_amount=float(payment.total_amount),
+            months=months,
+        )
         # Рекуррентное списание — признак живой подписки: взводим флаг.
         # Разовый платёж флага не касается: подписка могла остаться с прошлого
         # раза, а могла и не быть — гадать по одному платежу нельзя.

@@ -32,6 +32,7 @@ from app.plans import (
     PERIODS,
     STARS_DESCRIPTION,
     STARS_SUBSCRIPTION_PERIOD,
+    apply_discount,
     is_valid_period,
     periods_text,
     rub_amount,
@@ -2242,10 +2243,22 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
 
     title = "Абонемент на 1 месяц" if months == 1 else f"Абонемент на {months} мес."
     amount = stars_amount(months)
+    discount = 0
+    description = STARS_DESCRIPTION
+    if not autorenew:
+        # Разовый счёт дешевле, если ждёт скидка. Автопродлению скидок нет:
+        # Telegram списывает по первому счёту каждый месяц — разовая скидка
+        # стала бы вечной.
+        async with SessionLocal() as session:
+            pending = await repo.pending_discount(session, user_id)
+        if pending is not None:
+            discount = int(pending.percent or 0)
+            amount = int(apply_discount(amount, discount))
+            description = f"{STARS_DESCRIPTION} Скидка {discount}% по промокоду."
     try:
         link = await _bot.create_invoice_link(
             title=title,
-            description=STARS_DESCRIPTION,
+            description=description,
             # Формат читает хендлер successful_payment в боте — менять нельзя.
             payload=f"sub:{user_id}:{months}",
             provider_token="",  # для Stars платёжный токен не нужен
@@ -2271,6 +2284,7 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
             "amount": amount,
             "currency": "XTR",
             "autorenew": autorenew,
+            "discount_percent": discount,
         }
     )
 
@@ -2603,6 +2617,7 @@ async def redeem_promo(request: web.Request) -> web.Response:
         "granted": result.granted,
         "days": result.days,
         "until": result.until.isoformat() if result.until else None,
+        "percent": result.percent,
         "message": promocode.message(result),
     }
     if not result.granted:

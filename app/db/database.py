@@ -84,6 +84,11 @@ async def get_session() -> AsyncIterator[AsyncSession]:
 ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "users": {
         "channel_bonus_at": "DATETIME",
+        "pending_promo_id": "INTEGER",
+    },
+    "promo_codes": {
+        "percent": "INTEGER NOT NULL DEFAULT 0",
+        "owner_id": "BIGINT",
     },
     "rules": {
         "kind": "TEXT NOT NULL DEFAULT 'forward'",
