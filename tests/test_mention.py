@@ -118,3 +118,23 @@ async def test_linked_message_mentions_too():
 
     assert sent_id == 20
     assert [entity.url for entity in client.texts[0]["entities"]] == ["tg://user?id=11"]
+
+
+async def test_broadcast_mentions_each_chat(create_user, create_account):
+    """Веер с галочкой: упоминания собраны для каждого чата отдельно."""
+    from tests.test_delivery_fixes import _db_rule, _snapshot
+
+    rule = await _db_rule(create_user, create_account, kind="broadcast")
+    snapshot = _snapshot(
+        rule, filters=FilterConfig(targets=[-300], mention_all=True)
+    )
+    client = MentionClient([_user(11)])
+
+    await jobs._broadcast(
+        client, SimpleNamespace(id=8, message="пост", media=None), snapshot
+    )
+
+    assert client.participants_calls == [-100200, -300]
+    assert len(client.texts) == 2
+    for sent in client.texts:
+        assert [entity.url for entity in sent["entities"]] == ["tg://user?id=11"]

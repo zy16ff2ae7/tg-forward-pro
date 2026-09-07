@@ -772,12 +772,19 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
     struck: dict[int, str] = {}
     delivered: list[int] = []
     pin = bool(getattr(rule.filters, "pin_on_send", False))
+    mention = bool(getattr(rule.filters, "mention_all", False))
     for target in targets:
         try:
+            item_text, item_entities = text, None
+            if mention:
+                # Состав у каждого чата свой — упоминания собираем на каждый.
+                suffix, found = await mention_suffix(client, target, len(text))
+                item_text, item_entities = text + suffix, found or None
             posted = await send_copy(
-                client, target, message, text,
+                client, target, message, item_text,
                 buttons=getattr(rule.filters, "buttons", None),
                 topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
+                entities=item_entities,
             )
             sent += 1
             delivered.append(target)

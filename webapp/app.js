@@ -181,6 +181,53 @@ const FIELD_SPEC = {
     placeholder: '50',
     note: 'сколько последних постов забрать (до 500). 0 — только новые',
   },
+  pin_on_send: {
+    label: 'Закреплять отправленное',
+    control: 'check',
+    note: 'каждый новый пост закрепляется поверх прошлого',
+  },
+  topic: {
+    label: 'Ветка (топик)',
+    control: 'number',
+    placeholder: '0',
+    note: 'id темы в группе с топиками. 0 — в общую ленту. Только режим «копия»',
+  },
+  autodelete_hours: {
+    label: 'Удалять через часов',
+    control: 'number',
+    step: 'any',
+    placeholder: '0',
+    note: 'можно дробью: 0.5 — полчаса. 0 — хранить вечно',
+  },
+  mention_all: {
+    label: 'Упоминать всех участников',
+    control: 'check',
+    note: 'первые 30 живых, незаметно — без видимого текста',
+  },
+  delay_jitter: {
+    label: 'Разброс задержки (сек)',
+    control: 'number',
+    placeholder: '0',
+    note: 'к задержке добавляется случайных 0–N секунд',
+  },
+  gap_jitter: {
+    label: 'Разброс паузы между чатами (сек)',
+    control: 'number',
+    placeholder: '0',
+    note: '0 — пауза всегда одинаковая, роботов видно',
+  },
+  cycle_jitter: {
+    label: 'Разброс паузы между кругами (сек)',
+    control: 'number',
+    placeholder: '0',
+    note: 'только очередь: круги ходят с плавающим перерывом',
+  },
+  daily_cap: {
+    label: 'Отправок в сутки, не больше',
+    control: 'number',
+    placeholder: '0',
+    note: '0 — по прогреву аккаунта. Лишнее ждёт полуночи',
+  },
   schedule_only: { label: 'Только по датам (вместо кругов и окна)', control: 'check' },
   scheduled_posts: { label: 'Даты', control: 'schedule' },
 };
@@ -545,21 +592,21 @@ const DEMO_COMMAND_GROUPS = [
 const DEMO_COMMANDS = [
   { id: 'sender', group: 'own', kind: 'poster', kinds: ['poster', 'mailing'], emoji: '📤', title: 'Постинг и рассылка', status: 'ready',
     needs: ['account', 'targets', 'message'],
-    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview', 'alerts'],
+    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview', 'pin_on_send', 'topic', 'autodelete_hours', 'mention_all', 'gap_jitter', 'cycle_jitter', 'daily_cap', 'alerts'],
     description: 'Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.',
     hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
     tags: ['ваш текст', 'расписание или очередь'] },
   { id: 'copy_channel', group: 'publish', kind: 'forward', emoji: '🔁', title: 'Копирование канала', status: 'ready',
-    needs: ['account', 'source', 'target'], optional: ['mode', 'buttons', 'translate_to', 'uniquify', 'alerts'],
+    needs: ['account', 'source', 'target'], optional: ['mode', 'buttons', 'translate_to', 'uniquify', 'start', 'end', 'pin_on_send', 'topic', 'autodelete_hours', 'delay_jitter', 'daily_cap', 'alerts'],
     description: 'Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.',
     tags: ['чужие посты', 'один канал → один'] },
   { id: 'clone', group: 'publish', kind: 'clone', emoji: '📋', title: 'Клон канала', status: 'ready',
-    needs: ['account', 'source', 'target'], optional: ['history', 'buttons', 'translate_to', 'uniquify', 'alerts'],
+    needs: ['account', 'source', 'target'], optional: ['history', 'buttons', 'translate_to', 'uniquify', 'start', 'end', 'pin_on_send', 'topic', 'autodelete_hours', 'delay_jitter', 'daily_cap', 'alerts'],
     description: 'Ваш канал как зеркало чужого: сначала забирается история, дальше новые посты выходят сами.',
     hint: 'История забирается не залпом, а порциями — большой канал догрузится за несколько минут. Новые посты из источника выходят у вас сразу, не дожидаясь конца догрузки.',
     tags: ['чужие посты', 'с историей', 'один канал → один'] },
   { id: 'broadcast', group: 'publish', kind: 'broadcast', emoji: '📣', title: 'Пересылка в несколько чатов', status: 'ready',
-    needs: ['account', 'source', 'targets'], optional: ['buttons', 'translate_to', 'uniquify', 'alerts'],
+    needs: ['account', 'source', 'targets'], optional: ['buttons', 'translate_to', 'uniquify', 'start', 'end', 'pin_on_send', 'topic', 'autodelete_hours', 'mention_all', 'daily_cap', 'alerts'],
     description: 'Тот же канал — сразу в десятки чатов: пост из источника уходит во все выбранные одним залпом, как только вышел.',
     hint: 'Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу. Свой текст здесь не нужен: уходит то, что вышло в источнике.',
     tags: ['чужие посты', 'все чаты разом', 'по факту поста'] },
@@ -4267,7 +4314,8 @@ function fieldHtml(key) {
     </label>`;
   }
   const type = spec.control === 'number' ? 'number' : 'text';
-  const input = `<input type="${type}" id="task_${key}"
+  const step = spec.step ? ` step="${spec.step}"` : '';
+  const input = `<input type="${type}" id="task_${key}"${step}
       placeholder="${esc(spec.placeholder || '')}" autocomplete="off">`;
   const note = spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : '';
   // Поле с выбором чата: рядом с ним кнопка, которая открывает список чатов
@@ -4535,11 +4583,12 @@ function applyTaskPrefill(prefill) {
   // лишние для этой команды поля просто не находятся в разметке.
   ['keywords', 'reaction', 'limit', 'scan', 'online_within_hours', 'api_delay',
     'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'translate_to', 'history', 'invite_to',
-    'banned_words', 'max_warns', 'mute_hours']
+    'banned_words', 'max_warns', 'mute_hours', 'topic', 'autodelete_hours',
+    'delay_jitter', 'gap_jitter', 'cycle_jitter', 'daily_cap']
     .forEach((key) => setValue(key, prefill[key]));
   ['typing', 'random_pick', 'link_preview', 'schedule_only', 'uniquify', 'alerts', 'block_links',
     'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only',
-    'ignore_bots', 'ignore_archived', 'ignore_muted']
+    'ignore_bots', 'ignore_archived', 'ignore_muted', 'pin_on_send', 'mention_all']
     .forEach((key) => {
       const node = $(`task_${key}`);
       if (node) node.checked = Boolean(prefill[key]);
@@ -4604,7 +4653,7 @@ function applyTaskPrefill(prefill) {
    переключения режима обратно. */
 const SEND_MODE_FIELDS = {
   schedule: ['schedule_only', 'interval', 'start', 'end'],
-  queue: ['gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview'],
+  queue: ['gap', 'cycle', 'repeats', 'typing', 'random_pick', 'link_preview', 'cycle_jitter'],
 };
 
 /* ─────────────── Редактор дат постинга ─────────────── */
@@ -5186,6 +5235,12 @@ function collectTaskPayload() {
   number('cycle', values.cycle);
   number('repeats', values.repeats);
   number('history', values.history);
+  number('topic', values.topic);
+  number('autodelete_hours', values.autodelete_hours);
+  number('delay_jitter', values.delay_jitter);
+  number('gap_jitter', values.gap_jitter);
+  number('cycle_jitter', values.cycle_jitter);
+  number('daily_cap', values.daily_cap);
   number('max_warns', values.max_warns);
   number('mute_hours', values.mute_hours);
   flag('schedule_only', values.schedule_only);
@@ -5194,6 +5249,8 @@ function collectTaskPayload() {
   flag('random_pick', values.random_pick);
   flag('link_preview', values.link_preview);
   flag('uniquify', values.uniquify);
+  flag('pin_on_send', values.pin_on_send);
+  flag('mention_all', values.mention_all);
   flag('block_links', values.block_links);
   // Алерты — всегда явно: галочка стоит из коробки, и снятие на создании
   // должно выключать, а не теряться в «не прислали — значит по умолчанию».

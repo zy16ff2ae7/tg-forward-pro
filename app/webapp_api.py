@@ -148,6 +148,14 @@ def _as_int(value: Any, default: int) -> int:
         return default
 
 
+def _as_float(value: Any, default: float = 0.0) -> float:
+    """Число из формы с дробью: часы жизни 2.5 через int не пройдут."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _as_bool(value: Any) -> bool:
     """Галочка из формы: чекбокс приходит и булем, и строкой — принимаем оба."""
     if isinstance(value, bool):
@@ -884,6 +892,10 @@ async def _apply_task_settings(
         # московское «окно 10:00–20:00» работало 13:00–23:00 по Москве.
         if given("tz"):
             filters["window_tz"] = window_tz_minutes(payload.get("tz"))
+        if given("gap_jitter"):
+            filters["gap_jitter"] = max(
+                0, min(_as_int(payload.get("gap_jitter"), 0), 3600)
+            )
         # Расписание по датам вместо кругов: слоты проверяет normalize,
         # мусор отклоняется понятной ошибкой, а не чинится молча.
         if given("schedule_only"):
@@ -911,6 +923,42 @@ async def _apply_task_settings(
                 filters[field] = _as_bool(payload.get(field))
         await _own_texts(payload, filters, user_id=user_id, partial=partial)
 
+    # Утреннее окно: постер и рассылка уже разобрали его в своих ветках
+    # выше, остальным публикующим — тем же правилом и с теми же умолчаниями.
+    if kind in ("forward", "broadcast", "clone"):
+        if given("start"):
+            filters["window_start"] = str(payload.get("start") or "00:00")[:5]
+        if given("end"):
+            filters["window_end"] = str(payload.get("end") or "23:59")[:5]
+        if given("tz"):
+            filters["window_tz"] = window_tz_minutes(payload.get("tz"))
+    # Закреп, ветка и часы жизни — у всех, кто публикует в чужие чаты.
+    if kind in ("forward", "broadcast", "poster", "mailing", "clone"):
+        if given("pin_on_send"):
+            filters["pin_on_send"] = _as_bool(payload.get("pin_on_send"))
+        if given("topic"):
+            filters["topic_id"] = max(0, _as_int(payload.get("topic"), 0))
+        if given("autodelete_hours"):
+            filters["autodelete_hours"] = max(
+                0.0,
+                min(_as_float(payload.get("autodelete_hours"), 0.0), 24 * 30),
+            )
+    # Упоминание всех — там, где текст собирает сам воркер: рассылка,
+    # постинг и веер. У пересылки текст чужой — ей нечего упоминать.
+    if kind in ("mailing", "poster", "broadcast"):
+        if given("mention_all"):
+            filters["mention_all"] = _as_bool(payload.get("mention_all"))
+    # Джиттер задержки — у пересылки и клона; у рассылки и постинга свои
+    # джиттеры пауз, веер шлёт залпом.
+    if kind in ("forward", "clone"):
+        if given("delay_jitter"):
+            filters["delay_jitter"] = max(
+                0, min(_as_int(payload.get("delay_jitter"), 0), 3600)
+            )
+    # Дневной лимит — ручка поверх прогрева, у всех отправляющих.
+    if kind in ("forward", "broadcast", "poster", "mailing", "clone"):
+        if given("daily_cap"):
+            filters["daily_cap"] = max(0, _as_int(payload.get("daily_cap"), 0))
     # Письма о проблемах — у всех фоновых задач разом: разовым человек и так
     # смотрит в лицо, а фоновые ломаются тихо. Выключается галочкой.
     if kind in ("forward", "broadcast", "poster", "mailing", "clone",
@@ -1138,6 +1186,13 @@ async def create_task(request: web.Request) -> web.Response:
     # правка задачи не будет заново обходить диалоги ради того же списка.
     _remember_names(filters, [found_source, found_target, found_user, *chat_pairs])
     await _apply_task_settings(kind, payload, filters, user_id=user_id, targets=targets)
+    if kind == "forward" and mode == "forward" and int(filters.get("topic_id") or 0):
+        # Ветку Telegram умеет только у своих постов: форвард чужого в топик
+        # сервер не примет, и отказываем мы сразу — а не молча теряем посты.
+        return _json(
+            {"error": "Ветка работает только в режиме «копия» — форвард в топик нельзя"},
+            status=400,
+        )
 
     async with SessionLocal() as session:
         rule = await repo.add_rule(
@@ -1343,6 +1398,11 @@ async def update_task(request: web.Request) -> web.Response:
     await _apply_task_settings(
         kind, payload, filters, user_id=user_id, targets=targets, partial=True
     )
+    if kind == "forward" and mode == "forward" and int(filters.get("topic_id") or 0):
+        return _json(
+            {"error": "Ветка работает только в режиме «копия» — форвард в топик нельзя"},
+            status=400,
+        )
 
     async with SessionLocal() as session:
         rule = await repo.get_rule(session, task_id, user_id)
@@ -2885,6 +2945,19 @@ def _task_view(
         view["banned_count"] = len(
             [word for word in (conf.banned_words or []) if str(word).strip()]
         )
+    if kind in ("forward", "broadcast", "poster", "mailing", "clone"):
+        # Окно постер уже показал выше — остальным те же три поля: иначе
+        # карточка молчит о том, что задача половину суток спит.
+        if kind != "poster":
+            view["window_start"] = conf.window_start
+            view["window_end"] = conf.window_end
+            view["window_tz"] = window_tz_minutes(conf.window_tz)
+        view["pin_on_send"] = bool(conf.pin_on_send)
+        view["topic_id"] = int(conf.topic_id or 0)
+        view["autodelete_hours"] = float(conf.autodelete_hours or 0.0)
+        view["daily_cap"] = int(conf.daily_cap or 0)
+    if kind in ("mailing", "poster", "broadcast"):
+        view["mention_all"] = bool(conf.mention_all)
     if kind in ("broadcast", "poster", "mailing"):
         # Сколько мёртвых чатов задача уже убрала сама: авто-уборка обязана
         # быть видна, иначе пропавшие получатели выглядят как баг.
@@ -3033,6 +3106,26 @@ def _edit_view(
             if isinstance(item, dict)
         ]
     if kind in ("forward", "broadcast", "clone"):
+        # Постер и рассылка своё окно уже отдали ниже — у них поля окна
+        # привязаны к переключателю режима, а здесь окно всегда видно.
+        edit["start"] = conf.window_start
+        edit["end"] = conf.window_end
+        edit["tz"] = window_tz_minutes(conf.window_tz)
+    if kind in ("forward", "broadcast", "poster", "mailing", "clone"):
+        edit["pin_on_send"] = bool(conf.pin_on_send)
+        edit["topic"] = int(conf.topic_id or 0)
+        edit["autodelete_hours"] = float(conf.autodelete_hours or 0.0)
+        edit["daily_cap"] = int(conf.daily_cap or 0)
+    if kind in ("mailing", "poster", "broadcast"):
+        edit["mention_all"] = bool(conf.mention_all)
+    if kind in ("forward", "clone"):
+        edit["delay_jitter"] = int(conf.delay_jitter or 0)
+    if kind in ("poster", "mailing"):
+        # Форма у постинга и рассылки одна на двоих: разброс кругов постер
+        # от сервера не примет, но показать умолчание обязан — как gap/cycle.
+        edit["gap_jitter"] = int(conf.gap_jitter or 0)
+        edit["cycle_jitter"] = int(conf.cycle_jitter or 0)
+    if kind in ("forward", "broadcast", "clone"):
         edit["translate_to"] = conf.translate_to or ""
     if kind in ("forward", "broadcast", "clone"):
         edit["uniquify"] = bool(conf.uniquify)
@@ -3161,7 +3254,7 @@ COMMANDS: list[dict] = [
         "description": "Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.",
         "status": "ready",
         "needs": ["account", "targets", "message"],
-        "optional": ["send_mode", "schedule_only", "scheduled_posts", "buttons", "interval", "start", "end", "gap", "cycle", "repeats", "typing", "random_pick", "link_preview", "alerts"],
+        "optional": ["send_mode", "schedule_only", "scheduled_posts", "buttons", "interval", "start", "end", "gap", "cycle", "repeats", "typing", "random_pick", "link_preview", "pin_on_send", "topic", "autodelete_hours", "mention_all", "gap_jitter", "cycle_jitter", "daily_cap", "alerts"],
         "hint": "Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.",
         "tags": ["ваш текст", "расписание или очередь"],
     },
@@ -3174,7 +3267,7 @@ COMMANDS: list[dict] = [
         "description": "Один канал — в один ваш: новый пост появился в источнике и сразу выходит у вас, с заменами текста.",
         "status": "ready",
         "needs": ["account", "source", "target"],
-        "optional": ["mode", "buttons", "translate_to", "uniquify", "alerts"],
+        "optional": ["mode", "buttons", "translate_to", "uniquify", "start", "end", "pin_on_send", "topic", "autodelete_hours", "delay_jitter", "daily_cap", "alerts"],
         "tags": ["чужие посты", "один канал → один"],
     },
     {
@@ -3186,7 +3279,7 @@ COMMANDS: list[dict] = [
         "description": "Ваш канал как зеркало чужого: сначала забирается история, дальше новые посты выходят сами.",
         "status": "ready",
         "needs": ["account", "source", "target"],
-        "optional": ["history", "buttons", "translate_to", "uniquify", "alerts"],
+        "optional": ["history", "buttons", "translate_to", "uniquify", "start", "end", "pin_on_send", "topic", "autodelete_hours", "delay_jitter", "daily_cap", "alerts"],
         "hint": "История забирается не залпом, а порциями — большой канал догрузится за несколько минут. Новые посты из источника выходят у вас сразу, не дожидаясь конца догрузки.",
         "tags": ["чужие посты", "с историей", "один канал → один"],
     },
@@ -3205,7 +3298,7 @@ COMMANDS: list[dict] = [
         # них всё равно становится главным. Два поля под одно и то же заставляли
         # заполнять «приёмник» руками даже при выборе чатов мышкой.
         "needs": ["account", "source", "targets"],
-        "optional": ["buttons", "translate_to", "uniquify", "alerts"],
+        "optional": ["buttons", "translate_to", "uniquify", "start", "end", "pin_on_send", "topic", "autodelete_hours", "mention_all", "daily_cap", "alerts"],
         "hint": "Источник — откуда берём пост, чаты — куда он уйдёт. Отмечайте кнопкой «выбрать» — сколько нужно, хоть все сразу. Свой текст здесь не нужен: уходит то, что вышло в источнике.",
         "tags": ["чужие посты", "все чаты разом", "по факту поста"],
     },
