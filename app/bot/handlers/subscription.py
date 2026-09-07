@@ -541,7 +541,7 @@ async def pay_gift_period(callback: CallbackQuery, state: FSMContext) -> None:
         if callback.message is not None:
             await smart_edit(
                 callback.message,
-                "Не удалось разобрать подарок. Начните заново: «🎁 Подарить абонемент».",
+                "Не удалось разобрать подарок. Начните заново: «💝 Подарить абонемент».",
                 reply_markup=kb.payment_menu(callback.from_user.id),
             )
         return

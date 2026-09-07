@@ -288,7 +288,7 @@ def payment_menu(user_id: int | None = None) -> InlineKeyboardMarkup:
     # Подарок другу — звёздами, как себе: счёт тот же, получатель другой.
     if "stars" in settings.inline_payment_methods():
         builder.row(
-            InlineKeyboardButton(text="🎁 Подарить абонемент", callback_data="pay:gift")
+            InlineKeyboardButton(text="💝 Подарить абонемент", callback_data="pay:gift")
         )
     inline_methods = settings.inline_payment_methods()
     for method in inline_methods:

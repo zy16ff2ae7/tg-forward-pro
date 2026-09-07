@@ -237,7 +237,7 @@ async def test_gift_consumes_giver_discount(create_user):
     await create_user(id=FRIEND_ID)
     cheap = int(apply_discount(stars_amount(1), settings.referral_discount_percent))
     async with session_scope() as session:
-        promo = await repo.mint_referral_discount(
+        promo = await repo.mint_personal_discount(
             session, GIVER_ID, settings.referral_discount_percent
         )
         from app import promocode

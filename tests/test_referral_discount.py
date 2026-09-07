@@ -127,7 +127,7 @@ async def test_second_discount_waits_its_turn(create_user):
         first = await promocode.redeem(session, FRIEND_ID, result.friend_code)
         assert first.granted
         second_code = (
-            await repo.mint_referral_discount(session, FRIEND_ID, 5)
+            await repo.mint_personal_discount(session, FRIEND_ID, 5)
         ).code
         await session.commit()
     async with session_scope() as session:
@@ -328,7 +328,7 @@ async def test_invoice_endpoint_discounts_one_time(bot_client, auth_headers, cre
     """Кабинет: разовый инвойс дешевле, размер скидки — в ответе."""
     await create_user(id=TEST_USER_ID)
     async with session_scope() as session:
-        promo = await repo.mint_referral_discount(
+        promo = await repo.mint_personal_discount(
             session, TEST_USER_ID, settings.referral_discount_percent
         )
         activated = await promocode.redeem(session, TEST_USER_ID, promo.code)
@@ -357,7 +357,7 @@ async def test_invoice_endpoint_keeps_autorenew_full(
     """Кабинет: автопродление — по полному тарифу, скидка ждёт дальше."""
     await create_user(id=TEST_USER_ID)
     async with session_scope() as session:
-        promo = await repo.mint_referral_discount(
+        promo = await repo.mint_personal_discount(
             session, TEST_USER_ID, settings.referral_discount_percent
         )
         activated = await promocode.redeem(session, TEST_USER_ID, promo.code)

@@ -196,6 +196,8 @@ async def activate_subscription(
         sub.active_until = new_until
         sub.reminded_at = None
         sub.expired_notified_at = None
+        sub.lastday_notified_at = None
+        sub.winback_notified_at = None
     await session.flush()
     return new_until
 
@@ -236,6 +238,8 @@ async def add_subscription_days(
         sub.active_until = new_until
         sub.reminded_at = None
         sub.expired_notified_at = None
+        sub.lastday_notified_at = None
+        sub.winback_notified_at = None
     await session.flush()
     return new_until
 
@@ -339,7 +343,7 @@ async def reward_referrer(
     if days > 0:
         await add_subscription_days(session, referrer_id, days)
     if percent > 0:
-        code = (await mint_referral_discount(session, referrer_id, percent)).code
+        code = (await mint_personal_discount(session, referrer_id, percent)).code
     return referrer_id, code
 
 
@@ -406,10 +410,10 @@ _REF_CODE_LENGTH = 6
 _REF_MINT_ATTEMPTS = 5
 
 
-async def mint_referral_discount(
+async def mint_personal_discount(
     session: AsyncSession, owner_id: int, percent: int
 ) -> PromoCode:
-    """Личный одноразовый код на скидку: друг и пригласивший получают по такому.
+    """Личный одноразовый код на скидку: рефералка и возврат ушедших.
 
     Код случайный и личный: угадать чужой нельзя, активировать — тоже.
     Одноразовость держит не счётчик, а гашение при зачёте платежа: код гаснет
@@ -721,6 +725,59 @@ async def mark_reminded(session: AsyncSession, user_id: int) -> None:
     if sub is not None:
         sub.reminded_at = utcnow()
         await session.flush()
+
+
+async def expiring_last_day(session: AsyncSession) -> Sequence[Subscription]:
+    """Живые абонементы, которым осталось меньше суток и первое письмо уже ушло.
+
+    Второе напоминание шлётся строго после первого: ``reminded_at`` обязателен,
+    иначе человек с коротким периодом получал бы «последний день» раньше, чем
+    «скоро конец». Уже предупреждённые и уже истёкшие сюда не попадают.
+    """
+    now = utcnow()
+    result = await session.execute(
+        select(Subscription).where(
+            Subscription.active_until > now,
+            Subscription.active_until <= now + timedelta(days=1),
+            Subscription.reminded_at.is_not(None),
+            Subscription.lastday_notified_at.is_(None),
+        )
+    )
+    return result.scalars().all()
+
+
+async def mark_lastday_notified(session: AsyncSession, sub: Subscription) -> None:
+    sub.lastday_notified_at = utcnow()
+    await session.flush()
+
+
+async def subscriptions_awaiting_winback(
+    session: AsyncSession, days_after: int
+) -> Sequence[Subscription]:
+    """Кончившиеся N дней назад — кандидаты в возврат.
+
+    Письмо о конце им уже ушло (цепочка по порядку), новых денег с тех пор не
+    было (иначе active_until был бы в будущем). Копилка и задачи проверяются
+    вызывающим: у него уже есть сессия и счётчики, а выборке они ни к чему.
+    """
+    if days_after <= 0:
+        return []
+    now = utcnow()
+    result = await session.execute(
+        select(Subscription)
+        .where(
+            Subscription.active_until <= now - timedelta(days=days_after),
+            Subscription.expired_notified_at.is_not(None),
+            Subscription.winback_notified_at.is_(None),
+        )
+        .order_by(Subscription.user_id)
+    )
+    return result.scalars().all()
+
+
+async def mark_winback_notified(session: AsyncSession, sub: Subscription) -> None:
+    sub.winback_notified_at = utcnow()
+    await session.flush()
 
 
 async def bank_days(session: AsyncSession, user_id: int, days: int) -> int:

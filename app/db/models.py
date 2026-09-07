@@ -155,6 +155,13 @@ class Subscription(Base):
     # Когда сказали, что срок вышел и задачи встали. Одна беда — одно письмо;
     # продление метку снимает, чтобы о следующем конце сказать снова.
     expired_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # «Последний день»: второе напоминание — за сутки до конца. Шлётся после
+    # первого (reminded_at обязателен), продление снимает обе метки.
+    lastday_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Возврат ушедшего: письмо с личным промокодом через неделю после конца.
+    # Только тем, у кого стоят задачи и пустая копилка: замороженные дни —
+    # осознанная пауза, а не уход, таких дёргать не надо.
+    winback_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Копилка: дни, снятые с активного периода и ждущие распределения.
     # В отличие от active_until они не «горят» — не привязаны к конкретной дате.
     banked_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

@@ -97,7 +97,7 @@ async def test_deferred_does_not_take_a_slot(create_user):
     """Отказ «сначала потратьте скидку» места в лимите не занимает."""
     first, second = await create_user(), await create_user()
     async with session_scope() as session:
-        personal = await repo.mint_referral_discount(session, first, 5)
+        personal = await repo.mint_personal_discount(session, first, 5)
         await repo.create_promo_code(
             session, "FLASH2", 0, max_uses=1, percent=10, created_by=ADMIN_ID
         )

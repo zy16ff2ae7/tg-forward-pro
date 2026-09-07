@@ -73,7 +73,7 @@ async def apply(
     percent = discount_percent()
     if status == "granted" and percent > 0:
         friend_code = (
-            await repo.mint_referral_discount(session, user_id, percent)
+            await repo.mint_personal_discount(session, user_id, percent)
         ).code
     return Referral(status, days=settings.referral_days, friend_code=friend_code)
 

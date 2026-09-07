@@ -102,6 +102,8 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "banked_days": "INTEGER NOT NULL DEFAULT 0",
         "period_start": "DATETIME",
         "expired_notified_at": "DATETIME",
+        "lastday_notified_at": "DATETIME",
+        "winback_notified_at": "DATETIME",
     },
     "payments": {
         "tx_id": "TEXT",

@@ -57,6 +57,39 @@ async def notify_expiring(bot: Bot) -> None:
             logger.debug("Не смогли напомнить пользователю {}", user_id)
 
 
+def lastday_text() -> str:
+    """Второе напоминание — за сутки до конца: короче первого, злее."""
+    return (
+        "⏳ <b>Последний день абонемента.</b>\n\n"
+        "Завтра пересылка остановится. Продлите сегодня — это займёт минуту."
+    )
+
+
+async def notify_last_day(bot: Bot) -> None:
+    """Напоминает тем, у кого абонемент кончается в ближайшие сутки.
+
+    Первое письмо («скоро конец») к этому моменту уже ушло — порядок держит
+    выборка. Метку ставим до отправки, как везде в этом файле: цикл ходит
+    каждые пять минут, а беда одна.
+    """
+    async with SessionLocal() as session:
+        subs = list(await repo.expiring_last_day(session))
+        user_ids = [sub.user_id for sub in subs]
+        for sub in subs:
+            await repo.mark_lastday_notified(session, sub)
+        await session.commit()
+
+    from app.bot.keyboards import payment_menu
+
+    for user_id in user_ids:
+        try:
+            await bot.send_message(
+                user_id, lastday_text(), reply_markup=payment_menu(user_id)
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Не смогли напомнить пользователю {}", user_id)
+
+
 DEAD_ACCOUNT_LEAD = "🔴 <b>{phone}</b> отключился от сервиса."
 
 
@@ -160,6 +193,63 @@ async def notify_expired(bot: Bot) -> None:
             logger.debug("Не смогли сказать пользователю {} про конец срока", user_id)
 
 
+def winback_text(rules: int, code: str, percent: int) -> str:
+    """Письмо возврата: задачи стоят неделю — вот личный промокод, вернитесь.
+
+    Число задач — та же причина, что в письме о конце: «у вас всё стоит»
+    без числа — попытка продать воздух. Код личный и одноразовый: общий
+    разлетелся бы по чатам, а письмо — персональное.
+    """
+    return (
+        "💸 <b>Ваши задачи стоят неделю.</b>\n\n"
+        f"Без абонемента пересылка выключена: задач — {rules}. Возвращайтесь — "
+        f"вот личный промокод на <b>−{percent}%</b>: <code>{code}</code>\n"
+        "Введите его в «Промокод» — ближайшая оплата станет дешевле."
+    )
+
+
+async def notify_winback(bot: Bot) -> None:
+    """Возвращает ушедших: неделя после конца + личный промокод на скидку.
+
+    Самые дешёвые деньги — те, кто уже платил: они знают сервис, и уговаривать
+    их не надо — достаточно позвать. Пишем только тем, у кого стоят задачи
+    (иначе звать не с чем) и пустая копилка (замороженные дни — осознанная
+    пауза, а не уход). Без процента (``WINBACK_PERCENT=0``) писем нет вовсе:
+    дёргать ушедшего без подарка — спам, а не возврат.
+
+    Код минтится до отправки и в той же транзакции, что метка: письмо без кода
+    не уйдёт, а код без письма не повиснет.
+    """
+    percent = max(0, settings.winback_percent)
+    async with SessionLocal() as session:
+        notices: list[tuple[int, str]] = []
+        if percent > 0:
+            for sub in await repo.subscriptions_awaiting_winback(
+                session, settings.winback_days_after
+            ):
+                await repo.mark_winback_notified(session, sub)
+                if (sub.banked_days or 0) > 0:
+                    continue
+                rules = await repo.count_working_rules(session, user_id=sub.user_id)
+                if not rules:
+                    continue
+                promo = await repo.mint_personal_discount(
+                    session, sub.user_id, percent
+                )
+                notices.append(
+                    (sub.user_id, winback_text(rules, promo.code, percent))
+                )
+        await session.commit()
+
+    from app.bot.keyboards import payment_menu
+
+    for user_id, text in notices:
+        try:
+            await bot.send_message(user_id, text, reply_markup=payment_menu(user_id))
+        except Exception:  # noqa: BLE001
+            logger.debug("Не смогли позвать пользователя {} обратно", user_id)
+
+
 async def trim_logs(_bot: Bot) -> None:
     """Подрезает журнал пересылок и убирает строки удалённых задач.
 
@@ -197,7 +287,9 @@ async def run_background_checks(bot: Bot) -> None:
         ("USDT", crypto.check_pending),
         ("ЮKassa", yookassa.check_pending),
         ("напоминания о продлении", notify_expiring),
+        ("последний день", notify_last_day),
         ("конец абонемента", notify_expired),
+        ("возврат ушедших", notify_winback),
         ("выпавшие аккаунты", notify_dead_accounts),
         ("уборка базы", trim_logs),
     )

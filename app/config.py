@@ -114,6 +114,12 @@ class Settings:
     trial_days: int = 0
     max_rules_free: int = 3
     renew_remind_days: int = 3
+    # Возврат ушедших: через сколько дней после конца слать письмо
+    # с личным промокодом. 0 — не возвращать.
+    winback_days_after: int = 7
+    # Размер личного промокода в письме возврата. 0 — письма без кода нет:
+    # дёргать ушедшего без подарка — спам, а не возврат.
+    winback_percent: int = 10
 
     # Подарок за подписку на канал сервиса: разово, один раз на аккаунт.
     # Пусто — бонуса нет нигде: ни карточки в кабинете, ни кнопки в боте.
@@ -581,6 +587,10 @@ def load_settings() -> Settings:
         trial_days=_get_int("TRIAL_DAYS", 0),
         max_rules_free=_get_int("MAX_RULES_FREE", 3),
         renew_remind_days=_get_int("RENEW_REMIND_DAYS", 3),
+        winback_days_after=max(0, _get_int("WINBACK_DAYS_AFTER", 7)),
+        winback_percent=max(
+            0, min(90, _get_int("WINBACK_PERCENT", 10))
+        ),
         bonus_channel=_get("BONUS_CHANNEL"),
         bonus_days=max(0, _get_int("BONUS_DAYS", 3)),
         referral_days=max(0, _get_int("REFERRAL_DAYS", 5)),
