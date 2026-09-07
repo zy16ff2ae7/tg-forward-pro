@@ -248,6 +248,18 @@ def clean_menu(rule_id: int, filters: dict) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def resume_payment_button(payment_id: int, amount: int) -> InlineKeyboardMarkup:
+    """Одна кнопка «закончить оплату» — для письма о брошенном счёте."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"⚡ Оплатить {amount} ⭐",
+                callback_data=f"pay:resume:{payment_id}",
+            )]
+        ]
+    )
+
+
 def cabinet_button() -> InlineKeyboardMarkup | None:
     """Одна кнопка «Открыть кабинет» — для писем, где меню ни к чему.
 

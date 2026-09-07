@@ -24,6 +24,7 @@ from app.bot.utils import ensure_user, smart_edit
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
+from app.db.models import Payment
 from app.errors import AppError
 from app.payments import crypto, service, yookassa
 from app.plans import (
@@ -407,6 +408,45 @@ async def pay_stars(callback: CallbackQuery) -> None:
         await smart_edit(callback.message, text, reply_markup=kb.stars_periods())
 
 
+async def send_stars_sub_invoice(bot, user_id: int, months: int) -> None:
+    """Выставляет разовый счёт Stars и пишет его висящую строку.
+
+    Строка нужна раньше денег: по ней зачёт находит, что закрыть, а джоба
+    брошенных счетов — о чём напомнить. Один отправитель на первичное
+    выставление и на «закончить оплату» из письма-напоминания.
+    """
+    amount = stars_amount(months)
+    description = STARS_DESCRIPTION
+    async with SessionLocal() as session:
+        pending = await repo.pending_discount(session, user_id)
+        if pending is not None:
+            # Скидка применяется здесь, а гаснет при зачёте платежа:
+            # неоплаченный счёт её не сжигает, и кнопки сроков врут в меньшую
+            # сторону осознанно — точную цену человек видит в самом счёте.
+            amount = int(apply_discount(amount, int(pending.percent or 0)))
+            description = f"{STARS_DESCRIPTION} Скидка {pending.percent}% по промокоду."
+        await repo.create_payment(
+            session,
+            user_id=user_id,
+            provider="stars",
+            amount=float(amount),
+            currency="XTR",
+            months=months,
+        )
+        await session.commit()
+    title = f"Абонемент на {months} мес."
+    await bot.send_invoice(
+        chat_id=user_id,
+        title=title,
+        description=description,
+        # Формат читает хендлер successful_payment — менять нельзя.
+        payload=f"sub:{user_id}:{months}",
+        provider_token="",  # для Stars токен не нужен
+        currency="XTR",
+        prices=[LabeledPrice(label=title, amount=amount)],
+    )
+
+
 @router.callback_query(F.data.startswith("pay:stars:"))
 async def pay_stars_period(callback: CallbackQuery) -> None:
     """Шаг 2: выставить счёт на выбранный срок."""
@@ -425,28 +465,44 @@ async def pay_stars_period(callback: CallbackQuery) -> None:
                 reply_markup=kb.stars_periods(),
             )
         return
+    await send_stars_sub_invoice(callback.bot, callback.from_user.id, months)
 
-    amount = stars_amount(months)
-    description = STARS_DESCRIPTION
+
+@router.callback_query(F.data.startswith("pay:resume:"))
+async def pay_resume_abandoned(callback: CallbackQuery) -> None:
+    """«Закончить оплату» из письма-напоминания: свежий счёт на тот же срок.
+
+    Старый счёт помечается истёкшим, чтобы джоба не напоминала дважды, но
+    технически остаётся оплачиваемым — заплативший по нему закроет новый
+    висящий счёт тем же зачётом: деньги есть деньги.
+    """
+    await callback.answer()
+    assert callback.from_user is not None and callback.data is not None
+    try:
+        payment_id = int(callback.data.split(":")[-1])
+    except ValueError:
+        return
     async with SessionLocal() as session:
-        pending = await repo.pending_discount(session, callback.from_user.id)
-    if pending is not None:
-        # Скидка применяется здесь, а гаснет при зачёте платежа: неоплаченный
-        # счёт её не сжигает, и кнопки сроков врут в меньшую сторону осознанно —
-        # точную цену человек видит в самом счёте.
-        amount = int(apply_discount(amount, int(pending.percent or 0)))
-        description = f"{STARS_DESCRIPTION} Скидка {pending.percent}% по промокоду."
-    title = f"Абонемент на {months} мес."
-    await callback.bot.send_invoice(
-        chat_id=callback.from_user.id,
-        title=title,
-        description=description,
-        # Формат читает хендлер successful_payment — менять нельзя.
-        payload=f"sub:{callback.from_user.id}:{months}",
-        provider_token="",  # для Stars токен не нужен
-        currency="XTR",
-        prices=[LabeledPrice(label=title, amount=amount)],
-    )
+        payment = await session.get(Payment, payment_id)
+        if (
+            payment is None
+            or payment.user_id != callback.from_user.id
+            or payment.provider != "stars"
+            or payment.status != "pending"
+            or payment.external_id is not None
+        ):
+            await callback.answer("Этот счёт уже закрыт — выставите новый из подписки.")
+            return
+        months = payment.months
+        payment.status = "expired"
+        await session.commit()
+    await send_stars_sub_invoice(callback.bot, callback.from_user.id, months)
+    if callback.message is not None:
+        await smart_edit(
+            callback.message,
+            "Свежий счёт уже в чате — он выше, с кнопкой «Оплатить».",
+            reply_markup=kb.back_to_main(),
+        )
 
 
 @router.callback_query(F.data == "pay:stars:auto")
@@ -704,15 +760,28 @@ async def on_stars_paid(message: Message) -> None:
             )
             await session.commit()
             return
-        await repo.create_payment(
-            session,
-            user_id=user_id,
-            provider="stars",
-            amount=payment.total_amount,
-            currency=payment.currency,
-            months=months,
-            external_id=payment.telegram_payment_charge_id,
-        )
+        if kind == "gift":
+            created = await repo.create_payment(
+                session,
+                user_id=user_id,
+                provider="stars",
+                amount=payment.total_amount,
+                currency=payment.currency,
+                months=months,
+                external_id=payment.telegram_payment_charge_id,
+            )
+            # Подарок висящих строк не пишет, но оплаченным быть обязан:
+            # раньше статус оставался «pending» навсегда.
+            await repo.mark_payment_paid(session, created)
+        else:
+            await repo.confirm_stars_payment(
+                session,
+                user_id=user_id,
+                months=months,
+                amount=float(payment.total_amount),
+                currency=payment.currency,
+                external_id=payment.telegram_payment_charge_id,
+            )
         # Подарок включает абонемент не плательщику, а другу. Строка платежа
         # пишется на плательщика: платил он, ему и чек.
         recipient_id = friend_id if kind == "gift" else user_id

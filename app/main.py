@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from datetime import timedelta
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -307,6 +308,61 @@ async def notify_onboarding(bot: Bot) -> None:
             logger.debug("Не смогли написать новичку {}", user_id)
 
 
+# Через час после выставления счёт считается брошенным: человек ушёл
+# думать — или просто отвлёкся. Раньше напоминал бы спам, позже — человек
+# уже остыл.
+ABANDONED_AFTER = timedelta(hours=1)
+
+
+def abandoned_text(months: int, amount: int) -> str:
+    """Письмо о брошенном счёте: что не докуплено и что нажать."""
+    return (
+        "💳 <b>Вы не закончили оплату.</b>\n\n"
+        f"Абонемент на {months} мес. ({amount} ⭐) ждёт — закончить можно "
+        "одной кнопкой:"
+    )
+
+
+async def notify_abandoned_payments(bot: Bot) -> None:
+    """Напоминает о брошенных счетах Stars — через час, один раз.
+
+    Классика конверсии: счёт выставлен, деньги не пришли. Пишем только про
+    самый свежий висящий счёт человека (старые помечаем молча — он их уже
+    перезаказал сам) и только если с тех пор не было оплаты другим счётом.
+    Кнопка выставляет свежий счёт на тот же срок: перевыпуск надёжнее
+    пересылки старого инвойса, который мог протухнуть.
+
+    Метки — до отправки, как везде в этом файле: цикл ходит каждые пять
+    минут, а письмо положено одно.
+    """
+    async with SessionLocal() as session:
+        notices: list[tuple[int, str, int, int]] = []
+        seen: set[int] = set()
+        for payment in await repo.abandoned_payments(session, ABANDONED_AFTER):
+            await repo.mark_payment_reminded(session, payment)
+            if payment.user_id in seen:
+                continue
+            seen.add(payment.user_id)
+            if await repo.paid_after(session, payment.user_id, payment.created_at):
+                continue
+            notices.append(
+                (payment.user_id, abandoned_text(payment.months, int(payment.amount)),
+                 payment.id, int(payment.amount))
+            )
+        await session.commit()
+
+    from app.bot.keyboards import resume_payment_button
+
+    for user_id, text, payment_id, amount in notices:
+        try:
+            await bot.send_message(
+                user_id, text,
+                reply_markup=resume_payment_button(payment_id, amount),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Не смогли напомнить пользователю {} про счёт", user_id)
+
+
 async def trim_logs(_bot: Bot) -> None:
     """Подрезает журнал пересылок и убирает строки удалённых задач.
 
@@ -348,6 +404,7 @@ async def run_background_checks(bot: Bot) -> None:
         ("конец абонемента", notify_expired),
         ("возврат ушедших", notify_winback),
         ("онбординг новичков", notify_onboarding),
+        ("брошенные счета", notify_abandoned_payments),
         ("выпавшие аккаунты", notify_dead_accounts),
         ("уборка базы", trim_logs),
     )

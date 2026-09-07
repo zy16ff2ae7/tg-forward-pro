@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import secrets
 from datetime import datetime, timedelta
-from typing import Sequence
+from typing import Any, Sequence
 
 from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -655,6 +655,20 @@ def _reminder_is_premature(sub: Subscription, now: datetime) -> bool:
     return (sub.active_until - now) > (sub.active_until - start) / 2
 
 
+def _money_was_paid() -> Any:
+    """Предикат «деньги были»: статус paid либо старый след Stars.
+
+    Зачёт звёзд долго не ставил статус вовсе: оплаченные строки висят
+    «pending» с заполненным external_id (id списания в Telegram). Новые
+    висящие счета external_id не имеют — он появляется только в момент
+    оплаты. Поэтому «звёзды с чеком» — это тоже оплата, а не брошенный счёт.
+    """
+    return or_(
+        Payment.status == "paid",
+        and_(Payment.provider == "stars", Payment.external_id.is_not(None)),
+    )
+
+
 def _bonus_only_chain() -> exists:
     """Бонусник, который ещё ни разу не платил.
 
@@ -664,7 +678,7 @@ def _bonus_only_chain() -> exists:
     Заплативший хоть раз возвращается в общую цепочку.
     """
     paid = select(Payment.id).where(
-        Payment.user_id == User.id, Payment.status == "paid"
+        Payment.user_id == User.id, _money_was_paid()
     )
     return exists(
         select(User.id).where(
@@ -802,7 +816,7 @@ async def has_paid(session: AsyncSession, user_id: int) -> bool:
     """Платил ли человек хоть раз. Разделяет клиентов и бонусников."""
     result = await session.execute(
         select(Payment.id).where(
-            Payment.user_id == user_id, Payment.status == "paid"
+            Payment.user_id == user_id, _money_was_paid()
         )
     )
     return result.scalar_one_or_none() is not None
@@ -1496,6 +1510,93 @@ async def create_payment(
     session.add(payment)
     await session.flush()
     return payment
+
+
+async def confirm_stars_payment(
+    session: AsyncSession,
+    user_id: int,
+    months: int,
+    amount: float,
+    currency: str,
+    external_id: str,
+) -> Payment:
+    """Зачёт звёзд: висящий счёт — в оплаченные, иначе — новая строка.
+
+    Счёт выставляется раньше оплаты (строка pending без external_id), деньги
+    приходят позже апдейтом successful_payment. Ищем самый свежий висящий
+    счёт на тот же срок и закрываем его: сумма пишется фактическая — скидка
+    могла измениться между выставлением и оплатой. Не нашли (старый счёт,
+    рекуррентное списание) — пишем оплаченную строку, как раньше.
+    """
+    result = await session.execute(
+        select(Payment)
+        .where(
+            Payment.user_id == user_id,
+            Payment.provider == "stars",
+            Payment.status == "pending",
+            Payment.external_id.is_(None),
+            Payment.months == months,
+        )
+        .order_by(Payment.created_at.desc(), Payment.id.desc())
+    )
+    payment = result.scalars().first()
+    if payment is None:
+        payment = Payment(
+            user_id=user_id, provider="stars", amount=amount,
+            currency=currency, months=months, external_id=external_id,
+        )
+        session.add(payment)
+    else:
+        payment.amount = amount
+        payment.external_id = external_id
+    payment.status = "paid"
+    payment.paid_at = utcnow()
+    await session.flush()
+    return payment
+
+
+async def abandoned_payments(
+    session: AsyncSession, older_than: timedelta
+) -> list[Payment]:
+    """Брошенные счета Stars: висят дольше часа, о них ещё не напоминали.
+
+    Только разовые счета на себя: автопродление и подарки — осознанные
+    покупки, дёргать за них — спам. Их хендлеры висящих строк не пишут,
+    поэтому здесь их нет по построению, а не по фильтру.
+    """
+    cutoff = utcnow() - older_than
+    result = await session.execute(
+        select(Payment)
+        .where(
+            Payment.provider == "stars",
+            Payment.status == "pending",
+            Payment.external_id.is_(None),
+            Payment.created_at < cutoff,
+            Payment.reminded_at.is_(None),
+        )
+        .order_by(Payment.user_id, Payment.created_at.desc(), Payment.id.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def paid_after(
+    session: AsyncSession, user_id: int, moment: datetime
+) -> bool:
+    """Платил ли человек после момента. Оплативший другим счётом после
+    брошенного — уже клиент: напоминать ему не о чем."""
+    result = await session.execute(
+        select(Payment.id).where(
+            Payment.user_id == user_id,
+            _money_was_paid(),
+            Payment.created_at > moment,
+        )
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def mark_payment_reminded(session: AsyncSession, payment: Payment) -> None:
+    payment.reminded_at = utcnow()
+    await session.flush()
 
 
 async def get_payment_by_external_id(

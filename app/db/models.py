@@ -207,6 +207,9 @@ class Payment(Base):
     months: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     # pending | paid | failed | expired
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    # Когда напомнили о брошенном счёте. Письмо одно: повторные пинги —
+    # уже вымогательство, а не забота.
+    reminded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     external_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # Для USDT: уникальная сумма-метка, по которой ищем перевод
     memo: Mapped[str | None] = mapped_column(String(64), nullable=True)

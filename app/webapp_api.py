@@ -2382,6 +2382,20 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
             status="invoice_failed",
         ) from exc
 
+    if gift_to is None and not autorenew:
+        # Разовый счёт на себя — кандидат в брошенные: пишем висящую строку,
+        # чтобы зачёт нашёл что закрыть, а джоба — о чём напомнить. Подарки
+        # и автопродление осознанные, их не дёргаем. Строки может не быть
+        # (кабинет открывают и без /start) — тогда счёт без следа: ронять
+        # оплату из-за аналитики нельзя.
+        async with SessionLocal() as session:
+            if await repo.get_user(session, user_id) is not None:
+                await repo.create_payment(
+                    session, user_id=user_id, provider="stars",
+                    amount=float(amount), currency="XTR", months=months,
+                )
+                await session.commit()
+
     return _json(
         {
             "url": link,
