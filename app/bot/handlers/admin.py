@@ -178,6 +178,7 @@ async def _show_panel(message: Message, text: str | None = None) -> None:
     )
 
 
+@router.callback_query(F.data == "admin:panel")
 async def show_admin(callback: CallbackQuery) -> None:
     await callback.answer()
     if await _denied(callback):
@@ -239,7 +240,7 @@ async def admin_promo(callback: CallbackQuery) -> None:
     async with SessionLocal() as session:
         rows = await repo.promo_stats(session)
     if callback.message is not None:
-        await smart_edit(callback.message, _promo_text(rows), reply_markup=kb.admin_menu())
+        await smart_edit(callback.message, _promo_text(rows), reply_markup=kb.promo_menu())
 
 
 @router.callback_query(F.data == "admin:users")
@@ -432,6 +433,240 @@ async def promo_new(message: Message) -> None:
         await message.answer(
             f"🎟 Промокод <code>{promo.code}</code> на {promo.days} дн.{tail}."
         )
+
+
+# ───────────────────── Мастер промокодов кнопками ─────────────────────
+
+
+def _promo_reward(data: dict) -> str:
+    """Награда кода словами: «−20% к оплате» или «7 дней доступа»."""
+    if data.get("promo_type") == "percent":
+        return f"−{data.get('promo_value')}% к оплате"
+    return f"{data.get('promo_value')} дн. доступа"
+
+
+def _promo_draft(data: dict) -> str:
+    """Итог мастера перед созданием — всё выбранное одним экраном."""
+    limit = data.get("promo_limit") or 0
+    ttl = data.get("promo_ttl") or 0
+    return (
+        "🎟 <b>Новый промокод</b>\n\n"
+        f"Код: <code>{data.get('promo_code')}</code>\n"
+        f"Даёт: <b>{_promo_reward(data)}</b>\n"
+        f"Лимит: <b>{'без лимита' if not limit else limit}</b>\n"
+        f"Срок: <b>{'бессрочно' if not ttl else f'{ttl} дн.'}</b>"
+    )
+
+
+@router.callback_query(F.data.startswith("admin:promo:"))
+async def admin_promo_step(callback: CallbackQuery, state: FSMContext) -> None:
+    """Шаги мастера: тип → значение → код → лимит → срок → создать.
+
+    Тип и значение живут в кнопках, код — текстом: набирать латиницу
+    кнопками не выйдет. «Отмена» на каждом шаге — общий nav:cancel.
+    """
+    await callback.answer()
+    if await _denied(callback):
+        return
+    message = callback.message
+    if message is None:
+        return
+    parts = (callback.data or "").split(":")
+    action = parts[2] if len(parts) > 2 else ""
+    arg = parts[3] if len(parts) > 3 else ""
+
+    if action == "new":
+        await state.clear()
+        await smart_edit(
+            message,
+            "🎟 <b>Новый промокод</b>\n\nЧто даёт код?",
+            reply_markup=kb.promo_type_kb(),
+        )
+        return
+    if action == "type":
+        if arg not in ("percent", "days"):
+            return
+        await state.update_data(promo_type=arg)
+        await smart_edit(
+            message,
+            "Размер скидки?" if arg == "percent" else "Сколько дней даёт код?",
+            reply_markup=kb.promo_value_kb(arg),
+        )
+        return
+    if action == "value":
+        data = await state.get_data()
+        kind = data.get("promo_type")
+        if kind not in ("percent", "days"):
+            await smart_edit(
+                message,
+                "Начните заново — я забыл, что даёт код.",
+                reply_markup=kb.promo_menu(),
+            )
+            return
+        if arg == "custom":
+            await state.set_state(OwnerStates.promo_custom)
+            await smart_edit(
+                message,
+                "Пришлите процент числом (1–90):"
+                if kind == "percent"
+                else "Пришлите число дней:",
+                reply_markup=kb.cancel_kb(),
+            )
+            return
+        if not arg.isdigit():
+            return
+        value = int(arg)
+        if kind == "percent" and not 1 <= value <= 90:
+            return
+        if kind == "days" and value < 1:
+            return
+        await state.update_data(promo_value=value)
+        await state.set_state(OwnerStates.promo_code)
+        await smart_edit(
+            message,
+            f"Даёт: <b>{_promo_reward({**data, 'promo_value': value})}</b>.\n"
+            "Пришлите текст кода (латиница и цифры):",
+            reply_markup=kb.cancel_kb(),
+        )
+        return
+    if action == "limit":
+        if not arg.isdigit():
+            return
+        await state.update_data(promo_limit=int(arg))
+        await smart_edit(
+            message, "Сколько живёт код?", reply_markup=kb.promo_ttl_kb()
+        )
+        return
+    if action == "ttl":
+        if not arg.isdigit():
+            return
+        await state.update_data(promo_ttl=int(arg))
+        data = await state.get_data()
+        if not data.get("promo_code") or not data.get("promo_value"):
+            # Состояние слетело (рестарт между шагами) — начинаем заново.
+            await smart_edit(
+                message,
+                "Начните заново — я забыл, что создаём.",
+                reply_markup=kb.promo_menu(),
+            )
+            return
+        await smart_edit(
+            message, _promo_draft(data), reply_markup=kb.promo_confirm_kb()
+        )
+        return
+    if action == "make":
+        data = await state.get_data()
+        if not data.get("promo_code") or not data.get("promo_value"):
+            await smart_edit(
+                message,
+                "Начните заново — я забыл, что создаём.",
+                reply_markup=kb.promo_menu(),
+            )
+            return
+        from sqlalchemy.exc import IntegrityError
+
+        assert callback.from_user is not None
+        try:
+            async with SessionLocal() as session:
+                promo = await repo.create_promo_code(
+                    session,
+                    str(data["promo_code"]),
+                    0 if data.get("promo_type") == "percent" else int(data["promo_value"]),
+                    max_uses=int(data.get("promo_limit") or 0),
+                    ttl_days=int(data.get("promo_ttl") or 0) or None,
+                    created_by=callback.from_user.id,
+                    percent=int(data["promo_value"])
+                    if data.get("promo_type") == "percent"
+                    else 0,
+                )
+                await session.commit()
+        except IntegrityError:
+            # Код заняли, пока мастер шёл: возвращаемся на шаг кода.
+            await state.set_state(OwnerStates.promo_code)
+            await smart_edit(
+                message,
+                f"Код <code>{data['promo_code']}</code> уже заняли. Пришлите другой:",
+                reply_markup=kb.cancel_kb(),
+            )
+            return
+        await state.clear()
+        await smart_edit(
+            message,
+            f"🎟 Промокод <code>{promo.code}</code> создан: "
+            f"<b>{_promo_reward(data)}</b>.",
+            reply_markup=kb.promo_menu(),
+        )
+
+
+@router.message(OwnerStates.promo_custom)
+async def admin_promo_custom(message: Message, state: FSMContext) -> None:
+    """Своё значение награды числом: процент 1–90 или дни от 1."""
+    assert message.from_user is not None
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    kind = data.get("promo_type")
+    if kind not in ("percent", "days"):
+        await state.clear()
+        await message.answer(
+            "Начните заново — я забыл, что даёт код.",
+            reply_markup=kb.admin_menu(),
+        )
+        return
+    raw = (message.text or "").strip()
+    percent = _parse_percent(raw) if kind == "percent" else None
+    if percent is None and kind == "percent" and raw.isdigit():
+        number = int(raw)
+        percent = number if 1 <= number <= 90 else None
+    if kind == "percent" and percent is None:
+        await message.answer(
+            "Нужен процент от 1 до 90 — например <code>25</code>. Попробуйте ещё раз:",
+            reply_markup=kb.cancel_kb(),
+        )
+        return
+    if kind == "days" and (not raw.isdigit() or int(raw) < 1):
+        await message.answer(
+            "Нужно число дней от 1 — например <code>7</code>. Попробуйте ещё раз:",
+            reply_markup=kb.cancel_kb(),
+        )
+        return
+    value = percent if kind == "percent" else int(raw)
+    await state.update_data(promo_value=value)
+    await state.set_state(OwnerStates.promo_code)
+    await message.answer(
+        f"Даёт: <b>{_promo_reward({**data, 'promo_value': value})}</b>.\n"
+        "Пришлите текст кода (латиница и цифры):",
+        reply_markup=kb.cancel_kb(),
+    )
+
+
+@router.message(OwnerStates.promo_code)
+async def admin_promo_code(message: Message, state: FSMContext) -> None:
+    """Текст кода: приводим к виду, занятый отклоняем — и дальше к лимиту."""
+    assert message.from_user is not None
+    if not is_admin(message.from_user.id):
+        return
+    code = repo.normalize_promo_code(message.text or "")
+    if not code:
+        await message.answer(
+            "Код не может быть пустым. Пришлите текст кода:",
+            reply_markup=kb.cancel_kb(),
+        )
+        return
+    async with SessionLocal() as session:
+        taken = await repo.get_promo_code(session, code)
+    if taken is not None:
+        await message.answer(
+            f"Код <code>{code}</code> уже существует. Пришлите другой:",
+            reply_markup=kb.cancel_kb(),
+        )
+        return
+    await state.update_data(promo_code=code)
+    await state.set_state(None)
+    await message.answer(
+        "Сколько человек успеют активировать?",
+        reply_markup=kb.promo_limit_kb(),
+    )
 
 
 # ─────────────────────────────── Рассылка ───────────────────────────────

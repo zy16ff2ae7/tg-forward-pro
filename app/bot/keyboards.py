@@ -514,6 +514,125 @@ def admin_menu() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def promo_menu() -> InlineKeyboardMarkup:
+    """Промокоды: статистика с кнопкой создания и возвратом на панель."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="➕ Новый промокод", callback_data="admin:promo:new"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(text="◀️ Панель", callback_data="admin:panel")
+    )
+    return builder.as_markup()
+
+
+def _promo_cancel(builder: InlineKeyboardBuilder) -> InlineKeyboardBuilder:
+    """Ряд «Отмена» — у каждого шага мастера: выход всегда под рукой."""
+    builder.row(
+        InlineKeyboardButton(text="❌ Отмена", callback_data="nav:cancel")
+    )
+    return builder
+
+
+def promo_type_kb() -> InlineKeyboardMarkup:
+    """Что даёт код: скидку к оплате или дни доступа."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="🎟 Скидка %", callback_data="admin:promo:type:percent"
+        ),
+        InlineKeyboardButton(
+            text="📅 Дни доступа", callback_data="admin:promo:type:days"
+        ),
+    )
+    return _promo_cancel(builder).as_markup()
+
+
+def promo_value_kb(kind: str) -> InlineKeyboardMarkup:
+    """Размер награды кнопками: проценты или дни — по выбранному типу."""
+    presets = (5, 10, 15, 20, 30, 50) if kind == "percent" else (3, 7, 14, 30)
+    suffix = "%" if kind == "percent" else " дн."
+    builder = InlineKeyboardBuilder()
+    for pos in range(0, len(presets), 3):
+        builder.row(
+            *[
+                InlineKeyboardButton(
+                    text=f"{value}{suffix}",
+                    callback_data=f"admin:promo:value:{value}",
+                )
+                for value in presets[pos : pos + 3]
+            ]
+        )
+    builder.row(
+        InlineKeyboardButton(
+            text="✏️ Своё значение", callback_data="admin:promo:value:custom"
+        )
+    )
+    return _promo_cancel(builder).as_markup()
+
+
+def promo_limit_kb() -> InlineKeyboardMarkup:
+    """Сколько человек успеют активировать: лимит или без него."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="∞ Без лимита", callback_data="admin:promo:limit:0"
+        ),
+        InlineKeyboardButton(
+            text="10", callback_data="admin:promo:limit:10"
+        ),
+        InlineKeyboardButton(
+            text="50", callback_data="admin:promo:limit:50"
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="100", callback_data="admin:promo:limit:100"
+        ),
+        InlineKeyboardButton(
+            text="500", callback_data="admin:promo:limit:500"
+        ),
+    )
+    return _promo_cancel(builder).as_markup()
+
+
+def promo_ttl_kb() -> InlineKeyboardMarkup:
+    """Сколько живёт код: бессрочно или дни."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="∞ Бессрочно", callback_data="admin:promo:ttl:0"
+        )
+    )
+    builder.row(
+        *[
+            InlineKeyboardButton(
+                text=f"{days} дн.", callback_data=f"admin:promo:ttl:{days}"
+            )
+            for days in (1, 3, 7)
+        ]
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="30 дн.", callback_data="admin:promo:ttl:30"
+        )
+    )
+    return _promo_cancel(builder).as_markup()
+
+
+def promo_confirm_kb() -> InlineKeyboardMarkup:
+    """Итог мастера: создать или отменить."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Создать", callback_data="admin:promo:make"
+        )
+    )
+    return _promo_cancel(builder).as_markup()
+
+
 def grant_months_kb() -> InlineKeyboardMarkup:
     """Срок абонемента — те же периоды, что в тарифах."""
     from app.plans import PERIODS

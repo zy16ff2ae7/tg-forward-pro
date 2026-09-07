@@ -45,7 +45,9 @@ class GiftStates(StatesGroup):
 
 
 class OwnerStates(StatesGroup):
-    """Панель владельца: кому выдать абонемент и что разослать."""
+    """Панель владельца: кому выдать абонемент, что разослать, какой код создать."""
 
     grant_user = State()
     broadcast_text = State()
+    promo_code = State()
+    promo_custom = State()
