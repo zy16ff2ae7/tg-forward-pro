@@ -5,6 +5,7 @@ from datetime import timedelta
 
 import pytest
 
+from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal, session_scope
 from app.db.models import Subscription
@@ -63,7 +64,10 @@ async def test_activate_subscription_extends_from_future_date(user_id):
     assert _days_left(until) == 130
 
 
-async def test_grant_trial_only_once(user_id):
+async def test_grant_trial_only_once(user_id, monkeypatch):
+    # Рубильник TRIAL_DAYS в продукте выключен — механику проверяем
+    # с явно включённым.
+    monkeypatch.setattr(settings, "trial_days", 3)
     async with session_scope() as session:
         first = await repo.grant_trial(session, user_id)
         second = await repo.grant_trial(session, user_id)
@@ -71,6 +75,13 @@ async def test_grant_trial_only_once(user_id):
     assert first is not None
     assert _days_left(first) == 3
     assert second is None
+
+
+async def test_grant_trial_disabled_by_default(user_id):
+    """Пробного «просто так» нет: при TRIAL_DAYS=0 выдача — no-op."""
+    async with session_scope() as session:
+        assert await repo.grant_trial(session, user_id) is None
+        assert await session.get(Subscription, user_id) is None
 
 
 async def test_bank_days_moves_days_to_piggy_bank(user_id):

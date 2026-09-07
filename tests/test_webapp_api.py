@@ -28,14 +28,16 @@ async def test_me_requires_auth(client):
     assert (await client.get("/api/me")).status == 401
 
 
-async def test_me_creates_user_and_grants_trial(client, auth_headers):
+async def test_me_creates_user_without_trial(client, auth_headers):
+    """Пробного «просто так» нет: новичок создаётся без подписки, бесплатные
+    дни — только за подписку на канал (/bonus)."""
     response = await client.get("/api/me", headers=auth_headers)
     assert response.status == 200
 
     body = await response.json()
     assert body["id"] == TEST_USER_ID
-    assert body["subscription"]["active"] is True
-    assert body["subscription"]["days_left"] == settings.trial_days - 1
+    assert body["subscription"]["active"] is False
+    assert body["subscription"]["days_left"] == 0
 
 
 async def test_tampered_signature_is_rejected(client):

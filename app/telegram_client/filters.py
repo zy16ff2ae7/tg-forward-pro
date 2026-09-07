@@ -81,6 +81,11 @@ class FilterConfig:
     ignore_bots: bool = True  # не уведомлять о сообщениях ботов
     ignore_archived: bool = True  # не уведомлять из архивных чатов
     ignore_muted: bool = True  # не уведомлять из заглушённых чатов
+    # ── Автоподписка (kind="autosubscribe") ──
+    join_limit: int = 0  # вступить за один запуск (0 — во все)
+    join_gap: int = 2  # пауза между вступлениями, сек
+    join_retries: int = 0  # повторы вступления при коротком FloodWait
+    daily_join_limit: int = 0  # вступлений в сутки на задачу (0 — без лимита)
     # ── Настройки авто-постера (планировщик собственных сообщений) ──
     messages: list[str] = field(default_factory=list)  # тексты сообщений (по одному в строке)
     interval_seconds: int = 120  # интервал между отправками
@@ -139,6 +144,10 @@ class FilterConfig:
             "ignore_bots": self.ignore_bots,
             "ignore_archived": self.ignore_archived,
             "ignore_muted": self.ignore_muted,
+            "join_limit": self.join_limit,
+            "join_gap": self.join_gap,
+            "join_retries": self.join_retries,
+            "daily_join_limit": self.daily_join_limit,
             "messages": self.messages,
             "interval_seconds": self.interval_seconds,
             "window_start": self.window_start,

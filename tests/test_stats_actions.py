@@ -7,6 +7,7 @@ from __future__ import annotations
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from app.db import repo
 from app.db.database import session_scope
 from app.db.models import ForwardLog, Rule
 from app.errors import http_error_middleware, security_headers_middleware
@@ -134,9 +135,10 @@ async def test_duplicate_missing_is_404(client, create_user):
 
 
 async def test_test_post_offline_is_409(client, create_user, create_account, login_open):
-    """Абонемент есть (триал через /api/me), но аккаунт не в сети — 409."""
-    me = await client.get("/api/me", headers=_headers(OV_USER))
-    assert (await me.json())["subscription"]["active"] is True
+    """Абонемент оплачен, но аккаунт не в сети — 409."""
+    await create_user(id=OV_USER)
+    async with session_scope() as session:
+        await repo.add_subscription_days(session, OV_USER, 30)
 
     account_id = await create_account(OV_USER)
     rule_id = await _rule(OV_USER, account_id)

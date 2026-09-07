@@ -18,7 +18,12 @@ CAPTION_LIMIT = 1024
 async def ensure_user(
     event: Message | CallbackQuery, grant_trial: bool = True
 ) -> User:
-    """Регистрирует пользователя при первом заходе, выдаёт пробный период."""
+    """Регистрирует пользователя при первом заходе.
+
+    Пробный период сам не выдаём: бесплатные дни — только за подписку на
+    канал (/bonus). Вызов grant_trial ниже — no-op при TRIAL_DAYS=0, оставлен
+    как рубильник на случай акций.
+    """
     source = event if isinstance(event, Message) else event.message
     from_user = event.from_user
     assert source is not None and from_user is not None

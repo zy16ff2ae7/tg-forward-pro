@@ -202,6 +202,24 @@ class ForwardLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
 
+class JoinLog(Base):
+    """Вступления автоподписки — по строке на вступление.
+
+    Отдельно от журнала: у разового запуска в журнале одна пара
+    «сбой + успех», а не строка на каждый чат (иначе сотня ссылок
+    вымывала бы из журнала остальные задачи). По этим строкам считается
+    дневной лимит вступлений; вчерашние стираются при записи новых.
+    """
+
+    __tablename__ = "join_logs"
+    __table_args__ = (Index("ix_joins_rule", "rule_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    rule_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
 class CollectedItem(Base):
     """То, что насобирали задачи-сборщики: парсер аудитории и ловец чеков.
 

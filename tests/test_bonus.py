@@ -13,7 +13,7 @@
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -329,8 +329,13 @@ async def test_api_grants_days_and_updates_me(bot_client, auth_headers, bonus_on
     after = await (await test_client.get("/api/me", headers=auth_headers)).json()
     assert after["bonus"]["claimed"] is True
     assert after["bonus"]["claimed_at"]
-    days_grew = after["subscription"]["days_left"] - before["subscription"]["days_left"]
-    assert days_grew == DAYS
+    # Подарок — первая подписка новичка (автовыдачи пробного больше нет):
+    # until ровно на DAYS впереди, а days_left показывает полные сутки
+    # (поэтому свежевыданные дни читаются как DAYS-1 — так считает весь
+    # сервис, см. /api/me и экран абонемента).
+    until = datetime.fromisoformat(after["subscription"]["until"])
+    assert timedelta(days=DAYS - 1) < until - utcnow() <= timedelta(days=DAYS)
+    assert after["subscription"]["days_left"] == DAYS - 1
 
 
 async def test_api_second_call_is_conflict(bot_client, auth_headers, bonus_on):

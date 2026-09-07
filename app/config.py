@@ -109,7 +109,9 @@ class Settings:
     price_rub: int = 990
     price_stars: int = 299
     price_usdt: float = 12.0
-    trial_days: int = 3
+    # Автовыдачи пробного периода нет: бесплатные дни — только за подписку
+    # на канал (BONUS_DAYS, команда /bonus). Ноль отключает grant_trial.
+    trial_days: int = 0
     max_rules_free: int = 3
     renew_remind_days: int = 3
 
@@ -558,7 +560,7 @@ def load_settings() -> Settings:
         price_rub=_get_int("PRICE_RUB", 990),
         price_stars=_get_int("PRICE_STARS", 299),
         price_usdt=_get_float("PRICE_USDT", 12.0),
-        trial_days=_get_int("TRIAL_DAYS", 3),
+        trial_days=_get_int("TRIAL_DAYS", 0),
         max_rules_free=_get_int("MAX_RULES_FREE", 3),
         renew_remind_days=_get_int("RENEW_REMIND_DAYS", 3),
         bonus_channel=_get("BONUS_CHANNEL"),

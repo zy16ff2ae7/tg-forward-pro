@@ -47,13 +47,15 @@ async def main() -> None:
         user, created = await repo.get_or_create_user(
             session, user_id, username="tester", full_name="Тестовый Пользователь"
         )
-        trial_until = await repo.grant_trial(session, user_id)
+        # Автовыдачи пробного в продукте нет (дни — только за подписку),
+        # поэтому дыму подписку выдаём напрямую, как это делает /bonus.
+        bonus_until = await repo.add_subscription_days(session, user_id, 3)
         await session.commit()
 
-        print(f"✓ Пользователь создан: {created}, пробный период до {trial_until}")
+        print(f"✓ Пользователь создан: {created}, подписка до {bonus_until}")
 
         active = await repo.has_active_subscription(session, user_id)
-        print(f"✓ Подписка активна после триала: {active}")
+        print(f"✓ Подписка активна после выдачи дней: {active}")
 
         account = await repo.add_account(
             session,

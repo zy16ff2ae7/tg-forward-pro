@@ -62,7 +62,7 @@ async def test_stats_counts_everything(create_user, create_account, monkeypatch)
     account_id = await create_account(TEST_USER_ID)
     await add_rule(TEST_USER_ID, account_id)
     async with session_scope() as session:
-        await repo.grant_trial(session, friend)
+        await repo.add_subscription_days(session, friend, 30)
         await session.commit()
 
     await owner.admin_stats(FakeCallback("admin:stats", RecordingBot()))
@@ -78,7 +78,7 @@ async def test_stats_text(create_user, create_account, monkeypatch):
     account_id = await create_account(TEST_USER_ID)
     await add_rule(TEST_USER_ID, account_id)
     async with session_scope() as session:
-        await repo.grant_trial(session, friend)
+        await repo.add_subscription_days(session, friend, 30)
         await session.commit()
     callback = FakeCallback("admin:stats", RecordingBot())
 
@@ -98,7 +98,7 @@ async def test_users_list_shows_names_and_subs(create_user, monkeypatch):
     async with session_scope() as session:
         users = list(await repo.recent_users(session, 10))
         friend_id = next(user.id for user in users if user.username == "friend")
-        await repo.grant_trial(session, friend_id)
+        await repo.add_subscription_days(session, friend_id, 30)
         await session.commit()
     callback = FakeCallback("admin:users", RecordingBot())
 

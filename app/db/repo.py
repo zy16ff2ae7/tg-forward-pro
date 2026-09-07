@@ -11,6 +11,7 @@ from app.config import settings
 from app.db.models import (
     CollectedItem,
     ForwardLog,
+    JoinLog,
     Payment,
     PendingDelivery,
     PendingLogin,
@@ -81,7 +82,7 @@ async def recent_users(session: AsyncSession, limit: int = 15) -> Sequence[User]
 
 # Что принадлежит человеку напрямую (голый user_id без внешнего ключа на users):
 # каскад от User их не забирает — чистим руками до удаления самой строки.
-USER_OWNED = (ForwardLog, CollectedItem, SavedMessage, PendingDelivery, PendingLogin)
+USER_OWNED = (ForwardLog, CollectedItem, SavedMessage, PendingDelivery, PendingLogin, JoinLog)
 
 
 async def delete_user_data(session: AsyncSession, user_id: int) -> dict[str, int]:
@@ -583,8 +584,8 @@ async def add_rule(
 
 
 # Таблицы, строки которых принадлежат задаче и без неё не имеют смысла:
-# журнал пересылок, находки («Результаты») и отложенные отправки.
-RULE_OWNED = (ForwardLog, CollectedItem, PendingDelivery)
+# журнал пересылок, находки («Результаты»), отложенные отправки и вступления.
+RULE_OWNED = (ForwardLog, CollectedItem, PendingDelivery, JoinLog)
 
 
 async def delete_rule(session: AsyncSession, rule: Rule) -> None:
@@ -688,6 +689,30 @@ async def count_collected_items(session: AsyncSession, rule_id: int) -> int:
         select(func.count())
         .select_from(CollectedItem)
         .where(CollectedItem.rule_id == rule_id)
+    )
+    return int(result.scalar() or 0)
+
+
+async def log_join(session: AsyncSession, rule_id: int, user_id: int) -> None:
+    """Вступление автоподписки — строкой в свой учёт, не в журнал задачи.
+
+    Заодно стираем вчерашние строки этого правила: для дневного лимита нужно
+    только сегодня, а копить историю вступлений незачем.
+    """
+    today = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    await session.execute(
+        delete(JoinLog).where(JoinLog.rule_id == rule_id, JoinLog.created_at < today)
+    )
+    session.add(JoinLog(rule_id=rule_id, user_id=user_id))
+
+
+async def count_joins_today(session: AsyncSession, rule_id: int) -> int:
+    """Сколько вступлений сделала задача за текущие сутки (UTC)."""
+    today = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    result = await session.execute(
+        select(func.count())
+        .select_from(JoinLog)
+        .where(JoinLog.rule_id == rule_id, JoinLog.created_at >= today)
     )
     return int(result.scalar() or 0)
 

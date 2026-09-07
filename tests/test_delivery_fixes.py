@@ -28,7 +28,7 @@ async def _db_rule(create_user, create_account, *, kind="parser", with_trial=Fal
     account_id = await create_account(user_id)
     async with session_scope() as session:
         if with_trial:
-            await repo.grant_trial(session, user_id)
+            await repo.add_subscription_days(session, user_id, 30)
         rule = Rule(
             user_id=user_id,
             account_id=account_id,

@@ -28,6 +28,7 @@ from datetime import timedelta
 from sqlalchemy import text
 
 from app import main
+from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal, engine, ensure_schema, session_scope
 from app.db.models import Subscription
@@ -56,13 +57,16 @@ async def set_period(user_id: int, *, started_days_ago: float, days_left: float)
 # ───────────────── напоминание не раньше середины периода ─────────────────────
 
 
-async def test_trial_does_not_ask_for_money_at_signup(create_user):
+async def test_trial_does_not_ask_for_money_at_signup(create_user, monkeypatch):
     """Тот самый случай: «продлите» через 1,2 секунды после ``/start``.
 
     Пробный период короче порога напоминания целиком, поэтому одного условия
     «осталось меньше трёх дней» хватало, чтобы просить денег у человека,
     который ещё ничего не попробовал.
     """
+    # Короткую подписку для проверки механики включаем явно: автовыдачи
+    # пробного в продукте больше нет.
+    monkeypatch.setattr(settings, "trial_days", 3)
     user_id = await create_user()
     async with session_scope() as session:
         await repo.grant_trial(session, user_id)
@@ -74,8 +78,9 @@ async def test_trial_does_not_ask_for_money_at_signup(create_user):
     assert (await get_sub(user_id)).reminded_at is None
 
 
-async def test_trial_is_reminded_past_the_middle(create_user):
+async def test_trial_is_reminded_past_the_middle(create_user, monkeypatch):
     """Молчать до конца — тоже плохо: за половину пробного срока сказать пора."""
+    monkeypatch.setattr(settings, "trial_days", 3)
     user_id = await create_user()
     async with session_scope() as session:
         await repo.grant_trial(session, user_id)

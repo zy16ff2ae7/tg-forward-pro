@@ -119,6 +119,9 @@ class JoinOutcome:
     joined: int = 0
     already: int = 0
     problems: list[str] = field(default_factory=list)
+    # Остановились не потому, что кончились чаты, а потому, что кончился
+    # дневной лимит: остаток — завтра, а не «не пустили».
+    limited: bool = False
 
 
 def task_title(rule: Any) -> str:
@@ -634,8 +637,23 @@ async def _autosubscribe(client: Any, message: Any, rule: RuleSnapshot) -> None:
     targets = _invite_targets(message_text(message))
     if not targets:
         return
+    conf = rule.filters
+    gap = max(0, int(getattr(conf, "join_gap", JOIN_PAUSE_SECONDS) or 0))
+    retries = max(0, int(getattr(conf, "join_retries", 0) or 0))
+    # Дневной лимит действует и здесь; исчерпанный — тихий пропуск, а не
+    # ошибка: журнал не должен краснеть каждый вечер.
+    stop_at: int | None = None
+    daily = max(0, int(getattr(conf, "daily_join_limit", 0) or 0))
+    if daily > 0:
+        async with SessionLocal() as session:
+            already_today = await repo.count_joins_today(session, rule.id)
+        if already_today >= daily:
+            return
+        stop_at = daily - already_today
 
-    outcome = await _join_all(client, targets)
+    outcome = await _join_all(
+        client, targets, rule=rule, gap=gap, retries=retries, stop_at=stop_at
+    )
     if outcome.joined:
         await record_ok(rule, message, count=outcome.joined)
         logger.info("Автоподписка #{}: вступили в {} чат(ов)", rule.id, outcome.joined)
@@ -891,6 +909,9 @@ async def run_autosubscribe(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
         str(item).strip() for item in (rule.filters.subscribe_to or []) if str(item).strip()
     ]
     outcome = JoinOutcome()
+    conf = rule.filters
+    gap = max(0, int(getattr(conf, "join_gap", JOIN_PAUSE_SECONDS) or 0))
+    retries = max(0, int(getattr(conf, "join_retries", 0) or 0))
 
     # Если задан источник — сначала читаем из него последние посты на предмет ссылок
     if rule.source_id:
@@ -916,8 +937,24 @@ async def run_autosubscribe(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
             **_join_summary(outcome, 0),
         }
 
+    per_run = max(0, int(getattr(conf, "join_limit", 0) or 0))
+    if per_run > 0:
+        unique = unique[:per_run]
+    # Дневной лимит: сколько уже вступили сегодня — столько мест занято.
+    # Исчерпанный лимит — не ошибка: остаток вступит завтра.
+    stop_at: int | None = None
+    daily = max(0, int(getattr(conf, "daily_join_limit", 0) or 0))
+    if daily > 0:
+        async with SessionLocal() as session:
+            already_today = await repo.count_joins_today(session, rule.id)
+        if already_today >= daily:
+            outcome.limited = True
+            outcome.problems.append(f"дневной лимит вступлений исчерпан ({daily} в сутки)")
+            return {"ok": True, **_join_summary(outcome, len(unique))}
+        stop_at = daily - already_today
+
     try:
-        await _join_all(client, unique, outcome)
+        await _join_all(client, unique, outcome, rule=rule, gap=gap, retries=retries, stop_at=stop_at)
     except FloodWaitError as exc:
         # Вступления, сделанные до отказа, остались в outcome — их и показываем:
         # «вступили в 0» после трёх удачных заходов было бы неправдой.
@@ -926,17 +963,29 @@ async def run_autosubscribe(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
             "error": f"Telegram просит подождать {int(getattr(exc, 'seconds', 60))} сек",
             **_join_summary(outcome, len(unique)),
         }
+    if outcome.limited:
+        outcome.problems.append(f"дневной лимит вступлений исчерпан ({daily} в сутки)")
     return {"ok": True, **_join_summary(outcome, len(unique))}
 
 
 def _join_summary(outcome: JoinOutcome, total: int) -> dict[str, Any]:
     """Итог захода в чаты — полями ответа кабинету."""
-    return {
+    summary: dict[str, Any] = {
         "joined": outcome.joined,
         "already": outcome.already,
         "total": total,
         "problems": list(outcome.problems),
     }
+    if outcome.limited:
+        summary["limited"] = True
+    return summary
+
+
+async def _log_join(rule: RuleSnapshot) -> None:
+    """Вступление — строкой в свой учёт: по ним считается дневной лимит."""
+    async with SessionLocal() as session:
+        await repo.log_join(session, rule.id, rule.user_id)
+        await session.commit()
 
 
 def _invite_targets(text: str) -> list[str]:
@@ -954,39 +1003,68 @@ def _invite_targets(text: str) -> list[str]:
     return found
 
 
-async def _join_all(client: Any, targets: list[str], outcome: JoinOutcome | None = None) -> JoinOutcome:
+async def _join_all(
+    client: Any,
+    targets: list[str],
+    outcome: JoinOutcome | None = None,
+    *,
+    rule: RuleSnapshot | None = None,
+    gap: int = JOIN_PAUSE_SECONDS,
+    retries: int = 0,
+    stop_at: int | None = None,
+) -> JoinOutcome:
     """Вступает в перечисленные чаты и рассказывает, что из этого вышло.
 
     FloodWait пробрасывает наверх: у задачи по сообщениям есть свой повтор после
     паузы (``run_job``). Чтобы при этом не потерялись уже сделанные вступления,
     итог можно передать своим — тогда после исключения в нём остаётся всё, во
     что успели войти до отказа.
+
+    ``rule`` — чьё вступление писать в журнал (по записям считается дневной
+    лимит); ``stop_at`` — остановиться, когда столько уже вступили в этом
+    запуске (дневной лимит). Повторы (``retries``) переживают только короткий
+    FloodWait — до минуты: часовое «подождите» сном не леча.
     """
     from telethon.tl.functions.channels import JoinChannelRequest
     from telethon.tl.functions.messages import ImportChatInviteRequest
 
     result = outcome if outcome is not None else JoinOutcome()
     for target in targets:
-        try:
-            if target.startswith("+") or target.lower().startswith("joinchat/"):
-                invite_hash = target[1:] if target.startswith("+") else target.split("/", 1)[1]
-                await client(ImportChatInviteRequest(invite_hash))
-            else:
-                await client(JoinChannelRequest(target))
-            result.joined += 1
-        except FloodWaitError:
-            raise
-        except RPCError as exc:
-            name = type(exc).__name__
-            logger.info("Автоподписка: не вступили в {}: {}", target, name)
-            if name in JOIN_ALREADY_FINE:
-                # «уже участник», «заявка отправлена» — тут нечего исправлять,
-                # и краснеть карточке незачем.
-                result.already += 1
-            else:
-                result.problems.append(f"не пустили в {target} ({name})")
+        if stop_at is not None and result.joined >= stop_at:
+            result.limited = True
+            break
+        attempts = max(0, retries) + 1
+        while True:
+            try:
+                if target.startswith("+") or target.lower().startswith("joinchat/"):
+                    invite_hash = target[1:] if target.startswith("+") else target.split("/", 1)[1]
+                    await client(ImportChatInviteRequest(invite_hash))
+                else:
+                    await client(JoinChannelRequest(target))
+                result.joined += 1
+                if rule is not None:
+                    await _log_join(rule)
+                break
+            except FloodWaitError as exc:
+                attempts -= 1
+                wait = int(getattr(exc, "seconds", 60))
+                if attempts <= 0 or wait > 60:
+                    raise
+                logger.info("Автоподписка: FloodWait {} сек — ждём и повторяем {}", wait, target)
+                await asyncio.sleep(wait + 1)
+            except RPCError as exc:
+                name = type(exc).__name__
+                logger.info("Автоподписка: не вступили в {}: {}", target, name)
+                if name in JOIN_ALREADY_FINE:
+                    # «уже участник», «заявка отправлена» — тут нечего исправлять,
+                    # и краснеть карточке незачем.
+                    result.already += 1
+                else:
+                    result.problems.append(f"не пустили в {target} ({name})")
+                break
         # пауза между вступлениями, иначе Telegram быстро присылает FloodWait
-        await asyncio.sleep(JOIN_PAUSE_SECONDS)
+        if gap > 0:
+            await asyncio.sleep(gap)
     return result
 
 

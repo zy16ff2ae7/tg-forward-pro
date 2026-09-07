@@ -81,6 +81,8 @@ async def poster(client, auth_headers, create_account, login_open, many_chats_re
     """Постинг, созданный из кабинета набранным текстом."""
     await client.get("/api/me", headers=auth_headers)
     account_id = await create_account(TEST_USER_ID)
+    async with session_scope() as session:  # вход дней больше не дарит — платим сами
+        await repo.add_subscription_days(session, TEST_USER_ID, 30)
     response = await client.post(
         "/api/tasks",
         json={
@@ -146,6 +148,8 @@ async def test_a_saved_post_is_posted_too(
     """
     await client.get("/api/me", headers=auth_headers)
     account_id = await create_account(TEST_USER_ID)
+    async with session_scope() as session:  # вход дней больше не дарит — платим сами
+        await repo.add_subscription_days(session, TEST_USER_ID, 30)
     saved = await client.post(
         "/api/library", json={"chat_id": -1001, "message_id": 77}, headers=auth_headers
     )
@@ -236,6 +240,8 @@ async def test_an_old_poster_shows_its_text_in_the_form(
     """
     await client.get("/api/me", headers=auth_headers)
     account_id = await create_account(TEST_USER_ID)
+    async with session_scope() as session:  # вход дней больше не дарит — платим сами
+        await repo.add_subscription_days(session, TEST_USER_ID, 30)
     created = await client.post(
         "/api/tasks",
         json={
@@ -282,6 +288,8 @@ async def test_an_old_poster_does_not_hold_the_whole_library(
     """
     await client.get("/api/me", headers=auth_headers)
     account_id = await create_account(TEST_USER_ID)
+    async with session_scope() as session:  # вход дней больше не дарит — платим сами
+        await repo.add_subscription_days(session, TEST_USER_ID, 30)
     created = await client.post(
         "/api/tasks",
         json={
@@ -332,6 +340,8 @@ async def test_a_vanished_post_stops_the_round_once(
     """Пост удалили из канала — одна строка в журнале, а не отказ на каждый чат."""
     await client.get("/api/me", headers=auth_headers)
     account_id = await create_account(TEST_USER_ID)
+    async with session_scope() as session:  # вход дней больше не дарит — платим сами
+        await repo.add_subscription_days(session, TEST_USER_ID, 30)
     saved = await client.post(
         "/api/library", json={"chat_id": -1001, "message_id": 77}, headers=auth_headers
     )
