@@ -1709,6 +1709,23 @@ button { border: none; background: none; cursor: pointer; }
 .chart__top li { display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); }
 .chart__top li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chart__top li b { font-variant-numeric: tabular-nums; }
+.templates { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
+.template { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; color: var(--text); text-align: left; cursor: pointer; }
+.template:active { border-color: var(--line-hi); }
+.template__emoji { font-size: 20px; }
+.template__title { font-size: 13px; font-weight: 600; }
+.template__desc { font-size: 11px; color: var(--muted); }
+.wizard { margin-top: 12px; padding: 12px; background: var(--card); border: 1px solid var(--line-hi); border-radius: 16px; }
+.wizard__head { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.wizard__step { display: flex; gap: 10px; align-items: center; width: 100%; padding: 9px 10px; margin-top: 6px; background: var(--glass); border: 1px solid var(--line); border-radius: 12px; color: var(--text); text-align: left; cursor: pointer; }
+.wizard__step.is-current { border-color: var(--line-hi); }
+.wizard__step.is-done { opacity: 0.65; }
+.wizard__num { flex: none; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700; }
+.wizard__step.is-done .wizard__num { background: var(--green); color: #06281c; }
+.wizard__main { display: flex; flex-direction: column; gap: 1px; }
+.wizard__title { font-size: 13px; font-weight: 600; }
+.wizard__desc { font-size: 11px; color: var(--muted); }
+.wizard__foot { margin-top: 8px; font-size: 11px; color: var(--muted); }
 
 /* Тост всплывает над тем, что сейчас висит внизу: навигацией, плавающей кнопкой
    «Запустить задачу», панелью выбранных чатов, кнопкой открытой шторки. Подъём

@@ -1625,6 +1625,7 @@ function renderHomeTasks() {
 
 function renderHome() {
   renderHomeStats();
+  renderHomeWizard();
   loadHomeChart();
   renderTiles();
   renderHomeTasks();
@@ -1658,6 +1659,35 @@ function renderHomeStats() {
       </div>`
     )
     .join('');
+}
+
+/* Мастер первых шагов: у кого нет задач, тот видит две кнопки вместо пустого
+   экрана — «подключить аккаунт» и «выбрать сценарий». Исчезает сам, как только
+   появляется первая задача: прятать вручную нечего. */
+function renderHomeWizard() {
+  const holder = $('homeWizard');
+  if (!holder) return;
+  const stats = (state.me && state.me.stats) || {};
+  if (Number(stats.rules || 0) > 0) {
+    holder.hidden = true;
+    holder.innerHTML = '';
+    return;
+  }
+  const hasAccount = Number(stats.accounts || 0) > 0;
+  const step = (done, current, num, title, desc, goto) => `
+    <button class="wizard__step${done ? ' is-done' : ''}${current ? ' is-current' : ''}" data-goto="${goto}">
+      <span class="wizard__num">${done ? '✓' : num}</span>
+      <span class="wizard__main">
+        <span class="wizard__title">${esc(title)}</span>
+        <span class="wizard__desc">${esc(desc)}</span>
+      </span>
+    </button>`;
+  holder.hidden = false;
+  holder.innerHTML = `
+    <div class="wizard__head">🧭 мастер · два шага до первой задачи</div>
+    ${step(hasAccount, !hasAccount, '1', 'Подключите аккаунт', 'Telegram-аккаунт, глазами которого смотрит дочка', 'accounts')}
+    ${step(false, hasAccount, '2', 'Выберите сценарий', 'или возьмите готовый шаблон из каталога', 'commands')}
+    <div class="wizard__foot">старт — с пробного абонемента: /bonus в боте за подписку на канал</div>`;
 }
 
 /* График пересылок за две недели: столбики SVG без библиотек. Ошибки —
@@ -2025,6 +2055,60 @@ function renderCommands() {
         block.items.map(commandCardHtml).join('')
     )
     .join('');
+  ensureTemplates();
+}
+
+/* Шаблоны задач: готовая начинка для формы создания. Показываем только в
+   чистом каталоге: при поиске и фильтре они шумели бы под ногами. */
+async function ensureTemplates() {
+  if (state.templates || state.templatesFailed) {
+    renderTemplateStrip();
+    return;
+  }
+  try {
+    const data = await api('/api/templates');
+    state.templates = data.templates || [];
+  } catch (error) {
+    // Каталог без шаблонов — всё равно каталог: молча прячем полосу.
+    state.templatesFailed = true;
+    state.templates = [];
+  }
+  renderTemplateStrip();
+}
+
+function renderTemplateStrip() {
+  const holder = $('templateStrip');
+  if (!holder) return;
+  const query = ($('commandSearch').value || '').trim();
+  const templates = state.templates || [];
+  if (query || state.commandGroup || !templates.length) {
+    holder.hidden = true;
+    holder.innerHTML = '';
+    return;
+  }
+  holder.hidden = false;
+  holder.innerHTML = `<div class="section-label">шаблоны</div>
+    <div class="templates">${templates.map((tpl) => `
+      <button class="template" data-template="${esc(tpl.id)}">
+        <span class="template__emoji" aria-hidden="true">${esc(tpl.emoji || '✨')}</span>
+        <span class="template__title">${esc(tpl.title)}</span>
+        <span class="template__desc">${esc(tpl.description || '')}</span>
+      </button>`).join('')}</div>`;
+}
+
+function openTemplate(id) {
+  const tpl = (state.templates || []).find((item) => item.id === id);
+  if (!tpl) return;
+  const command = state.commands.find((item) => item.id === tpl.command);
+  if (!command) {
+    toast('Каталог команд ещё не загружен');
+    return;
+  }
+  if (command.status !== 'ready') {
+    toast(`${command.title} — выключено в настройках сервиса`);
+    return;
+  }
+  openTaskSheet(command, { ...(tpl.fill || {}) });
 }
 
 /* ──────────────────────────────── Задачи ─────────────────────────────── */
@@ -5030,6 +5114,12 @@ function bindEvents() {
     if (hit.dataset.goto) switchTab(hit.dataset.goto);
     else openCommand(hit.dataset.command);
   });
+  // Мастер новичка перерисовывается — слушатель делегирован.
+  $('homeWizard').addEventListener('click', (event) => {
+    const step = event.target.closest('[data-goto]');
+    if (!step) return;
+    switchTab(step.dataset.goto);
+  });
   // «смотреть все» и прочие ссылки-переходы по кабинету
   document.querySelectorAll('[data-goto]').forEach((node) => {
     if (node.closest('#homeTiles, #promptHits, #homeTasks')) return; // у них свой делегат
@@ -5071,6 +5161,11 @@ function bindEvents() {
     const card = event.target.closest('[data-command]');
     if (!card) return;
     openCommand(card.dataset.command);
+  });
+  $('templateStrip').addEventListener('click', (event) => {
+    const card = event.target.closest('[data-template]');
+    if (!card) return;
+    openTemplate(card.dataset.template);
   });
 
   // задачи

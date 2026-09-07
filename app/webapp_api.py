@@ -466,6 +466,61 @@ async def commands(_request: web.Request) -> web.Response:
     return _json({"commands": commands_payload(), "groups": COMMAND_GROUPS})
 
 
+# Шаблоны задач: задание с предзаполненной формой. Аккаунт, источник и чаты
+# человек выбирает сам — в шаблоне только настройки, которые одинаковы у всех.
+# Формат fill — ровно поля формы (см. needs/optional команды): кабинет открывает
+# шторку создания с этими значениями, дальше человек правит и подтверждает.
+TASK_TEMPLATES: list[dict] = [
+    {
+        "id": "mirror",
+        "command": "clone",
+        "emoji": "📋",
+        "title": "Зеркало канала",
+        "description": "Чужой канал — вашим: история и новые посты.",
+        "fill": {"history": 50, "uniquify": True},
+    },
+    {
+        "id": "deals",
+        "command": "listener",
+        "emoji": "🏷️",
+        "title": "Охотник за скидками",
+        "description": "Посты про выгоду — вам в чат.",
+        "fill": {"keywords": "скидка, акция, промокод, розыгрыш, распродажа"},
+    },
+    {
+        "id": "clean_copy",
+        "command": "copy_channel",
+        "emoji": "🔁",
+        "title": "Чистая копия",
+        "description": "Копия без метки «переслано», текст под себя.",
+        "fill": {"mode": "copy", "uniquify": True},
+    },
+    {
+        "id": "fanout",
+        "command": "broadcast",
+        "emoji": "📣",
+        "title": "Веер новостей",
+        "description": "Один источник — сразу во все ваши чаты.",
+        "fill": {},
+    },
+    {
+        "id": "commenters",
+        "command": "parser",
+        "emoji": "💬",
+        "title": "Сбор комментаторов",
+        "description": "Самые вовлечённые читатели — списком.",
+        "fill": {"parser_mode": "comments", "scan": 500, "limit": 200},
+    },
+]
+
+
+@routes.get("/api/templates")
+@require_auth
+async def task_templates(request: web.Request) -> web.Response:
+    """Шаблоны задач для каталога: команда + предзаполненные поля формы."""
+    return _json({"templates": TASK_TEMPLATES})
+
+
 @routes.get("/api/tasks")
 @require_auth
 async def list_tasks(request: web.Request) -> web.Response:
