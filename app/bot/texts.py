@@ -85,7 +85,9 @@ def price_line() -> str:
     return "Стоимость: " + "  ·  ".join(parts)
 
 
-def subscription_status(active_until: datetime | None, rules_count: int) -> str:
+def subscription_status(
+    active_until: datetime | None, rules_count: int, *, autorenew: bool = False
+) -> str:
     if active_until is None:
         price = price_line()
         return (
@@ -99,6 +101,11 @@ def subscription_status(active_until: datetime | None, rules_count: int) -> str:
         f"Действует до: <b>{active_until:%d.%m.%Y %H:%M}</b> (UTC)\n"
         f"Осталось дней: <b>{max(days, 0)}</b>\n"
         f"Правил у вас: {rules_count}"
+        + (
+            "\n🔁 Автопродление Stars включено (отмена — в настройках Telegram)."
+            if autorenew
+            else ""
+        )
     )
 
 

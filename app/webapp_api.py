@@ -31,6 +31,7 @@ from app.plans import (
     DEFAULT_MONTHS,
     PERIODS,
     STARS_DESCRIPTION,
+    STARS_SUBSCRIPTION_PERIOD,
     is_valid_period,
     periods_text,
     rub_amount,
@@ -372,6 +373,7 @@ async def me(request: web.Request) -> web.Response:
         await session.commit()
 
         until = await repo.subscription_until(session, user_id)
+        autorenew = await repo.stars_autorenew(session, user_id)
         rules_count = await repo.count_rules(session, user_id, include_archived=False)
         accounts = await repo.list_accounts(session, user_id)
         forwarded = sum(
@@ -396,6 +398,7 @@ async def me(request: web.Request) -> web.Response:
                 "active": until is not None,
                 "until": until.isoformat() if until else None,
                 "days_left": days_left,
+                "autorenew": autorenew,
             },
             "stats": {
                 "rules": rules_count,
@@ -1899,6 +1902,8 @@ async def list_accounts(request: web.Request) -> web.Response:
                 "days_left": max((until - repo.utcnow()).days, 0) if until else 0,
                 # Копилка: дни, снятые с активного периода и не привязанные к дате
                 "piggy_bank_days": int(banked.banked_days or 0) if banked is not None else 0,
+                # Автопродление за Stars: рекуррентное списание живо.
+                "autorenew": bool(banked is not None and banked.stars_autorenew),
             },
             "pending_login": {
                 "exists": pending is not None,
@@ -2062,6 +2067,10 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
     # Срок только из каталога: «2 месяца» со стороны клиента — не повод молча
     # округлять, иначе цена на кнопке разойдётся с ценой в счёте.
     months = _months_or_fail(body.get("months"), DEFAULT_MONTHS)
+    # Автопродление — только помесячно: период подписки в звёздах всегда 30 дней.
+    autorenew = body.get("autorenew") is True
+    if autorenew and months != 1:
+        raise ValidationError("Автопродление работает только на сроке 1 месяц")
 
     if _bot is None:
         raise FeatureUnavailable(
@@ -2081,6 +2090,9 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
             provider_token="",  # для Stars платёжный токен не нужен
             currency="XTR",
             prices=[LabeledPrice(label=title, amount=amount)],
+            # Подписка отличается от разового счёта одним параметром: дальше
+            # Telegram списывает сам, а продлевает тот же хендлер оплаты.
+            **({"subscription_period": STARS_SUBSCRIPTION_PERIOD} if autorenew else {}),
         )
     except Exception as exc:  # noqa: BLE001
         # Пользователю подробности Bot API ни к чему, а в лог они попасть должны.
@@ -2091,7 +2103,15 @@ async def create_stars_invoice(request: web.Request) -> web.Response:
             status="invoice_failed",
         ) from exc
 
-    return _json({"url": link, "months": months, "amount": amount, "currency": "XTR"})
+    return _json(
+        {
+            "url": link,
+            "months": months,
+            "amount": amount,
+            "currency": "XTR",
+            "autorenew": autorenew,
+        }
+    )
 
 
 # ───────────────── Оплата вне Telegram: карта и USDT на странице ───────────────

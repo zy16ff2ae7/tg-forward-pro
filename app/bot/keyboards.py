@@ -358,6 +358,13 @@ def stars_periods() -> InlineKeyboardMarkup:
                 callback_data=f"pay:stars:{months}",
             )
         )
+    # Автопродление — помесячно: период подписки в звёздах всегда 30 дней.
+    builder.row(
+        InlineKeyboardButton(
+            text=f"🔁 Автопродление — {stars_amount(1)} ⭐/мес",
+            callback_data="pay:stars:auto",
+        )
+    )
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="menu:sub"))
     return builder.as_markup()
 

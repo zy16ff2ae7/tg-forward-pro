@@ -554,7 +554,7 @@ function demoMe() {
     name: 'Демо',
     photo_url: null,
     is_admin: true,
-    subscription: { active: true, until: '2026-09-27T12:00:00', days_left: DEMO_BANK.days_left },
+    subscription: { active: true, until: '2026-09-27T12:00:00', days_left: DEMO_BANK.days_left, autorenew: false },
     stats: {
       rules: DEMO_STATE.tasks.filter((task) => !task.archived).length,
       accounts: DEMO_ACCOUNTS.length,
@@ -632,6 +632,7 @@ function demoAccounts() {
       until: '2026-09-27T12:00:00',
       days_left: DEMO_BANK.days_left,
       piggy_bank_days: DEMO_BANK.banked,
+      autorenew: false,
     },
     pending_login: pending
       ? {
@@ -2937,8 +2938,10 @@ async function loadAccounts() {
         active: Boolean(sub.active),
         until: sub.until || null,
         days_left: sub.days_left || 0,
+        autorenew: Boolean(sub.autorenew),
       };
       renderHeader();
+      renderAutoRenew();
     }
 
     const addBtn = $('addAccountBtn');
@@ -4266,7 +4269,7 @@ function renderPiggyBank(banked, daysLeft) {
 /* Инвойс создаёт бот через Bot API, кабинет только открывает его:
    сумма и payload формируются на сервере, пользователь не покидает
    мини-апп. Зачисление приходит в хендлер successful_payment бота. */
-async function payWithStars(button, months = 1) {
+async function payWithStars(button, months = 1, autorenew = false) {
   // Вне Telegram (демо или обычный браузер) платёжный WebView не поднимется —
   // честно уводим в бота, а не делаем вид, что что-то произошло.
   if (DEMO || !tg || !tg.openInvoice) {
@@ -4276,7 +4279,7 @@ async function payWithStars(button, months = 1) {
 
   try {
     const invoice = await withLoading(button, () =>
-      api('/api/subscription/invoice', { method: 'POST', body: JSON.stringify({ months }) })
+      api('/api/subscription/invoice', { method: 'POST', body: JSON.stringify({ months, autorenew }) })
     );
     openStarsInvoice(invoice.url);
   } catch (error) {
@@ -4304,6 +4307,26 @@ function renderTopUpButton() {
   if (!button) return;
   const stars = (state.me && state.me.tariffs && state.me.tariffs.stars) || 0;
   button.innerHTML = stars ? `${icon('i-star')} Оплатить ${stars} звёзд` : `${icon('i-star')} Оплатить звёздами`;
+}
+
+/* Автопродление: кнопка — пока выключено, строка состояния — когда включено.
+   Сам счёт — тот же Stars-инвойс, только подписочный: дальше Telegram
+   списывает месяц сам, а продлевает его хендлер оплаты в боте. */
+function renderAutoRenew() {
+  const button = $('autoRenewBtn');
+  const note = $('autoRenewNote');
+  if (!button || !note) return;
+  const sub = (state.me && state.me.subscription) || {};
+  const stars = (state.me && state.me.tariffs && state.me.tariffs.stars) || 0;
+  if (sub.autorenew) {
+    button.hidden = true;
+    note.hidden = false;
+    note.textContent = '🔁 Автопродление включено: Telegram списывает месяц сам. Отмена — в настройках Telegram (Stars → Подписки).';
+    return;
+  }
+  note.hidden = true;
+  button.hidden = !stars;
+  button.innerHTML = stars ? `🔁 Автопродление — ${stars} ⭐/мес` : '🔁 Автопродление звёздами';
 }
 
 /* ───────────────── Оплата вне Telegram: карта и крипта ───────────────── */
@@ -4859,6 +4882,9 @@ function bindEvents() {
   $('webPayBtn').addEventListener('click', (event) => {
     payOnWeb(event.currentTarget);
   });
+  $('autoRenewBtn').addEventListener('click', (event) => {
+    payWithStars(event.currentTarget, 1, true);
+  });
   $('distributeBtn').addEventListener('click', (event) => {
     moveBankDays('distribute', event.currentTarget);
   });
@@ -5082,6 +5108,7 @@ async function boot() {
       // Цена в звёздах приходит с тарифами, поэтому подпись кнопки знает её
       // только здесь — до этого на кнопке нейтральный текст из index.html.
       renderTopUpButton();
+      renderAutoRenew();
       // Кнопка «на сайте» появляется только если контур внешней оплаты включён.
       renderWebPayButton();
       // Подарок за подписку на канал — тоже по ответу сервера: выключен, и

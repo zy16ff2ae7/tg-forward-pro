@@ -27,6 +27,7 @@ from app.payments import crypto, service, yookassa
 from app.plans import (
     DEFAULT_MONTHS,
     STARS_DESCRIPTION,
+    STARS_SUBSCRIPTION_PERIOD,
     is_valid_period,
     months_from_callback,
     periods_text,
@@ -44,7 +45,8 @@ async def _status_text(user_id: int) -> str:
     async with SessionLocal() as session:
         until = await repo.subscription_until(session, user_id)
         rules_count = await repo.count_rules(session, user_id)
-    return texts.subscription_status(until, rules_count)
+        autorenew = await repo.stars_autorenew(session, user_id)
+    return texts.subscription_status(until, rules_count, autorenew=autorenew)
 
 
 @router.message(Command("sub"))
@@ -431,6 +433,32 @@ async def pay_stars_period(callback: CallbackQuery) -> None:
     )
 
 
+@router.callback_query(F.data == "pay:stars:auto")
+async def pay_stars_autorenew(callback: CallbackQuery) -> None:
+    """Шаг 2-авто: счёт-подписка — Telegram списывает месяц сам.
+
+    Payload того же формата, что у разовых счетов: каждое списание продлевает
+    абонемент на месяц тем же хендлером successful_payment. Отличается только
+    subscription_period — и флаг is_recurring в приходящих апдейтах.
+    """
+    await callback.answer()
+    assert callback.from_user is not None
+
+    amount = stars_amount(1)
+    title = "Абонемент с автопродлением"
+    await callback.bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title=title,
+        description=STARS_DESCRIPTION,
+        # Формат читает хендлер successful_payment — менять нельзя.
+        payload=f"sub:{callback.from_user.id}:1",
+        provider_token="",  # для Stars токен не нужен
+        currency="XTR",
+        prices=[LabeledPrice(label=f"{title} — {amount} ⭐/мес", amount=amount)],
+        subscription_period=STARS_SUBSCRIPTION_PERIOD,
+    )
+
+
 @router.pre_checkout_query()
 async def on_pre_checkout(query: PreCheckoutQuery) -> None:
     """Проверяем счёт до списания: срок из каталога, сумма наша, плательщик тот.
@@ -524,10 +552,24 @@ async def on_stars_paid(message: Message) -> None:
             external_id=payment.telegram_payment_charge_id,
         )
         until = await repo.activate_subscription(session, user_id, months)
+        # Рекуррентное списание — признак живой подписки: взводим флаг.
+        # Разовый платёж флага не касается: подписка могла остаться с прошлого
+        # раза, а могла и не быть — гадать по одному платежу нельзя.
+        recurring = bool(
+            getattr(payment, "is_recurring", False)
+            or getattr(payment, "is_first_recurring", False)
+        )
+        if recurring:
+            await repo.set_stars_autorenew(session, user_id, True)
         await session.commit()
 
+    head = (
+        "🔁 <b>Автопродление сработало</b>"
+        if recurring
+        else "🎉 <b>Оплата прошла</b>"
+    )
     await message.answer(
-        "🎉 <b>Оплата прошла</b>\n\n"
+        head + "\n\n"
         f"Абонемент активен до <b>{until:%d.%m.%Y %H:%M}</b> (UTC).\n"
         "Правила уже работают.",
         reply_markup=kb.back_to_main(),

@@ -149,6 +149,10 @@ class Subscription(Base):
     # Копилка: дни, снятые с активного периода и ждущие распределения.
     # В отличие от active_until они не «горят» — не привязаны к конкретной дате.
     banked_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Автопродление за Stars: последняя оплата пришла рекуррентным списанием.
+    # Отмену подписки в настройках Telegram Bot API боту не сообщает,
+    # поэтому флаг снимается, когда срок истёк: раз списания нет — продления нет.
+    stars_autorenew: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=_utcnow, onupdate=_utcnow, nullable=False
     )

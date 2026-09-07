@@ -453,9 +453,28 @@ async def subscriptions_awaiting_expiry_notice(
 
 
 async def mark_expiry_notified(session: AsyncSession, sub: Subscription) -> None:
-    """Помечает, что про этот конец срока хозяину уже сказали."""
+    """Помечает, что про этот конец срока хозяину уже сказали.
+
+    Заодно снимает флаг автопродления: раз срок истёк — рекуррентное списание
+    не пришло (его отменили в настройках Telegram, о чём Bot API не сообщает).
+    """
     sub.expired_notified_at = utcnow()
+    sub.stars_autorenew = False
     await session.flush()
+
+
+async def stars_autorenew(session: AsyncSession, user_id: int) -> bool:
+    """Включено ли у пользователя автопродление за Stars."""
+    sub = await session.get(Subscription, user_id)
+    return bool(sub is not None and sub.stars_autorenew)
+
+
+async def set_stars_autorenew(session: AsyncSession, user_id: int, value: bool) -> None:
+    """Ставит/снимает флаг автопродления. Молчит, если подписки нет."""
+    sub = await session.get(Subscription, user_id)
+    if sub is not None:
+        sub.stars_autorenew = value
+        await session.flush()
 
 
 async def mark_reminded(session: AsyncSession, user_id: int) -> None:
