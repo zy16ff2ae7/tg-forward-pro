@@ -568,6 +568,29 @@ button { border: none; background: none; cursor: pointer; }
 .tile__ico { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; font-size: 17px; }
 .tile__name { font-size: 11px; letter-spacing: 0.01em; color: var(--muted); text-align: center; }
 
+/* Хитовая команда: светится неоном и носит плашку «ХИТ» на верхней кромке.
+   Класс общий для плитки на главной и ячейки в сетке «Что создаём». */
+.tile--hit {
+  position: relative;
+  border-color: rgba(255, 61, 154, 0.6);
+  box-shadow: 0 0 20px rgba(255, 61, 154, 0.32),
+    inset 0 0 14px rgba(255, 61, 154, 0.07);
+}
+.tile--hit .tile__name, .tile--hit .create-cell__name { color: var(--text); font-weight: 700; }
+.tile__hit {
+  position: absolute;
+  top: -8px;
+  right: 6px;
+  padding: 2px 7px;
+  border-radius: 99px;
+  background: var(--accent-grad);
+  color: #fff;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  box-shadow: 0 4px 12px rgba(255, 61, 154, 0.5);
+}
+
 /* Выбор «Что создаём»: сетка команд 3 в ряд, иконка + короткое имя */
 .create-grid {
   display: grid;

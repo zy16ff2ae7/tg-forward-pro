@@ -290,9 +290,10 @@ const OWN_TEXT_KINDS = ['poster', 'mailing'];
 
 /* Плитки «быстрый старт» на Главной: восемь слотов, последний — весь каталог.
    Подписи короткие: на 390 px в четыре столбца длинное название не влезает.
-   Первая плитка — единый слот своих сообщений: им пользуются чаще всего. */
+   Первая плитка — рассылка по чатам: самая популярная команда, поэтому подпись
+   называет её прямо, а флаг hit подсвечивает плитку и вешает плашку «ХИТ». */
 const TILES = [
-  { id: 'sender', name: 'Посты' },
+  { id: 'sender', name: 'Рассылка', hit: true },
   { id: 'copy_channel', name: 'Копия' },
   { id: 'broadcast', name: 'В чаты' },
   { id: 'parser', name: 'Парсер' },
@@ -322,6 +323,10 @@ const SMART_WORDS = {
 
 /* Что показать, когда человек просто открыл поле и ничего не набрал. */
 const SMART_FALLBACK = ['sender', 'copy_channel', 'broadcast'];
+
+/* Команды с плашкой «ХИТ»: источник — флаг hit у плиток выше, чтобы хит
+   задавался в одном месте, а не разъезжался между главной и сеткой. */
+const HIT_COMMANDS = new Set(TILES.filter((tile) => tile.hit).map((tile) => tile.id));
 
 const SETTINGS = [
   { icon: 'i-users', title: 'Рефералы', desc: 'Ссылка, зеркала и выплаты', start: 'referrals' },
@@ -1731,8 +1736,9 @@ function renderTiles() {
   holder.innerHTML = items
     .map(
       (tile) => `
-      <button class="tile" ${tile.tab ? `data-goto="${tile.tab}"` : `data-command="${tile.id}"`}
+      <button class="tile${tile.hit ? ' tile--hit' : ''}" ${tile.tab ? `data-goto="${tile.tab}"` : `data-command="${tile.id}"`}
               title="${esc(tile.title || tile.name)}">
+        ${tile.hit ? '<span class="tile__hit" aria-hidden="true">ХИТ</span>' : ''}
         <span class="tile__ico ${tile.ico}" aria-hidden="true">${icon(tile.icon)}</span>
         <span class="tile__name">${esc(tile.name)}</span>
       </button>`
@@ -2278,7 +2284,8 @@ function openCreateSheet() {
   holder.innerHTML = state.commands
     .map(
       (command) => `
-      <button class="create-cell${command.status === 'ready' ? '' : ' is-off'}" data-command="${command.id}">
+      <button class="create-cell${command.status === 'ready' ? '' : ' is-off'}${HIT_COMMANDS.has(command.id) ? ' tile--hit' : ''}" data-command="${command.id}">
+        ${HIT_COMMANDS.has(command.id) ? '<span class="tile__hit" aria-hidden="true">ХИТ</span>' : ''}
         <span class="tile__ico ${icoClass(command.kind)}" aria-hidden="true">${icon(kindIcon(command.kind))}</span>
         <span class="create-cell__name">${esc(command.title)}</span>
       </button>`
