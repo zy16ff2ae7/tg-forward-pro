@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 from urllib.parse import urlparse
@@ -26,6 +27,7 @@ from app.config import settings
 from app.db.database import SessionLocal, session_scope
 from app.db.models import TelegramAccount
 from app.db import repo
+from app.security import decrypt_session
 from app.telegram_client.filters import FilterConfig
 from app.telegram_client.forwarder import (
     deliver,
@@ -209,6 +211,41 @@ def _dialog_muted(dialog: Any) -> bool:
     return True
 
 
+@dataclass(slots=True, frozen=True)
+class LoginCreds:
+    """Свои ключи API для входа (my.telegram.org/apps).
+
+    ``None`` вместо пары — ключи сервиса из ``.env``: так входит
+    большинство. Свои ключи нужны, когда сервисные упёрлись в лимиты
+    Telegram или человек не хочет делить App с чужими аккаунтами.
+    """
+
+    api_id: int
+    api_hash: str
+
+
+def creds_from_account(account: TelegramAccount) -> LoginCreds | None:
+    """Ключи, которыми входит аккаунт: свои или сервисные (None).
+
+    Битая запись не роняет запуск: предупреждаем в журнал и пробуем
+    сервисные — сессия под ними, скорее всего, не встанет, и честная
+    причина появится обычным путём.
+    """
+    if not account.api_id or not account.api_hash_encrypted:
+        return None
+    try:
+        return LoginCreds(
+            api_id=int(account.api_id),
+            api_hash=decrypt_session(account.api_hash_encrypted),
+        )
+    except Exception:  # noqa: BLE001 — ключ сменился или строка битая
+        logger.warning(
+            "Аккаунт #{}: свои ключи API не читаются, пробуем сервисные",
+            account.id,
+        )
+        return None
+
+
 class ClientManager:
     """Держит живые Telethon-сессии и раздаёт им входящие сообщения."""
 
@@ -256,12 +293,14 @@ class ClientManager:
         if not settings.mtproto_ready:
             raise TelegramApiCredentialsMissing(PUBLIC_LOGIN_UNAVAILABLE)
 
-    def _new_client(self, session_string: str = "") -> TelegramClient:
+    def _new_client(
+        self, session_string: str = "", creds: LoginCreds | None = None
+    ) -> TelegramClient:
         self._ensure_mtproto_ready()
         return TelegramClient(
             StringSession(session_string),
-            settings.api_id,
-            settings.api_hash,
+            creds.api_id if creds else settings.api_id,
+            creds.api_hash if creds else settings.api_hash,
             proxy=_proxy_dict(settings.proxy),
             device_model="MacBook Pro",
             system_version="macOS",
@@ -270,7 +309,19 @@ class ClientManager:
             request_retries=5,
         )
 
-    async def send_code(self, phone: str) -> tuple[str, str, dict]:
+    async def create_login_client(self, creds: LoginCreds | None = None) -> TelegramClient:
+        """Подключённый клиент для входа с нуля — под него QR-сессия.
+
+        Возвращает живой клиент: закрывает его вызывающий (вход закончился
+        любым исходом — соединение не должно висеть).
+        """
+        client = self._new_client(creds=creds)
+        await client.connect()
+        return client
+
+    async def send_code(
+        self, phone: str, creds: LoginCreds | None = None
+    ) -> tuple[str, str, dict]:
         """Отправляет код подтверждения.
 
         Возвращает (сессия, phone_code_hash, доставка), где доставка — словарь
@@ -280,7 +331,7 @@ class ClientManager:
         станет доступен. Тип доставки пишется и в журнал: иначе «код не
         пришёл» гадается вслепую.
         """
-        client = self._new_client()
+        client = self._new_client(creds=creds)
         await client.connect()
         try:
             result = await client.send_code_request(phone)
@@ -297,7 +348,11 @@ class ClientManager:
             await client.disconnect()
 
     async def resend_code(
-        self, phone: str, session_string: str, phone_code_hash: str
+        self,
+        phone: str,
+        session_string: str,
+        phone_code_hash: str,
+        creds: LoginCreds | None = None,
     ) -> tuple[str, str, dict]:
         """Просит Telegram прислать код ещё раз — следующим способом доставки.
 
@@ -308,7 +363,7 @@ class ClientManager:
         ``PhoneCodeExpiredError`` наружу не глотаем: попытка целиком протухла
         и вызывающий должен начать вход заново.
         """
-        client = self._new_client(session_string)
+        client = self._new_client(session_string, creds)
         await client.connect()
         try:
             result = await client(
@@ -327,7 +382,12 @@ class ClientManager:
             await client.disconnect()
 
     async def sign_in_code(
-        self, phone: str, code: str, session_string: str, phone_code_hash: str
+        self,
+        phone: str,
+        code: str,
+        session_string: str,
+        phone_code_hash: str,
+        creds: LoginCreds | None = None,
     ) -> str:
         """Вводит код из Telegram. Возвращает обновлённую сессию.
 
@@ -341,7 +401,7 @@ class ClientManager:
         подойдёт та же, что пришла: ключ авторизации и DC при вводе кода не
         меняются, а SRP-обмен идёт по тому же ключу.
         """
-        client = self._new_client(session_string)
+        client = self._new_client(session_string, creds)
         await client.connect()
         try:
             await client.sign_in(
@@ -351,9 +411,11 @@ class ClientManager:
         finally:
             await client.disconnect()
 
-    async def sign_in_password(self, password: str, session_string: str) -> str:
+    async def sign_in_password(
+        self, password: str, session_string: str, creds: LoginCreds | None = None
+    ) -> str:
         """Вводит облачный пароль (2FA). Возвращает итоговую сессию."""
-        client = self._new_client(session_string)
+        client = self._new_client(session_string, creds)
         await client.connect()
         try:
             await client.sign_in(password=password)
@@ -361,9 +423,15 @@ class ClientManager:
         finally:
             await client.disconnect()
 
-    async def check_session(self, session_string: str) -> tuple[bool, str | None, str | None]:
-        """Проверяет, что сессия жива. Возвращает (ok, имя_пользователя, ошибка)."""
-        client = self._new_client(session_string)
+    async def check_session(
+        self, session_string: str, creds: LoginCreds | None = None
+    ) -> tuple[bool, str | None, str | None]:
+        """Проверяет, что сессия жива. Возвращает (ok, имя_пользователя, ошибка).
+
+        Ключи — те же, что у входа: сессия привязана к api_id, и чужими
+        ключами она не проверяется.
+        """
+        client = self._new_client(session_string, creds)
         try:
             await client.connect()
             me = await client.get_me()
@@ -410,8 +478,12 @@ class ClientManager:
                 delivery_queue.submit(event.client, event.message, rule)
 
     async def start_account(self, account: TelegramAccount, session_string: str) -> bool:
-        """Подключает один аккаунт и вешает на него обработчик."""
-        client = self._new_client(session_string)
+        """Подключает один аккаунт и вешает на него обработчик.
+
+        Ключи берёт из строки аккаунта: у своих ключей своя сессия, и
+        поднимать её сервисными бессмысленно.
+        """
+        client = self._new_client(session_string, creds_from_account(account))
         setattr(client, "_account_id", account.id)
         client.add_event_handler(
             self._on_new_message,

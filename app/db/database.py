@@ -116,9 +116,13 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
     },
     "pending_logins": {
         "attempts": "INTEGER NOT NULL DEFAULT 0",
+        "api_id": "INTEGER",
+        "api_hash_encrypted": "TEXT",
     },
     "telegram_accounts": {
         "error_notified_at": "DATETIME",
+        "api_id": "INTEGER",
+        "api_hash_encrypted": "TEXT",
     },
 }
 

@@ -90,6 +90,10 @@ class TelegramAccount(Base):
     phone: Mapped[str] = mapped_column(String(32), nullable=False)
     # Telethon StringSession, зашифрован Fernet-ключом из SECRET_KEY
     session_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    # Свои ключи API (my.telegram.org/apps). Пусто — ключи сервиса из .env.
+    # Хэш шифруется: это секрет, как и сессия.
+    api_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    api_hash_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
@@ -355,6 +359,10 @@ class PendingLogin(Base):
     phone: Mapped[str] = mapped_column(String(32), nullable=False)
     session_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     phone_code_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Свои ключи незавершённого входа: шаги sign_in идут по тем же ключам,
+    # что send_code, иначе Telegram не узнает попытку.
+    api_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    api_hash_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     # waiting_code | waiting_password
     stage: Mapped[str] = mapped_column(String(32), default="waiting_code", nullable=False)
     # Сколько раз код не подошёл. Опечатка в цифре — обычное дело, поэтому вход

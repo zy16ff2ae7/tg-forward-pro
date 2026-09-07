@@ -1135,9 +1135,16 @@ async def add_account(
     user_id: int,
     phone: str,
     session_encrypted: str,
+    *,
+    api_id: int | None = None,
+    api_hash_encrypted: str | None = None,
 ) -> TelegramAccount:
     account = TelegramAccount(
-        user_id=user_id, phone=phone, session_encrypted=session_encrypted
+        user_id=user_id,
+        phone=phone,
+        session_encrypted=session_encrypted,
+        api_id=api_id,
+        api_hash_encrypted=api_hash_encrypted,
     )
     session.add(account)
     await session.flush()
@@ -2043,6 +2050,9 @@ async def save_pending_login(
     phone_code_hash: str,
     stage: str = "waiting_code",
     attempts: int = 0,
+    *,
+    api_id: int | None = None,
+    api_hash_encrypted: str | None = None,
 ) -> PendingLogin:
     pending = await session.get(PendingLogin, user_id)
     if pending is None:
@@ -2053,6 +2063,8 @@ async def save_pending_login(
     pending.phone_code_hash = phone_code_hash
     pending.stage = stage
     pending.attempts = int(attempts)
+    pending.api_id = api_id
+    pending.api_hash_encrypted = api_hash_encrypted
     pending.created_at = utcnow()
     await session.flush()
     return pending

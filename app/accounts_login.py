@@ -22,7 +22,11 @@
 """
 from __future__ import annotations
 
+import asyncio
+import base64
+import io
 import re
+import time
 from dataclasses import dataclass
 
 from loguru import logger
@@ -44,10 +48,31 @@ from app.db.database import SessionLocal
 from app.db.models import TelegramAccount
 from app.errors import ConflictError, FeatureUnavailable, NotFoundError, ValidationError
 from app.security import decrypt_session, encrypt_session
-from app.telegram_client.manager import manager
+from app.telegram_client.manager import LoginCreds, manager
 from app.timeutil import utcnow
 
 PHONE_RE = re.compile(r"^\+?\d{10,15}$")
+API_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+def normalize_creds(api_id: object, api_hash: object) -> LoginCreds | None:
+    """Свои ключи API — парой или никак.
+
+    Оба пустые — ``None`` (вход ключами сервиса). Один без другого, нечисловой
+    id или непохожий на хэш мусор — ошибка ввода, а не поход в Telegram:
+    сервер и так скажет «не принял», но позже и загадочнее.
+    """
+    id_text = str(api_id or "").strip()
+    hash_text = str(api_hash or "").strip()
+    if not id_text and not hash_text:
+        return None
+    if not id_text or not hash_text:
+        raise ValidationError("Свои ключи вводятся парой: и API ID, и API Hash.")
+    if not id_text.isdigit() or int(id_text) <= 0:
+        raise ValidationError("API ID — число из my.telegram.org/apps.")
+    if not API_HASH_RE.match(hash_text):
+        raise ValidationError("API Hash — 32 шестнадцатеричных знака.")
+    return LoginCreds(api_id=int(id_text), api_hash=hash_text.lower())
 
 # Больше похоже на перебор, чем на опечатку: сбрасываем вход и просим новый код.
 MAX_CODE_ATTEMPTS = 5
@@ -165,10 +190,11 @@ async def cancel(user_id: int) -> bool:
     становилась способом запросить код ещё раз без паузы — а Telegram считает
     частые запросы флудом и закрывает вход на этот номер на часы.
     """
+    dropped_qr = await qr_cancel(user_id)
     async with SessionLocal() as session:
         row = await repo.get_pending_login(session, user_id)
         if row is None:
-            return False
+            return dropped_qr
         await repo.delete_pending_login(session, user_id)
         await session.commit()
     return True
@@ -213,7 +239,14 @@ def _too_early(phone: str, wait: int, pending: object | None) -> ConflictError:
     )
 
 
-async def start(user_id: int, phone_raw: str, *, resend: bool = False) -> LoginStep:
+async def start(
+    user_id: int,
+    phone_raw: str,
+    *,
+    resend: bool = False,
+    api_id: object = None,
+    api_hash: object = None,
+) -> LoginStep:
     """Шаг 1: просит Telegram выслать код на номер.
 
     Уже начатый вход на тот же номер не начинаем заново: код действует, и
@@ -229,6 +262,10 @@ async def start(user_id: int, phone_raw: str, *, resend: bool = False) -> LoginS
     """
     require_enabled()
     phone = normalize_phone(phone_raw)
+    creds = normalize_creds(api_id, api_hash)
+    # Один вход на человека: начатый QR умирает, иначе два живых клиента
+    # делят внимание и человек не понимает, что сканировать.
+    await qr_cancel(user_id)
 
     async with SessionLocal() as session:
         row = await repo.get_pending_login(session, user_id)
@@ -240,7 +277,9 @@ async def start(user_id: int, phone_raw: str, *, resend: bool = False) -> LoginS
             raise _too_early(phone, wait, row if pending_here else None)
 
     try:
-        session_string, phone_code_hash, delivery = await manager.send_code(phone)
+        session_string, phone_code_hash, delivery = await manager.send_code(
+            phone, creds
+        )
     except PhoneNumberInvalidError:
         raise ValidationError("Telegram не знает такой номер. Проверьте и введите заново.") from None
     except PhoneNumberBannedError:
@@ -249,6 +288,11 @@ async def start(user_id: int, phone_raw: str, *, resend: bool = False) -> LoginS
         # Отказ не человеку, а сервису: ключи api_id/api_hash взяты из
         # официального клиента, и Telegram не даёт входить по опубликованной
         # паре. Номер тут ни при чём, менять его бессмысленно.
+        if creds is not None:
+            raise ValidationError(
+                "Telegram не даёт входить по этим ключам: пара опубликована. "
+                "Возьмите свои api_id и api_hash на my.telegram.org/apps."
+            ) from None
         logger.error(
             "Вход #{}: Telegram отказал — ключи API опубликованы. Нужны свои "
             "API_ID/API_HASH с my.telegram.org/apps",
@@ -262,6 +306,11 @@ async def start(user_id: int, phone_raw: str, *, resend: bool = False) -> LoginS
             status="api_keys_public",
         ) from None
     except ApiIdInvalidError:
+        if creds is not None:
+            raise ValidationError(
+                "Telegram не принял эти ключи API. Сверьте api_id и api_hash "
+                "с my.telegram.org/apps."
+            ) from None
         logger.error("Вход #{}: Telegram не принял API_ID/API_HASH сервиса", user_id)
         raise FeatureUnavailable(
             "Подключение аккаунтов сейчас невозможно: Telegram не принял ключи "
@@ -293,6 +342,8 @@ async def start(user_id: int, phone_raw: str, *, resend: bool = False) -> LoginS
             phone_code_hash=phone_code_hash,
             stage=STAGE_CODE,
             attempts=0,
+            api_id=creds.api_id if creds else None,
+            api_hash_encrypted=encrypt_session(creds.api_hash) if creds else None,
         )
         await session.commit()
 
@@ -310,11 +361,14 @@ async def _resend(user_id: int, phone: str) -> LoginStep:
     (например, повтор ещё недоступен) остаётся на шаге кода — вход не рушим,
     человеку называем точный срок.
     """
-    _, session_string, code_hash, _ = await _load_pending(user_id, STAGE_CODE)
+    _, session_string, code_hash, _, creds = await _load_pending(user_id, STAGE_CODE)
 
     try:
         session_string, phone_code_hash, delivery = await manager.resend_code(
-            phone=phone, session_string=session_string, phone_code_hash=code_hash
+            phone=phone,
+            session_string=session_string,
+            phone_code_hash=code_hash,
+            creds=creds,
         )
     except PhoneCodeExpiredError:
         # Попытка целиком протухла — повторять нечего, начинаем вход заново.
@@ -359,6 +413,8 @@ async def _resend(user_id: int, phone: str) -> LoginStep:
             phone_code_hash=phone_code_hash,
             stage=STAGE_CODE,
             attempts=0,
+            api_id=creds.api_id if creds else None,
+            api_hash_encrypted=encrypt_session(creds.api_hash) if creds else None,
         )
         await session.commit()
 
@@ -369,16 +425,24 @@ async def _resend(user_id: int, phone: str) -> LoginStep:
 
 
 async def _load_pending(user_id: int, expected_stage: str | None = None):
-    """Достаёт незавершённый вход и расшифровывает временную сессию."""
+    """Достаёт незавершённый вход: сессию, хэш кода и ключи попытки."""
     async with SessionLocal() as session:
         row = await repo.get_pending_login(session, user_id)
         if row is None:
             raise ConflictError(
                 "Незавершённого входа нет. Начните заново: «Подключить аккаунт»."
             )
-        data = (row.phone, row.session_encrypted, row.phone_code_hash, row.stage, int(row.attempts or 0))
+        data = (
+            row.phone,
+            row.session_encrypted,
+            row.phone_code_hash,
+            row.stage,
+            int(row.attempts or 0),
+            row.api_id,
+            row.api_hash_encrypted,
+        )
 
-    phone, encrypted, code_hash, stage, attempts = data
+    phone, encrypted, code_hash, stage, attempts, api_id, api_hash_enc = data
     if expected_stage is not None and stage != expected_stage:
         raise ConflictError(
             "Шаг входа не тот: сервис ждёт "
@@ -386,12 +450,18 @@ async def _load_pending(user_id: int, expected_stage: str | None = None):
         )
     try:
         session_string = decrypt_session(encrypted)
+        api_hash = decrypt_session(api_hash_enc) if api_hash_enc else None
     except Exception:  # noqa: BLE001 — ключ сменился или строка битая
         await cancel(user_id)
         raise ConflictError(
             "Не удалось восстановить временную сессию. Начните подключение заново."
         ) from None
-    return phone, session_string, code_hash, attempts
+    creds = (
+        LoginCreds(api_id=int(api_id), api_hash=api_hash)
+        if api_id and api_hash
+        else None
+    )
+    return phone, session_string, code_hash, attempts, creds
 
 
 async def submit_code(user_id: int, code_raw: str) -> LoginStep:
@@ -401,11 +471,17 @@ async def submit_code(user_id: int, code_raw: str) -> LoginStep:
     if not code:
         raise ValidationError("В коде только цифры — пришлите их подряд, без пробелов.")
 
-    phone, session_string, code_hash, attempts = await _load_pending(user_id, STAGE_CODE)
+    phone, session_string, code_hash, attempts, creds = await _load_pending(
+        user_id, STAGE_CODE
+    )
 
     try:
         session_string = await manager.sign_in_code(
-            phone=phone, code=code, session_string=session_string, phone_code_hash=code_hash
+            phone=phone,
+            code=code,
+            session_string=session_string,
+            phone_code_hash=code_hash,
+            creds=creds,
         )
     except PhoneCodeInvalidError:
         # Опечатку прощаем: код ещё действует, повтор ничего не стоит.
@@ -442,6 +518,8 @@ async def submit_code(user_id: int, code_raw: str) -> LoginStep:
                 phone_code_hash=code_hash,
                 stage=STAGE_PASSWORD,
                 attempts=0,
+                api_id=creds.api_id if creds else None,
+                api_hash_encrypted=encrypt_session(creds.api_hash) if creds else None,
             )
             await session.commit()
         return LoginStep(stage="password", phone=phone)
@@ -452,7 +530,7 @@ async def submit_code(user_id: int, code_raw: str) -> LoginStep:
 
     # Телефонный код мог оказаться достаточным, а мог потребовать 2FA — Telethon
     # сообщает об этом исключением выше. Здесь код принят полностью.
-    return await _finish(user_id, phone, session_string)
+    return await _finish(user_id, phone, session_string, creds)
 
 
 async def submit_password(user_id: int, password: str) -> LoginStep:
@@ -461,22 +539,221 @@ async def submit_password(user_id: int, password: str) -> LoginStep:
     if not str(password or "").strip():
         raise ValidationError("Пароль пустой.")
 
-    phone, session_string, code_hash, _ = await _load_pending(user_id, STAGE_PASSWORD)
+    phone, session_string, code_hash, _, creds = await _load_pending(
+        user_id, STAGE_PASSWORD
+    )
 
     try:
-        session_string = await manager.sign_in_password(str(password), session_string)
+        session_string = await manager.sign_in_password(
+            str(password), session_string, creds
+        )
     except Exception as exc:  # noqa: BLE001 — пароль не подошёл, вход не рушим
         logger.info("Вход #{}: пароль 2FA не подошёл ({})", user_id, type(exc).__name__)
         raise ValidationError(
             f"Пароль не подошёл ({type(exc).__name__}). Попробуйте снова."
         ) from exc
 
-    return await _finish(user_id, phone, session_string)
+    return await _finish(user_id, phone, session_string, creds)
 
 
-async def _finish(user_id: int, phone: str, session_string: str) -> LoginStep:
-    """Проверяет сессию, сохраняет аккаунт и поднимает клиент."""
-    ok, name, error = await manager.check_session(session_string)
+# ───────────────────────────── Вход по QR-коду ─────────────────────────────
+
+
+# Сколько живёт QR-сессия. Сканируют обычно в первую минуту; пять минут —
+# с запасом на «открыть вторую камеру», дальше токен протухает сам.
+QR_TTL_SECONDS = 300
+
+
+@dataclass(slots=True)
+class _QrWait:
+    """Живая QR-сессия: клиент ждёт сканирования в фоне.
+
+    В отличие от входа по номеру, здесь состояние обязано жить в памяти:
+    Telethon-клиент в БД не положишь. Перезапуск убивает ожидание — статус
+    честно скажет «начните заново», а не повиснет.
+    """
+
+    client: object | None
+    url: str
+    creds: LoginCreds | None
+    expires_at: float
+    task: asyncio.Task | None = None
+    result: LoginStep | None = None
+    error: str | None = None
+    need_password: bool = False
+
+
+_qr_sessions: dict[int, _QrWait] = {}
+
+
+def _qr_image(url: str) -> str:
+    """QR-код картинкой (data URI): клиент показывает как есть, без библиотек."""
+    import qrcode
+
+    buffer = io.BytesIO()
+    qrcode.make(url).save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+    return f"data:image/png;base64,{encoded}"
+
+
+async def _qr_drop(user_id: int) -> None:
+    """Убирает QR-сессию: соединение закрыто, задача снята, следов нет."""
+    wait = _qr_sessions.pop(user_id, None)
+    if wait is None:
+        return
+    task, wait.task = wait.task, None
+    # Себя вотчер не отменяет: он и так на выходе, а CancelledError изнутри
+    # выглядел бы отменой снаружи.
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+    client, wait.client = wait.client, None
+    if client is not None:
+        try:
+            await client.disconnect()
+        except Exception:  # noqa: BLE001 — закрытие не должно ронять отмену
+            pass
+
+
+async def qr_start(
+    user_id: int, *, api_id: object = None, api_hash: object = None
+) -> dict:
+    """Начинает вход по QR: клиент ждёт сканирования, наружу — код картинкой.
+
+    Один вход на человека: телефонный pending и прошлый QR умирают — иначе
+    два живых клиента делят внимание. Возвращает ссылку, картинку и срок.
+    """
+    require_enabled()
+    creds = normalize_creds(api_id, api_hash)
+    await qr_cancel(user_id)
+    await cancel(user_id)
+    client = await manager.create_login_client(creds)
+    try:
+        qr = await client.qr_login()
+    except Exception:
+        try:
+            await client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    wait = _QrWait(
+        client=client,
+        url=str(qr.url),
+        creds=creds,
+        expires_at=time.monotonic() + QR_TTL_SECONDS,
+    )
+    wait.task = asyncio.create_task(_qr_watch(user_id, wait, qr))
+    _qr_sessions[user_id] = wait
+    logger.info("Вход #{}: QR-сессия начата", user_id)
+    return {
+        "url": wait.url,
+        "image": _qr_image(wait.url),
+        "expires_in": QR_TTL_SECONDS,
+    }
+
+
+async def _qr_watch(user_id: int, wait: _QrWait, qr: object) -> None:
+    """Фон: ждёт сканирования и доводит вход до конца.
+
+    Результат кладёт в сессию — его забирает статус. Клиент после успеха
+    отключает, но запись оставляет: иначе статус нечего будет отдать.
+    """
+    from telethon.errors import SessionPasswordNeededError as PasswordNeeded
+
+    try:
+        await qr.wait()  # type: ignore[union-attr]
+    except PasswordNeeded:
+        wait.need_password = True
+        return
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — токен протух или сеть упала
+        logger.info("Вход #{}: QR-ожидание сорвалось ({})", user_id, type(exc).__name__)
+        wait.error = "QR-код устарел. Начните заново — это полминуты."
+        await _qr_drop(user_id)
+        # Запись нужна статусу, а _qr_drop её снёс — возвращаем с ошибкой.
+        _qr_sessions[user_id] = wait
+        wait.client = None
+        wait.task = None
+        return
+    try:
+        me = await wait.client.get_me()  # type: ignore[union-attr]
+        phone = f"+{me.phone}" if getattr(me, "phone", None) else ""
+        session_string = wait.client.session.save()  # type: ignore[union-attr]
+        wait.result = await _finish(user_id, phone, session_string, wait.creds)
+    except Exception as exc:  # noqa: BLE001 — вход не удался, причина — наружу
+        logger.info("Вход #{}: QR-вход не удался ({})", user_id, type(exc).__name__)
+        wait.error = str(exc) or "Вход не удался. Попробуйте заново."
+    client, wait.client = wait.client, None
+    wait.task = None
+    if client is not None:
+        try:
+            await client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def qr_status(user_id: int) -> LoginStep | dict:
+    """Что с QR-входом: ждём, нужен пароль, готово или начинайте заново."""
+    require_enabled()
+    wait = _qr_sessions.get(user_id)
+    if wait is None:
+        raise ConflictError("QR-вход не начат или уже закрыт. Начните заново.")
+    if wait.error is not None:
+        await _qr_drop(user_id)
+        raise ConflictError(wait.error)
+    if wait.result is not None:
+        await _qr_drop(user_id)
+        return wait.result
+    if wait.need_password:
+        return {"stage": "password"}
+    if time.monotonic() >= wait.expires_at:
+        await _qr_drop(user_id)
+        raise ConflictError("QR-код устарел. Начните заново — это полминуты.")
+    return {"stage": "waiting"}
+
+
+async def qr_password(user_id: int, password: str) -> LoginStep:
+    """Облачный пароль после сканирования QR (у кого включён 2FA)."""
+    require_enabled()
+    if not str(password or "").strip():
+        raise ValidationError("Пароль пустой.")
+    wait = _qr_sessions.get(user_id)
+    if wait is None or not wait.need_password or wait.client is None:
+        raise ConflictError("Пароль сейчас не ждут. Начните вход заново.")
+    try:
+        await wait.client.sign_in(password=str(password))  # type: ignore[union-attr]
+    except Exception as exc:  # noqa: BLE001 — пароль не подошёл, сессия жива
+        logger.info("Вход #{}: QR-пароль не подошёл ({})", user_id, type(exc).__name__)
+        raise ValidationError(
+            f"Пароль не подошёл ({type(exc).__name__}). Попробуйте снова."
+        ) from exc
+    try:
+        me = await wait.client.get_me()  # type: ignore[union-attr]
+        phone = f"+{me.phone}" if getattr(me, "phone", None) else ""
+        session_string = wait.client.session.save()  # type: ignore[union-attr]
+        return await _finish(user_id, phone, session_string, wait.creds)
+    finally:
+        await _qr_drop(user_id)
+
+
+async def qr_cancel(user_id: int) -> bool:
+    """Отменяет QR-вход. False — отменять было нечего."""
+    if user_id not in _qr_sessions:
+        return False
+    await _qr_drop(user_id)
+    return True
+
+
+async def _finish(
+    user_id: int, phone: str, session_string: str, creds: LoginCreds | None = None
+) -> LoginStep:
+    """Проверяет сессию, сохраняет аккаунт и поднимает клиент.
+
+    Ключи попытки едут в строку аккаунта: сессия привязана к api_id, и
+    поднимать её чужими ключами бессмысленно. Повторный вход обновляет
+    и ключи — вдруг человек переехал на свои.
+    """
+    ok, name, error = await manager.check_session(session_string, creds)
     if not ok:
         await cancel(user_id)
         raise ConflictError(f"Аккаунт не подтверждён: {error}. Попробуйте заново.")
@@ -499,6 +776,10 @@ async def _finish(user_id: int, phone: str, session_string: str) -> LoginStep:
             existing.session_encrypted = encrypt_session(session_string)
             existing.is_active = True
             existing.last_error = None
+            existing.api_id = creds.api_id if creds else None
+            existing.api_hash_encrypted = (
+                encrypt_session(creds.api_hash) if creds else None
+            )
             account_id = int(existing.id)
             await session.commit()
         else:
@@ -507,6 +788,8 @@ async def _finish(user_id: int, phone: str, session_string: str) -> LoginStep:
                 user_id=user_id,
                 phone=phone,
                 session_encrypted=encrypt_session(session_string),
+                api_id=creds.api_id if creds else None,
+                api_hash_encrypted=encrypt_session(creds.api_hash) if creds else None,
             )
             await session.commit()
             account_id = int(account.id)
