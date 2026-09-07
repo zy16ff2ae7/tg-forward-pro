@@ -96,6 +96,28 @@ const FIELD_SPEC = {
     placeholder: 'чек, подарок, gift',
     note: 'через запятую; пусто — ловим всё подряд',
   },
+  banned_words: {
+    label: 'Запретные слова (для всех)',
+    placeholder: 'казино, ставка, заработок',
+    note: 'через запятую — удаляем у кого угодно, кроме админов',
+  },
+  block_links: {
+    label: 'Удалять сообщения со ссылками',
+    control: 'check',
+    note: 'кроме админов',
+  },
+  max_warns: {
+    label: 'Варнов до мута',
+    control: 'number',
+    placeholder: '3',
+    note: '0 — только удалять, без мута',
+  },
+  mute_hours: {
+    label: 'Мут на часов',
+    control: 'number',
+    placeholder: '24',
+    note: 'до 720 (месяц)',
+  },
   reaction: { label: 'Реакция', placeholder: '👍', note: 'любой эмодзи' },
   limit: { label: 'Сколько сохранить', control: 'number', placeholder: '200', note: 'не больше 10 000' },
   scan: { label: 'Сколько просмотреть', control: 'number', placeholder: '1000', note: 'фильтры отсеивают — смотреть надо больше' },
@@ -572,7 +594,7 @@ const DEMO_COMMANDS = [
     description: 'Ставит реакцию на сообщения выбранного человека в общем чате.',
     tags: ['один человек', 'реакция'] },
   { id: 'mute', group: 'moderation', kind: 'mute', emoji: '🔇', title: 'Мут', status: 'ready',
-    needs: ['account', 'source', 'target_user'], optional: ['keywords', 'alerts'],
+    needs: ['account', 'source', 'target_user'], optional: ['keywords', 'banned_words', 'block_links', 'max_warns', 'mute_hours', 'alerts'],
     description: 'Удаляет сообщения выбранного человека в чате, где вы администратор.',
     tags: ['один человек', 'нужны права админа'] },
 ];
@@ -1084,6 +1106,12 @@ function demoTaskEdit(body, command, chats, libraryIds) {
   else if (kind === 'baiting') edit.reaction = body.reaction || '👍';
   else if (['checks', 'dialogs', 'mute'].includes(kind)) {
     edit.keywords = (body.keywords || []).join(', ');
+    if (kind === 'mute') {
+      edit.banned_words = (body.banned_words || []).join(', ');
+      edit.block_links = Boolean(body.block_links);
+      edit.max_warns = Number(body.max_warns) || 0;
+      edit.mute_hours = Number(body.mute_hours) || 24;
+    }
     if (kind === 'dialogs') {
       edit.ignore_bots = body.ignore_bots !== undefined ? Boolean(body.ignore_bots) : true;
       edit.ignore_archived = body.ignore_archived !== undefined ? Boolean(body.ignore_archived) : true;
@@ -2318,6 +2346,7 @@ function taskMetaLines(task) {
   if (task.keywords_count) lines.push(`🔎 ${task.keywords_count} сл.`);
   if (task.alerts === false) lines.push('🔕 без алертов');
   if (task.chats_pruned) lines.push(`🧹 ${task.chats_pruned} мёртв.`);
+  if (task.banned_count) lines.push(`🚫 ${task.banned_count} сл.`);
   if (task.kind === 'clone' && !task.clone_done) {
     const total = Number(task.clone_history || 0);
     const left = Number(task.clone_left || 0);
@@ -3922,9 +3951,10 @@ function applyTaskPrefill(prefill) {
   // Настройки задачи — одним проходом: ключ формы и ключ задачи совпадают, а
   // лишние для этой команды поля просто не находятся в разметке.
   ['keywords', 'reaction', 'limit', 'scan', 'online_within_hours', 'api_delay',
-    'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'translate_to', 'history', 'invite_to']
+    'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'translate_to', 'history', 'invite_to',
+    'banned_words', 'max_warns', 'mute_hours']
     .forEach((key) => setValue(key, prefill[key]));
-  ['typing', 'random_pick', 'link_preview', 'schedule_only', 'uniquify', 'alerts',
+  ['typing', 'random_pick', 'link_preview', 'schedule_only', 'uniquify', 'alerts', 'block_links',
     'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only',
     'ignore_bots', 'ignore_archived', 'ignore_muted']
     .forEach((key) => {
@@ -4555,6 +4585,9 @@ function collectTaskPayload() {
   if (values.keywords !== undefined && (values.keywords || editing)) {
     body.keywords = splitList(values.keywords);
   }
+  if (values.banned_words !== undefined && (values.banned_words || editing)) {
+    body.banned_words = splitList(values.banned_words);
+  }
   if (values.targets !== undefined && (values.targets || editing)) {
     body.targets = splitList(values.targets);
   }
@@ -4567,12 +4600,15 @@ function collectTaskPayload() {
   number('cycle', values.cycle);
   number('repeats', values.repeats);
   number('history', values.history);
+  number('max_warns', values.max_warns);
+  number('mute_hours', values.mute_hours);
   flag('schedule_only', values.schedule_only);
   if (values.scheduled_posts !== undefined) body.scheduled_posts = values.scheduled_posts;
   flag('typing', values.typing);
   flag('random_pick', values.random_pick);
   flag('link_preview', values.link_preview);
   flag('uniquify', values.uniquify);
+  flag('block_links', values.block_links);
   // Алерты — всегда явно: галочка стоит из коробки, и снятие на создании
   // должно выключать, а не теряться в «не прислали — значит по умолчанию».
   if (values.alerts !== undefined) body.alerts = Boolean(values.alerts);

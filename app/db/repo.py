@@ -1500,6 +1500,35 @@ async def count_trailing_errors(
 DEAD_CHAT_STRIKES = 3
 
 
+async def bump_mod_strike(session: AsyncSession, rule_id: int, user_id: int) -> int:
+    """Нарушение засчитано: возвращает новый счёт предупреждений человека."""
+    rule = await session.get(Rule, rule_id)
+    if rule is None:
+        return 0
+    filters = copy.deepcopy(rule.filters or {})
+    strikes = dict(filters.get("mod_strikes") or {})
+    count = int(strikes.get(str(user_id), 0)) + 1
+    strikes[str(user_id)] = count
+    filters["mod_strikes"] = strikes
+    rule.filters = filters
+    await session.flush()
+    return count
+
+
+async def clear_mod_strikes(session: AsyncSession, rule_id: int, user_id: int) -> None:
+    """Лесенка пройдена (мут выдан): счёт человека обнуляется."""
+    rule = await session.get(Rule, rule_id)
+    if rule is None:
+        return
+    filters = copy.deepcopy(rule.filters or {})
+    strikes = dict(filters.get("mod_strikes") or {})
+    if strikes.pop(str(user_id), None) is None:
+        return
+    filters["mod_strikes"] = strikes
+    rule.filters = filters
+    await session.flush()
+
+
 async def register_chat_strikes(
     session: AsyncSession,
     rule_id: int,

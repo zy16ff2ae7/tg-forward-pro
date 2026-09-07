@@ -44,7 +44,7 @@ from telethon.tl.types import ChannelParticipantsAdmins
 from app.db import repo
 from app.errors import ValidationError
 from app.db.database import SessionLocal
-from app.telegram_client.filters import FilterConfig, message_text, transform_text
+from app.telegram_client.filters import URL_RE, FilterConfig, message_text, transform_text
 from app.telegram_client.forwarder import send_copy, subscription_active
 from app.telegram_client.types import RuleSnapshot
 from app.translate import maybe_translate
@@ -832,15 +832,109 @@ async def _baiting(client: Any, message: Any, rule: RuleSnapshot) -> None:
     await record_ok(rule, message)
 
 
-async def _mute(client: Any, message: Any, rule: RuleSnapshot) -> None:
-    """Удаляет сообщения нужного человека в общем чате."""
-    if not _sender_matches(rule, message):
-        return
-    if not _matches_keywords(rule.filters.keywords, message_text(message)):
-        return
+# Админы чата для модерации — с кэшем на 10 минут: спрашивать состав при
+# каждом сообщении значит упереться во FloodWait на первом же живом чате.
+_mod_admins: dict[tuple[int, int], tuple[float, set[int]]] = {}
+_MOD_ADMINS_TTL = 600
 
-    await client.delete_messages(message.chat_id, [message.id])
+
+async def _mod_admin_ids(client: Any, account_id: int, chat_id: int) -> set[int]:
+    """Админы чата: свои под модерацию не попадают."""
+    now = time.time()
+    hit = _mod_admins.get((account_id, chat_id))
+    if hit is not None and now - hit[0] < _MOD_ADMINS_TTL:
+        return hit[1]
+    try:
+        ids = {
+            int(getattr(user, "id", 0) or 0)
+            async for user in client.iter_participants(
+                chat_id, filter=ChannelParticipantsAdmins
+            )
+        }
+    except Exception:  # noqa: BLE001 — нет прав/чата: считаем, что админов нет
+        return set()
+    ids.discard(0)
+    _mod_admins[(account_id, chat_id)] = (now, ids)
+    return ids
+
+
+async def record_mod_action(rule: RuleSnapshot, user_id: int, action: str) -> None:
+    """Серьёзное действие модерации (мут) — строкой в журнал, а не только в лог."""
+    async with SessionLocal() as session:
+        await repo.log_forward(
+            session,
+            rule_id=rule.id,
+            user_id=rule.user_id,
+            source_msg_id=0,
+            target_msg_id=None,
+            status="ok",
+            error=f"🔇 {user_id}: {action}",
+        )
+        await session.commit()
+
+
+async def _mute(client: Any, message: Any, rule: RuleSnapshot) -> None:
+    """Модерирует чат: цель, запретные слова и ссылки — удалением, рецидив — мутом.
+
+    Три повода удалить: сообщение поднадзорного (с учётом слов), запретное
+    слово от кого угодно и ссылка при включённом блоке. Админы от слов и ссылок
+    освобождены — но явно поднадзорного это не касается: раз человека заказали,
+    значит так надо. Каждое удаление — варн автору; набрал ``max_warns`` —
+    получает мут на ``mute_hours`` и счёт обнуляется.
+    """
+    conf = rule.filters
+    text = message_text(message)
+    sender_id = int(getattr(message, "sender_id", 0) or 0)
+    chat_id = int(message.chat_id)
+
+    if getattr(conf, "target_user_id", 0):
+        targeted = _sender_matches(rule, message) and _matches_keywords(
+            conf.keywords, text
+        )
+    else:
+        # Цели нет (старые задачи): как раньше — по словам на всех.
+        targeted = _matches_keywords(conf.keywords, text) and bool(
+            [word for word in (conf.keywords or []) if str(word).strip()]
+        )
+    banned = [word.strip().lower() for word in (conf.banned_words or []) if word and word.strip()]
+    word_hit = bool(banned) and any(word in text.lower() for word in banned)
+    link_hit = bool(conf.block_links) and bool(text) and URL_RE.search(text) is not None
+    if not targeted and not word_hit and not link_hit:
+        return
+    if (word_hit or link_hit) and sender_id:
+        admins = await _mod_admin_ids(client, rule.account_id, chat_id)
+        if sender_id in admins and not targeted:
+            return
+
+    await client.delete_messages(chat_id, [message.id])
     await record_ok(rule, message)
+
+    max_warns = max(0, int(conf.max_warns or 0))
+    if max_warns <= 0 or not sender_id:
+        return
+    async with SessionLocal() as session:
+        count = await repo.bump_mod_strike(session, rule.id, sender_id)
+        await session.commit()
+    if count < max_warns:
+        return
+    hours = min(720, max(1, int(conf.mute_hours or 24)))
+    try:
+        await client.edit_permissions(
+            chat_id,
+            sender_id,
+            send_messages=False,
+            until_date=datetime.now(timezone.utc) + timedelta(hours=hours),
+        )
+    except Exception as exc:  # noqa: BLE001 — удаление уже сработало
+        logger.warning(
+            "Мут #{}: не смог ограничить {} ({}): проверьте права админа",
+            rule.id, sender_id, exc,
+        )
+    else:
+        await record_mod_action(rule, sender_id, f"мут {hours} ч после {count} нарушений")
+    async with SessionLocal() as session:
+        await repo.clear_mod_strikes(session, rule.id, sender_id)
+        await session.commit()
 
 
 async def _dialog_flags(account_id: int, chat_id: int) -> dict[str, Any]:

@@ -81,6 +81,12 @@ class FilterConfig:
     # Счётчик сбоев по чатам {chat_id: {fails, error}} и сколько уже убрано.
     chat_strikes: dict = field(default_factory=dict)
     chats_pruned: int = 0
+    # Модерация: запретные слова для всех, блок ссылок, лесенка варнов.
+    banned_words: list = field(default_factory=list)
+    block_links: bool = False
+    max_warns: int = 3
+    mute_hours: int = 24
+    mod_strikes: dict = field(default_factory=dict)
     # Настройки задач из app.telegram_client.jobs
     targets: list[int] = field(default_factory=list)
     subscribe_to: list[str] = field(default_factory=list)
@@ -163,6 +169,11 @@ class FilterConfig:
             "alerts": self.alerts,
             "chat_strikes": self.chat_strikes,
             "chats_pruned": self.chats_pruned,
+            "banned_words": self.banned_words,
+            "block_links": self.block_links,
+            "max_warns": self.max_warns,
+            "mute_hours": self.mute_hours,
+            "mod_strikes": self.mod_strikes,
             "targets": self.targets,
             "subscribe_to": self.subscribe_to,
             "reaction": self.reaction,

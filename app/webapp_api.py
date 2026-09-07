@@ -833,9 +833,20 @@ async def _apply_task_settings(
     elif kind == "baiting":
         if given("reaction"):
             filters["reaction"] = str(payload.get("reaction") or "").strip() or "👍"
-    elif kind in ("checks", "mute"):
+    elif kind == "checks":
         if given("keywords"):
             filters["keywords"] = _as_list(payload.get("keywords"))
+    elif kind == "mute":
+        if given("keywords"):
+            filters["keywords"] = _as_list(payload.get("keywords"))
+        if given("banned_words"):
+            filters["banned_words"] = _as_list(payload.get("banned_words"))
+        if given("block_links"):
+            filters["block_links"] = _as_bool(payload.get("block_links"))
+        if given("max_warns"):
+            filters["max_warns"] = max(0, min(_as_int(payload.get("max_warns"), 3), 10))
+        if given("mute_hours"):
+            filters["mute_hours"] = max(1, min(_as_int(payload.get("mute_hours"), 24), 720))
     elif kind == "listener":
         if given("keywords"):
             filters["keywords"] = _as_list(payload.get("keywords"))
@@ -2685,6 +2696,10 @@ def _task_view(
     if kind in ("forward", "broadcast", "poster", "mailing", "clone",
                 "listener", "checks", "dialogs", "baiting", "mute"):
         view["alerts"] = bool(getattr(conf, "alerts", True))
+    if kind == "mute":
+        view["banned_count"] = len(
+            [word for word in (conf.banned_words or []) if str(word).strip()]
+        )
     if kind in ("broadcast", "poster", "mailing"):
         # Сколько мёртвых чатов задача уже убрала сама: авто-уборка обязана
         # быть видна, иначе пропавшие получатели выглядят как баг.
@@ -2854,8 +2869,14 @@ def _edit_view(
         edit["api_delay"] = int(conf.api_delay or 0)
     elif kind == "baiting":
         edit["reaction"] = conf.reaction
-    elif kind in ("checks", "mute"):
+    elif kind == "checks":
         edit["keywords"] = ", ".join(conf.keywords or [])
+    elif kind == "mute":
+        edit["keywords"] = ", ".join(conf.keywords or [])
+        edit["banned_words"] = ", ".join(conf.banned_words or [])
+        edit["block_links"] = bool(conf.block_links)
+        edit["max_warns"] = int(conf.max_warns or 0)
+        edit["mute_hours"] = int(conf.mute_hours or 24)
     elif kind == "listener":
         edit["keywords"] = ", ".join(conf.keywords or [])
     elif kind == "dialogs":
@@ -2910,11 +2931,24 @@ def _edit_view(
         edit["random_pick"] = bool(conf.random_pick)
         edit["link_preview"] = bool(conf.link_preview)
         edit["send_mode"] = "queue"
-        # И наоборот: поля расписания с умолчаниями — для переключения режима.
+        # И наоборот: поля расписания с умолчаниями — для переключения режима
+        # (редактор дат тех же слотов, что у постинга: отправляет общий воркер).
         edit["interval"] = max(1, conf.interval_seconds // 60)
         edit["start"] = conf.window_start
         edit["end"] = conf.window_end
         edit["tz"] = window_tz_minutes(conf.window_tz)
+        edit["schedule_only"] = bool(conf.schedule_only)
+        edit["scheduled_posts"] = [
+            {
+                "id": s.get("id"),
+                "at": s.get("at"),
+                "text": s.get("text") or "",
+                "library_id": s.get("library_id"),
+                "sent": bool(s.get("sent")),
+            }
+            for s in (conf.scheduled_posts or [])
+            if isinstance(s, dict)
+        ]
     return edit
 
 
@@ -3087,8 +3121,9 @@ COMMANDS: list[dict] = [
         "description": "Удаляет сообщения выбранного человека в чате, где вы администратор.",
         "status": "ready",
         "needs": ["account", "source", "target_user"],
-        "optional": ["keywords", "alerts"],
-        "tags": ["один человек", "нужны права админа"],
+        "optional": ["keywords", "banned_words", "block_links", "max_warns", "mute_hours", "alerts"],
+        "hint": "Цель — человек под надзором, слова — для всех. Каждое удаление — варн автору: набрал максимум — получает мут на часы. Админы от слов и ссылок освобождены.",
+        "tags": ["слова и ссылки", "варны и мут", "нужны права админа"],
     },
 ]
 
