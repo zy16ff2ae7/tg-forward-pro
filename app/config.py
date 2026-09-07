@@ -121,6 +121,14 @@ class Settings:
     # столько же дают реферальные скидки. 0 — письма без кода нет: дёргать
     # ушедшего без подарка — спам, а не возврат.
     winback_percent: int = 5
+    # Сторож сервиса: ошибок за 5 минут больше порога — письмо владельцу.
+    # 0 — не сторожить ошибки.
+    watch_errors: int = 20
+    # Аккаунтов не в сети больше порога — письмо владельцу. 0 — не сторожить.
+    watch_offline: int = 3
+    # Пауза между письмами сторожа одного вида. Без неё авария длиной в час
+    # стоила бы двенадцать писем.
+    watch_cooldown_min: int = 60
 
     # Подарок за подписку на канал сервиса: разово, один раз на аккаунт.
     # Пусто — бонуса нет нигде: ни карточки в кабинете, ни кнопки в боте.
@@ -592,6 +600,9 @@ def load_settings() -> Settings:
         winback_percent=max(
             0, min(90, _get_int("WINBACK_PERCENT", 5))
         ),
+        watch_errors=max(0, _get_int("WATCH_ERRORS", 20)),
+        watch_offline=max(0, _get_int("WATCH_OFFLINE", 3)),
+        watch_cooldown_min=max(1, _get_int("WATCH_COOLDOWN_MIN", 60)),
         bonus_channel=_get("BONUS_CHANNEL"),
         bonus_days=max(0, _get_int("BONUS_DAYS", 3)),
         referral_days=max(0, _get_int("REFERRAL_DAYS", 3)),

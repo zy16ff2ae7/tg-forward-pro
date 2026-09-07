@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
 from datetime import timedelta
 
@@ -407,6 +408,62 @@ async def notify_silent_rules(bot: Bot) -> None:
             logger.debug("Не смогли сказать пользователю {} про молчащую задачу", user_id)
 
 
+# Когда сторож писал в последний раз — по видам. В памяти, не в базе:
+# после рестарта одна повторная весть об аварии — приемлемая цена
+# за отсутствие ещё одной таблицы ради двух чисел.
+_watch_last: dict[str, float] = {}
+
+
+def _watch_due(kind: str) -> bool:
+    """Прошёл ли кулдаун по виду тревоги. Прошёл — взводим заново."""
+    now = time.monotonic()
+    last = _watch_last.get(kind, 0.0)
+    if now - last < settings.watch_cooldown_min * 60:
+        return False
+    _watch_last[kind] = now
+    return True
+
+
+async def notify_watchdog(bot: Bot) -> None:
+    """Сторож сервиса: всплеск ошибок или аккаунты не в сети — владельцу.
+
+    Пассивный /api/health хорош для мониторинга, но мониторинг смотрит
+    человек — когда вспомнит. Сторож пишет сам: ошибок за пять минут больше
+    порога (с топом текстов — что именно горит) или активных аккаунтов
+    вне сети больше порога. По каждому виду — кулдаун: авария длиной в час
+    стоит одно письмо, а не двенадцать.
+    """
+    if not settings.admin_ids:
+        return
+    window_min = BACKGROUND_INTERVAL_SECONDS // 60
+    async with SessionLocal() as session:
+        errors = await repo.count_forward_errors_since(session, window_min)
+        top = await repo.top_forward_errors(session, window_min) if errors else []
+        expected = set(await repo.active_account_ids(session))
+    online = set(manager.online_ids())
+    offline = len(expected - online)
+
+    alerts: list[str] = []
+    if settings.watch_errors > 0 and errors >= settings.watch_errors:
+        if _watch_due("errors"):
+            lines = "\n".join(f"• {text} — {count}" for text, count in top)
+            alerts.append(
+                f"🚨 <b>Всплеск ошибок: {errors} за {window_min} мин.</b>\n\n{lines}"
+            )
+    if settings.watch_offline > 0 and offline >= settings.watch_offline:
+        if _watch_due("offline"):
+            alerts.append(
+                f"📴 <b>Аккаунтов не в сети: {offline}.</b>\n\n"
+                "Проверьте сессии — задачи на них стоят."
+            )
+    for admin_id in settings.admin_ids:
+        for text in alerts:
+            try:
+                await bot.send_message(admin_id, text)
+            except Exception:  # noqa: BLE001
+                logger.debug("Не смогли сказать владельцу {} про аварию", admin_id)
+
+
 async def trim_logs(_bot: Bot) -> None:
     """Подрезает журнал пересылок и убирает строки удалённых задач.
 
@@ -450,6 +507,7 @@ async def run_background_checks(bot: Bot) -> None:
         ("онбординг новичков", notify_onboarding),
         ("брошенные счета", notify_abandoned_payments),
         ("молчащие задачи", notify_silent_rules),
+        ("сторож сервиса", notify_watchdog),
         ("выпавшие аккаунты", notify_dead_accounts),
         ("уборка базы", trim_logs),
     )

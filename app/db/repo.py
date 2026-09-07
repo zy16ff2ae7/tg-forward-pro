@@ -1019,6 +1019,40 @@ async def mark_silent_notified(session: AsyncSession, rule: Rule) -> None:
     await session.flush()
 
 
+async def count_forward_errors_since(session: AsyncSession, minutes: int) -> int:
+    """Сколько ошибок доставки случилось за минуты — пульс для сторожа."""
+    cutoff = utcnow() - timedelta(minutes=max(1, minutes))
+    result = await session.execute(
+        select(func.count()).select_from(ForwardLog).where(
+            ForwardLog.status == "error", ForwardLog.created_at >= cutoff
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+async def top_forward_errors(
+    session: AsyncSession, minutes: int, limit: int = 3
+) -> list[tuple[str, int]]:
+    """Частые тексты ошибок за минуты — что именно горит."""
+    cutoff = utcnow() - timedelta(minutes=max(1, minutes))
+    result = await session.execute(
+        select(ForwardLog.error, func.count())
+        .where(ForwardLog.status == "error", ForwardLog.created_at >= cutoff)
+        .group_by(ForwardLog.error)
+        .order_by(func.count().desc())
+        .limit(max(1, limit))
+    )
+    return [(error or "без текста", int(count)) for error, count in result.all()]
+
+
+async def active_account_ids(session: AsyncSession) -> list[int]:
+    """Аккаунты, которые должны быть в сети. Выключенные не в счёт."""
+    result = await session.execute(
+        select(TelegramAccount.id).where(TelegramAccount.is_active.is_(True))
+    )
+    return list(result.scalars().all())
+
+
 async def mark_winback_notified(session: AsyncSession, sub: Subscription) -> None:
     sub.winback_notified_at = utcnow()
     await session.flush()
