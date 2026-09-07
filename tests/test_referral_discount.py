@@ -1,11 +1,11 @@
-"""Скидка за друга: обоим — личный одноразовый промокод на −5%.
+"""Скидка за друга: другу — код за приход, пригласившему — за оплату.
 
-Приход новичка дарит дни (как раньше) плюс два личных кода на скидку:
-другу — в приветствии, пригласившему — в сообщении-радости. Код
-активируется как обычный промокод, но вместо дней встаёт в ожидание
+Друг за приход получает личный промокод на −5% к первой оплате, а
+пригласивший — дни и свой код, когда друг оплатит первый абонемент.
+Код активируется как обычный промокод, но вместо дней встаёт в ожидание
 и дешевле делает ближайший разовый счёт. Проверяем:
 
-* заход дарит два разных личных кода, дни обоим — как раньше;
+* заход дарит код только другу, дней нет; оплата — код и дни пригласившему;
 * чужой код неотличим от несуществующего;
 * активация ставит скидку в ожидание, а не продлевает абонемент;
 * вторая скидка ждёт своей очереди (deferred), пока первая не потрачена;
@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
 from types import SimpleNamespace
 
 from app import promocode, referral
@@ -26,7 +25,6 @@ from app.config import settings
 from app.db import repo
 from app.db.database import session_scope
 from app.plans import apply_discount, rub_amount, stars_amount
-from app.timeutil import utcnow
 from tests.helpers import TEST_USER_ID
 from tests.test_webapp_api import FakeInvoiceBot
 
@@ -34,7 +32,7 @@ FRIEND_ID = 768_000_201
 OTHER_ID = 768_000_202
 
 
-async def _grant(create_user):
+async def _join(create_user):
     await create_user(id=TEST_USER_ID)
     await create_user(id=FRIEND_ID)
     async with session_scope() as session:
@@ -44,47 +42,64 @@ async def _grant(create_user):
     return result
 
 
+async def _first_payment(user_id: int):
+    """Первый оплаченный месяц картой — с наградой пригласившему."""
+    async with session_scope() as session:
+        payment = await repo.create_payment(
+            session, user_id=user_id, provider="yookassa",
+            amount=float(rub_amount(1)), currency="RUB", months=1,
+        )
+        await session.flush()
+        assert await repo.claim_payment(session, payment) is True
+        await repo.activate_subscription(session, user_id, 1)
+        reward = await repo.reward_referrer(
+            session, user_id, settings.referral_days, referral.discount_percent()
+        )
+        await session.commit()
+    return reward
+
+
 async def _pending(user_id: int):
     async with session_scope() as session:
         promo = await repo.pending_discount(session, user_id)
         return promo.code if promo else None
 
 
-async def test_grant_mints_personal_codes_for_both(create_user):
-    """Заход: два разных личных кода на −5%, дни обоим — как раньше."""
-    result = await _grant(create_user)
-    assert result.friend_code and result.referrer_code
-    assert result.friend_code != result.referrer_code
-
+async def test_join_gives_code_only_to_friend(create_user):
+    """Заход: код только другу, дней никому; оплата: код и дни пригласившему."""
+    result = await _join(create_user)
+    assert result.friend_code
     async with session_scope() as session:
         friend = await repo.get_promo_code(session, result.friend_code)
-        referrer = await repo.get_promo_code(session, result.referrer_code)
-        assert friend.percent == referrer.percent == settings.referral_discount_percent
+        assert friend.percent == settings.referral_discount_percent
         assert friend.owner_id == FRIEND_ID
-        assert referrer.owner_id == TEST_USER_ID
         assert friend.days == 0  # скидочный код дней не даёт
+        assert await repo.subscription_until(session, FRIEND_ID) is None
+        assert await repo.subscription_until(session, TEST_USER_ID) is None
 
-    days = settings.referral_days
-    for user_id in (TEST_USER_ID, FRIEND_ID):
-        async with session_scope() as session:
-            until = await repo.subscription_until(session, user_id)
-        assert until is not None
-        assert timedelta(days=days - 1) < until - utcnow() <= timedelta(days=days)
+    reward = await _first_payment(FRIEND_ID)
+    assert reward is not None
+    referrer_id, code = reward
+    assert referrer_id == TEST_USER_ID and code and code != result.friend_code
+    async with session_scope() as session:
+        assert await repo.subscription_until(session, TEST_USER_ID) is not None
 
 
 async def test_messages_hold_the_codes(create_user):
-    """Друг видит свой код в приветствии, пригласивший — в радости."""
-    result = await _grant(create_user)
+    """Друг видит код в приветствии, пригласивший — в вести об оплате."""
+    result = await _join(create_user)
     assert result.friend_code in referral.message(result, "Иван")
-    text = referral.referrer_message("Пётр", result.days, result.referrer_code)
-    assert result.referrer_code in text and "Промокод" in text
-    # Без кода — старый короткий текст: скидки могли быть выключены.
-    assert "промокод" not in referral.referrer_message("Пётр", 7).lower()
+    pending = referral.referrer_pending_message("Пётр")
+    assert "REF-" not in pending and "первый абонемент" in pending
+    reward = await _first_payment(FRIEND_ID)
+    assert reward is not None
+    text = referral.referrer_reward_message("Пётр", settings.referral_days, reward[1])
+    assert reward[1] in text and "Промокод" in text
 
 
 async def test_stranger_cannot_use_personal_code(create_user):
     """Чужой личный код — как несуществующий: ни перехвата, ни перебора."""
-    result = await _grant(create_user)
+    result = await _join(create_user)
     await create_user(id=OTHER_ID)
     async with session_scope() as session:
         outcome = await promocode.redeem(session, OTHER_ID, result.friend_code)
@@ -95,7 +110,7 @@ async def test_stranger_cannot_use_personal_code(create_user):
 
 async def test_owner_activation_parks_the_discount(create_user):
     """Активация ставит скидку в ожидание, абонемент не трогает."""
-    result = await _grant(create_user)
+    result = await _join(create_user)
     async with session_scope() as session:
         outcome = await promocode.redeem(session, FRIEND_ID, result.friend_code)
         assert outcome.granted and outcome.days == 0
@@ -107,7 +122,7 @@ async def test_owner_activation_parks_the_discount(create_user):
 
 async def test_second_discount_waits_its_turn(create_user):
     """Вторая скидка ждёт, пока первая не потрачена."""
-    result = await _grant(create_user)
+    result = await _join(create_user)
     async with session_scope() as session:
         first = await promocode.redeem(session, FRIEND_ID, result.friend_code)
         assert first.granted
@@ -124,7 +139,7 @@ async def test_second_discount_waits_its_turn(create_user):
 
 async def test_discounted_claim_consumes_the_code(create_user):
     """Зачёт дешевле тарифа: скидка гаснет, код — одноразовый."""
-    result = await _grant(create_user)
+    result = await _join(create_user)
     cheap = int(apply_discount(rub_amount(1), settings.referral_discount_percent))
     async with session_scope() as session:
         activated = await promocode.redeem(session, FRIEND_ID, result.friend_code)
@@ -147,7 +162,7 @@ async def test_discounted_claim_consumes_the_code(create_user):
 
 async def test_full_price_claim_keeps_the_discount(create_user):
     """Зачёт по полному тарифу чужую (будущую) скидку не трогает."""
-    result = await _grant(create_user)
+    result = await _join(create_user)
     async with session_scope() as session:
         payment = await repo.create_payment(
             session, user_id=FRIEND_ID, provider="yookassa",
@@ -165,7 +180,7 @@ async def test_full_price_claim_keeps_the_discount(create_user):
 
 async def test_manual_claim_keeps_the_discount(create_user):
     """Ручная выдача скидок не касается: там платит не человек."""
-    result = await _grant(create_user)
+    result = await _join(create_user)
     async with session_scope() as session:
         activated = await promocode.redeem(session, FRIEND_ID, result.friend_code)
         assert activated.granted
@@ -180,47 +195,49 @@ async def test_manual_claim_keeps_the_discount(create_user):
 
 
 async def test_no_codes_when_percent_zero(create_user, monkeypatch):
-    """Ноль процентов — только дни: кодов нет, тексты короткие."""
+    """Ноль процентов — только дни за оплату: кодов нет, тексты короткие."""
     monkeypatch.setattr(settings, "referral_discount_percent", 0)
-    await create_user(id=TEST_USER_ID)
-    await create_user(id=FRIEND_ID)
-    async with session_scope() as session:
-        result = await referral.apply(session, FRIEND_ID, TEST_USER_ID)
-        assert result.granted
-        codes = await repo.owner_discount_codes(session, FRIEND_ID)
-        await session.commit()
-    assert result.friend_code == "" and result.referrer_code == ""
-    assert codes == []
+    result = await _join(create_user)
+    assert result.friend_code == ""
     assert "промокод" not in referral.message(result).lower()
+    reward = await _first_payment(FRIEND_ID)
+    assert reward is not None and reward[1] == ""
+    async with session_scope() as session:
+        assert await repo.subscription_until(session, TEST_USER_ID) is not None
 
 
 async def test_api_me_reports_codes_and_pending(client, auth_headers, create_user):
     """/api/me: карточка видит коды, ожидание и размер скидки."""
-    result = await _grant(create_user)
+    await _join(create_user)
     response = await client.get("/api/me", headers=auth_headers)
     block = (await response.json())["referral"]
     assert block["discount_percent"] == settings.referral_discount_percent
-    assert result.referrer_code in block["discount_codes"]
-    assert block["pending_discount"] == 0
+    assert block["discount_codes"] == [] and block["pending_discount"] == 0
+
+    reward = await _first_payment(FRIEND_ID)
+    assert reward is not None
+    again = await client.get("/api/me", headers=auth_headers)
+    block = (await again.json())["referral"]
+    assert reward[1] in block["discount_codes"]
 
     async with session_scope() as session:
-        activated = await promocode.redeem(
-            session, TEST_USER_ID, result.referrer_code
-        )
+        activated = await promocode.redeem(session, TEST_USER_ID, reward[1])
         assert activated.granted
         await session.commit()
-    again = await client.get("/api/me", headers=auth_headers)
-    assert (await again.json())["referral"]["pending_discount"] == (
+    third = await client.get("/api/me", headers=auth_headers)
+    assert (await third.json())["referral"]["pending_discount"] == (
         settings.referral_discount_percent
     )
 
 
 async def test_api_promo_redeems_discount(client, auth_headers, create_user):
     """Кабинет активирует скидку тем же эндпоинтом — 200 и процент."""
-    result = await _grant(create_user)
+    await _join(create_user)
+    reward = await _first_payment(FRIEND_ID)
+    assert reward is not None
     response = await client.post(
         "/api/subscription/promo",
-        json={"code": result.referrer_code},
+        json={"code": reward[1]},
         headers=auth_headers,
     )
     assert response.status == 200
@@ -228,7 +245,7 @@ async def test_api_promo_redeems_discount(client, auth_headers, create_user):
     assert body["granted"] is True and body["days"] == 0
     assert body["percent"] == settings.referral_discount_percent
     assert "Скидка" in body["message"]
-    assert await _pending(TEST_USER_ID) == result.referrer_code
+    assert await _pending(TEST_USER_ID) == reward[1]
 
 
 def _paid_message(user_id: int, charge_id: str, sent: list, total: int):
@@ -248,7 +265,7 @@ async def test_stars_success_consumes_discount(create_user):
     """Звёзды со скидкой: абонемент плюс, скидка погашена."""
     from app.bot.handlers.subscription import on_stars_paid
 
-    result = await _grant(create_user)
+    result = await _join(create_user)
     cheap = int(apply_discount(stars_amount(1), settings.referral_discount_percent))
     async with session_scope() as session:
         activated = await promocode.redeem(session, FRIEND_ID, result.friend_code)
@@ -256,7 +273,11 @@ async def test_stars_success_consumes_discount(create_user):
         await session.commit()
 
     sent: list[str] = []
-    await on_stars_paid(_paid_message(FRIEND_ID, "charge-deal-1", sent, cheap))
+    message = _paid_message(FRIEND_ID, "charge-deal-1", sent, cheap)
+    # Награды пригласившему тут нет: друг платит, а bring_to... — нет бота для
+    # вести, поэтому друг без пригласившего. Отвязываем, чтобы не слать в пустоту.
+    message.bot = SimpleNamespace(send_message=lambda *a, **k: asyncio.sleep(0))
+    await on_stars_paid(message)
     async with session_scope() as session:
         assert await repo.subscription_until(session, FRIEND_ID) is not None
     assert sent and "Оплата прошла" in sent[0]
@@ -289,7 +310,7 @@ async def test_pre_checkout_accepts_discounted_amount(create_user):
     """До списания: полный тариф и цена со скидкой — да, левая — нет."""
     from app.bot.handlers.subscription import on_pre_checkout
 
-    result = await _grant(create_user)
+    result = await _join(create_user)
     async with session_scope() as session:
         activated = await promocode.redeem(session, FRIEND_ID, result.friend_code)
         assert activated.granted

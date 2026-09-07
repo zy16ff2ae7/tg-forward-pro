@@ -227,6 +227,7 @@ async def _referral_card(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
         stats = await referral.info(session, user_id)
     text = texts.referral_card(
         stats["link"], stats["code"], stats["days"], stats["invited"], stats["earned_days"],
+        rewarded=int(stats["rewarded"] or 0),
         discount_percent=int(stats["discount_percent"] or 0),
         discount_codes=tuple(stats["discount_codes"] or ()),
         pending_discount=int(stats["pending_discount"] or 0),
@@ -595,6 +596,13 @@ async def on_stars_paid(message: Message) -> None:
             paid_amount=float(payment.total_amount),
             months=months,
         )
+        # Первый оплаченный абонемент — награда пригласившему (если друга
+        # приводили по ссылке). Повторный апдейт сюда не доходит, а второй
+        # платёж того же друга награды не даёт: один друг — одна награда.
+        stars_reward = await repo.reward_referrer(
+            session, user_id,
+            settings.referral_days, referral.discount_percent(),
+        )
         # Рекуррентное списание — признак живой подписки: взводим флаг.
         # Разовый платёж флага не касается: подписка могла остаться с прошлого
         # раза, а могла и не быть — гадать по одному платежу нельзя.
@@ -605,6 +613,20 @@ async def on_stars_paid(message: Message) -> None:
         if recurring:
             await repo.set_stars_autorenew(session, user_id, True)
         await session.commit()
+
+    if stars_reward is not None:
+        referrer_id, deal_code = stars_reward
+        try:
+            await message.bot.send_message(
+                referrer_id,
+                referral.referrer_reward_message(
+                    message.from_user.full_name or "друг",
+                    settings.referral_days,
+                    deal_code,
+                ),
+            )
+        except Exception:  # noqa: BLE001 — награда начислена, весть вторична
+            logger.debug("Не смогли уведомить {} о награде", referrer_id)
 
     head = (
         "🔁 <b>Автопродление сработало</b>"
@@ -727,7 +749,26 @@ async def check_yookassa(callback: CallbackQuery) -> None:
                 )
             return
         until = await repo.activate_subscription(session, payment.user_id, payment.months)
+        check_reward = await repo.reward_referrer(
+            session, payment.user_id,
+            settings.referral_days, referral.discount_percent(),
+        )
         await session.commit()
+
+    if check_reward is not None:
+        referrer_id, deal_code = check_reward
+        friend = callback.from_user
+        try:
+            await callback.bot.send_message(
+                referrer_id,
+                referral.referrer_reward_message(
+                    (friend.full_name if friend else "") or "друг",
+                    settings.referral_days,
+                    deal_code,
+                ),
+            )
+        except Exception:  # noqa: BLE001 — награда начислена, весть вторична
+            logger.debug("Не смогли уведомить {} о награде", referrer_id)
 
     if callback.message is not None:
         await smart_edit(callback.message, 

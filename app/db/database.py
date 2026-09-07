@@ -85,6 +85,10 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "users": {
         "channel_bonus_at": "DATETIME",
         "pending_promo_id": "INTEGER",
+        # Старым строкам — 1: раньше дни дарили за регистрацию, и все старые
+        # связи уже оплачены. Новым строкам ORM пишет свой default=False:
+        # единица в DDL нужна только для доливки, дальше её перекрывает модель.
+        "referred_rewarded": "BOOLEAN NOT NULL DEFAULT 1",
     },
     "promo_codes": {
         "percent": "INTEGER NOT NULL DEFAULT 0",

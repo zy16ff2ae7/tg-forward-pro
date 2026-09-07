@@ -122,7 +122,10 @@ class Settings:
 
     # Реферальная программа: друг пришёл по ссылке — обоим плюс столько дней.
     # Ноль выключает программу целиком: ссылок нет ни в боте, ни в кабинете.
-    referral_days: int = 7
+    # Дней пригласившему — за первый оплаченный абонемент друга.
+    # Бонус скромный осознанно: большой лёгкий бонус тут же начинают фармить.
+    # 0 — вся программа выключена.
+    referral_days: int = 5
     # Скидка каждому из двоих за приход друга: оба получают личный
     # одноразовый промокод на −N% к следующей оплате. 0 — только дни.
     referral_discount_percent: int = 5
@@ -580,7 +583,7 @@ def load_settings() -> Settings:
         renew_remind_days=_get_int("RENEW_REMIND_DAYS", 3),
         bonus_channel=_get("BONUS_CHANNEL"),
         bonus_days=max(0, _get_int("BONUS_DAYS", 3)),
-        referral_days=max(0, _get_int("REFERRAL_DAYS", 7)),
+        referral_days=max(0, _get_int("REFERRAL_DAYS", 5)),
         referral_discount_percent=max(
             0, min(90, _get_int("REFERRAL_DISCOUNT_PERCENT", 5))
         ),

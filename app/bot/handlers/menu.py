@@ -131,16 +131,14 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
                 result, referrer.mention if referrer else "друг"
             )
             if result.granted:
-                # Пригласившему — радость сразу: иначе он узнает о днях,
-                # только открыв абонемент.
+                # Пригласившему — весть сразу: дни и код он получит, когда
+                # друг оплатит первый абонемент, а о приходе пусть знает сейчас.
                 try:
                     await message.bot.send_message(
                         referrer_id,
-                        referral_program.referrer_message(
-                            friend, result.days, result.referrer_code
-                        ),
+                        referral_program.referrer_pending_message(friend),
                     )
-                except Exception:  # noqa: BLE001 — друг свои дни уже получил
+                except Exception:  # noqa: BLE001 — друг свой код уже получил
                     pass
 
     if deep_link in ("add_account", "resume_login"):

@@ -44,6 +44,11 @@ class User(Base):
     # фиксируется навсегда — перепривязка открыла бы лазейку
     # лазейку «ходить по кругу и собирать дни с каждого».
     referred_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Пригласивший уже получил награду за этого друга. Награда — за первый
+    # оплаченный абонемент друга, а не за регистрацию: иначе её фармят
+    # пачками фейковых аккаунтов. Выставляется условным UPDATE (гонку
+    # двух одновременных платежей держит база), назад не снимается.
+    referred_rewarded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     accounts: Mapped[list["TelegramAccount"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

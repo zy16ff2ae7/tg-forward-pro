@@ -643,9 +643,13 @@ function demoMe() {
       enabled: true,
       link: 'https://t.me/docha_demo_bot?start=ref_1',
       code: 'ref_1',
-      days: 7,
+      days: 5,
       invited: 2,
-      earned_days: 14,
+      rewarded: 1,
+      earned_days: 5,
+      discount_percent: 5,
+      discount_codes: ['REF-DEMO1'],
+      pending_discount: 0,
     },
   };
 }
@@ -4886,12 +4890,17 @@ function renderReferral() {
 
   const days = Number(info.days) || 0;
   const invited = Number(info.invited) || 0;
-  $('referralTitle').textContent = `Пригласи друга — обоим +${days} дн.`;
-  $('referralDesc').textContent = info.link
-    ? 'Друг приходит по вашей ссылке — вы оба получаете дни к абонементу.'
-    : 'Ссылка соберётся, когда владелец укажет юзернейм бота.';
+  const rewarded = Number(info.rewarded) || 0;
+  const pctEarly = Number(info.discount_percent) || 0;
+  $('referralTitle').textContent = 'Пригласи друга — обоим выгода';
+  $('referralDesc').textContent = !info.link
+    ? 'Ссылка соберётся, когда владелец укажет юзернейм бота.'
+    : pctEarly
+      ? `Друг забирает −${pctEarly}% на первую оплату, а вам за его абонемент — +${days} дн. и тоже −${pctEarly}%.`
+      : `Друг приходит по вашей ссылке, а вам за его первый абонемент — +${days} дн.`;
   $('referralNote').textContent =
-    `Пришло друзей: ${invited}. Заработано дней: ${Number(info.earned_days) || 0}.`;
+    `Пришло друзей: ${invited} (с абонементом: ${rewarded}). ` +
+    `Заработано дней: ${Number(info.earned_days) || 0}.`;
   /* Скидочные коды и ожидание: каждый приход дарит обоим личный промокод
      на −N% к следующей оплате. Показываем их здесь, а не только в сообщении
      бота: сообщение теряется, а карточка всегда под рукой. */

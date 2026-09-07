@@ -254,36 +254,88 @@ REFERRAL_NEWCOMER_WINDOW = timedelta(minutes=10)
 
 
 async def apply_referral(
-    session: AsyncSession, user_id: int, referrer_id: int, days: int
-) -> tuple[str, datetime | None]:
-    """Привязывает новичка к пригласившему и дарит дни обоим.
+    session: AsyncSession, user_id: int, referrer_id: int
+) -> str:
+    """Привязывает новичка к пригласившему. Дней не дарит никому.
 
-    Возвращает итог и (при выдаче) новый срок абонемента новичка:
-    ``granted`` — дни начислены, ``self`` — ссылка своя, ``stranger`` —
-    пригласившего нет в базе, ``stale`` — аккаунт не свежий, ``already`` —
-    пригласивший уже записан (включая гонку двух одновременных заходов).
+    Дни за регистрацию кончились: их фармили пачками фейковых аккаунтов, и они
+    противоречили правилу «бесплатно — только за подписку на канал». Теперь
+    друг за приход получает скидочный промокод (минтит вызывающий), а
+    пригласивший — дни и свой код, когда друг оплатит первый абонемент
+    (см. ``reward_referrer``).
+
+    Возвращает итог: ``granted`` — привязан, ``self`` — ссылка своя,
+    ``stranger`` — пригласившего нет в базе, ``stale`` — аккаунт не свежий,
+    ``already`` — пригласивший уже записан (включая гонку двух заходов).
     """
     if user_id == referrer_id:
-        return "self", None
+        return "self"
     user = await get_user(session, user_id)
     if user is None:
-        return "unknown", None
+        return "unknown"
     if user.referred_by is not None:
-        return "already", None
+        return "already"
     if await get_user(session, referrer_id) is None:
-        return "stranger", None
+        return "stranger"
     if user.created_at < utcnow() - REFERRAL_NEWCOMER_WINDOW:
-        return "stale", None
+        return "stale"
     result = await session.execute(
         update(User)
         .where(User.id == user_id, User.referred_by.is_(None))
         .values(referred_by=referrer_id)
     )
     if result.rowcount != 1:
-        return "already", None
-    until = await add_subscription_days(session, user_id, days)
-    await add_subscription_days(session, referrer_id, days)
-    return "granted", until
+        return "already"
+    return "granted"
+
+
+async def reward_referrer(
+    session: AsyncSession, payer_id: int, days: int, percent: int
+) -> tuple[int, str] | None:
+    """Награждает пригласившего за первый оплаченный абонемент друга.
+
+    Вызывать только при зачёте настоящих денег (звёзды, карта, USDT) — ручная
+    выдача админа наградой не считается. Возвращает ``(id пригласившего, код
+    на скидку)`` или None, если награждать некого/не за что: друга никто не
+    приводил, награда уже выдана или пригласивший пропал из базы.
+
+    Один друг — одна награда навсегда: флаг взводится условным UPDATE, и из
+    двух одновременных платежей побеждает один. Фарм тут убыточен сам по себе:
+    чтобы получить дни, надо сначала заплатить за месяц.
+    """
+    user = await get_user(session, payer_id)
+    if user is None or user.referred_by is None:
+        return None
+    claimed = await session.execute(
+        update(User)
+        .where(
+            User.id == payer_id,
+            User.referred_by.is_not(None),
+            User.referred_rewarded.is_(False),
+        )
+        .values(referred_rewarded=True)
+    )
+    if (claimed.rowcount or 0) != 1:
+        return None
+    referrer_id = int(user.referred_by)
+    if await get_user(session, referrer_id) is None:
+        return None
+    code = ""
+    if days > 0:
+        await add_subscription_days(session, referrer_id, days)
+    if percent > 0:
+        code = (await mint_referral_discount(session, referrer_id, percent)).code
+    return referrer_id, code
+
+
+async def count_active_referrals(session: AsyncSession, user_id: int) -> int:
+    """Сколько приведённых уже оплатили первый абонемент (награда выдана)."""
+    result = await session.execute(
+        select(func.count())
+        .select_from(User)
+        .where(User.referred_by == user_id, User.referred_rewarded.is_(True))
+    )
+    return int(result.scalar() or 0)
 
 
 async def count_referrals(session: AsyncSession, user_id: int) -> int:

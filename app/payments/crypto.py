@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 import aiohttp
 from loguru import logger
 
+from app import referral
 from app.config import settings
 
 TRONGRID_URL = "https://api.trongrid.io/v1/accounts/{address}/transactions/trc20"
@@ -248,6 +249,8 @@ async def check_pending(bot) -> int:
         # Каждый платёж считается отдельной транзакцией БД: сбой на одном не
         # должен откатывать зачисление остальных.
         until = None
+        reward = None
+        friend_name = "друг"
         try:
             async with session_scope() as session:
                 fresh = await session.get(Payment, payment.id)
@@ -272,6 +275,14 @@ async def check_pending(bot) -> int:
                     logger.info("Платёж #{} закрыт кем-то другим — пропускаем", payment.id)
                     continue
                 until = await repo.activate_subscription(session, fresh.user_id, fresh.months)
+                # Первый оплаченный абонемент — награда пригласившему.
+                reward = await repo.reward_referrer(
+                    session, fresh.user_id,
+                    settings.referral_days, referral.discount_percent(),
+                )
+                friend = await repo.get_user(session, fresh.user_id)
+                if friend is not None:
+                    friend_name = friend.mention
         except Exception as exc:  # noqa: BLE001 — один платёж не рушит проверку
             logger.exception("Платёж #{}: не смогли зачислить: {}", payment.id, exc)
             continue
@@ -288,4 +299,15 @@ async def check_pending(bot) -> int:
             )
         except Exception:  # noqa: BLE001
             logger.debug("Не смогли уведомить {} об оплате", payment.user_id)
+        if reward is not None:
+            referrer_id, deal_code = reward
+            try:
+                await bot.send_message(
+                    referrer_id,
+                    referral.referrer_reward_message(
+                        friend_name, settings.referral_days, deal_code
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — награда начислена, весть вторична
+                logger.debug("Не смогли уведомить {} о награде", referrer_id)
     return activated

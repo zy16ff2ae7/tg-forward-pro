@@ -143,34 +143,46 @@ def referral_card(
     invited: int,
     earned: int,
     *,
+    rewarded: int = 0,
     discount_percent: int = 0,
     discount_codes: tuple[str, ...] = (),
     pending_discount: int = 0,
 ) -> str:
-    """Экран реферальной программы: ссылка, условия, счёт и коды на скидку."""
+    """Экран реферальной программы: условия, ссылка, коды и счёт — по полкам."""
     if not days:
         return (
             "👥 <b>Пригласи друга</b>\n\n"
             "Программа сейчас выключена — загляните позже."
         )
+    if discount_percent:
+        terms = (
+            f"Друг приходит по вашей ссылке и забирает личный промокод "
+            f"<b>−{discount_percent}%</b> на первую оплату. Когда он оформляет "
+            f"абонемент — вам <b>+{days} дн.</b> и тоже <b>−{discount_percent}%</b>."
+        )
+    else:
+        terms = (
+            "Друг приходит по вашей ссылке. Когда он оформляет первый "
+            f"абонемент — вам <b>+{days} дн.</b>"
+        )
     text = (
-        "👥 <b>Пригласи друга — обоим +дни</b>\n\n"
-        f"Друг приходит по вашей ссылке — вы оба получаете "
-        f"<b>+{days} дн.</b> к абонементу. Приглашений без лимита.\n\n"
-        f"🔗 Ваша ссылка:\n<code>{link or code}</code>\n\n"
-        f"Пришло друзей: <b>{invited}</b>. Заработано дней: <b>{earned}</b>."
+        "👥 <b>Пригласи друга — обоим выгода</b>\n\n"
+        f"{terms} Приглашений без лимита.\n\n"
+        f"🔗 Ваша ссылка:\n<code>{link or code}</code>"
         + ("" if link else "\n\nСсылка соберётся, когда владелец укажет юзернейм бота.")
     )
-    if discount_percent:
+    if pending_discount:
         text += (
-            "\n\n💸 Каждый приход дарит вам обоим личный промокод "
-            f"на <b>−{discount_percent}%</b> к следующей оплате."
+            f"\n\n💸 Скидка {pending_discount}% уже ждёт: "
+            "ближайший разовый счёт станет дешевле."
         )
-        if pending_discount:
-            text += f"\nСкидка {pending_discount}% уже ждёт: ближайший счёт станет дешевле."
-        elif discount_codes:
-            codes = ", ".join(f"<code>{c}</code>" for c in discount_codes)
-            text += f"\nВаши коды: {codes} — введите в «Промокод»."
+    elif discount_codes:
+        codes = ", ".join(f"<code>{c}</code>" for c in discount_codes)
+        text += f"\n\n💸 Ваши коды: {codes} — введите в «Промокод»."
+    text += (
+        f"\n\nПришло друзей: <b>{invited}</b> "
+        f"(с абонементом: <b>{rewarded}</b>). Заработано дней: <b>{earned}</b>."
+    )
     return text
 
 
