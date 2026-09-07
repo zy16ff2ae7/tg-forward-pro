@@ -143,6 +143,8 @@ class FilterConfig:
     pin_on_send: bool = False
     # Автоудаление: через сколько часов снести отправленное (0 — не сносить).
     autodelete_hours: float = 0
+    # Топик приёмника: id темы форума (0 — корень чата, как раньше).
+    topic_id: int = 0
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> "FilterConfig":
@@ -218,6 +220,7 @@ class FilterConfig:
             "library_ids": self.library_ids,
             "pin_on_send": self.pin_on_send,
             "autodelete_hours": self.autodelete_hours,
+            "topic_id": self.topic_id,
         }
 
 

@@ -560,18 +560,22 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
     else:
         text = transform_text(getattr(item, "text", "") or "", filters)
 
+    thread = int(getattr(filters, "topic_id", 0) or 0) or None
+
     async def _send() -> Any:
         if message is not None:
             return await send_copy(
                 client, target_id, message, text,
                 link_preview=bool(filters.link_preview),
                 buttons=getattr(filters, "buttons", None),
+                topic_id=thread or 0,
             )
         return await client.send_message(
             target_id,
             text or "",
             parse_mode=None,
             link_preview=bool(filters.link_preview),
+            comment_to=thread,
         )
 
     if filters.typing:
@@ -728,6 +732,7 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
             await send_copy(
                 client, target, message, text,
                 buttons=getattr(rule.filters, "buttons", None),
+                topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
             )
             sent += 1
             delivered.append(target)
@@ -854,6 +859,7 @@ async def clone_backfill_tick(client: Any, rule: RuleSnapshot) -> str:
                 msg,
                 transform_text(raw_text, filters),
                 buttons=getattr(filters, "buttons", None),
+                topic_id=int(getattr(filters, "topic_id", 0) or 0),
             )
             await record_ok(rule, msg)
             sent_count = pos + 1
@@ -1035,6 +1041,7 @@ async def _dialogs(client: Any, message: Any, rule: RuleSnapshot) -> None:
     await send_copy(
         client, rule.target_id, message, text,
         buttons=getattr(rule.filters, "buttons", None),
+        topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
     )
     await record_ok(rule, message)
 
@@ -1056,6 +1063,7 @@ async def _listener(client: Any, message: Any, rule: RuleSnapshot) -> None:
     await send_copy(
         client, rule.target_id, message, text,
         buttons=getattr(rule.filters, "buttons", None),
+        topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
     )
     await record_ok(rule, message)
 
@@ -1090,6 +1098,7 @@ async def _checks(client: Any, message: Any, rule: RuleSnapshot) -> None:
         await send_copy(
             client, rule.target_id, message, transform_text(raw_text, rule.filters),
             buttons=getattr(rule.filters, "buttons", None),
+            topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
         )
     if capped:
         logger.warning(

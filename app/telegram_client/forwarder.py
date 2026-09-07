@@ -49,6 +49,7 @@ async def send_copy(
     text: str,
     link_preview: bool = True,
     buttons: Any = None,
+    topic_id: int = 0,
 ) -> Any:
     """Публикует сообщение как своё — без метки «Переслано от».
 
@@ -59,17 +60,22 @@ async def send_copy(
     ``buttons`` — кнопки-ссылки из настроек ([{'text', 'url'}]): каждая своей
     строкой. Форвард кнопок не умеет, поэтому слишком большое медиа уходит без
     них — предупредили в форме, а не промолчали.
+
+    ``topic_id`` — тема форума в приёмнике (0 — корень чата). Форвард тем
+    не умеет на уровне Telegram API, поэтому огромное медиа и нескачанное
+    уходят в корень обычным форвардом — с пометкой в логе, а не молча.
     """
     rows = [
         [Button.url(str(item.get("text") or ""), str(item.get("url") or ""))]
         for item in (buttons or [])
         if isinstance(item, dict) and item.get("text") and item.get("url")
     ] or None
+    thread = int(topic_id or 0) or None
     media = getattr(message, "media", None)
     if media is None:
         return await client.send_message(
             target_id, text or "", parse_mode=None, link_preview=link_preview,
-            buttons=rows,
+            buttons=rows, comment_to=thread,
         )
 
     size = getattr(media, "size", None)
@@ -79,6 +85,11 @@ async def send_copy(
 
     if size and size > MAX_MEDIA_BYTES:
         logger.info("Медиа слишком большое ({} байт) — отправляем форвардом", size)
+        if thread is not None:
+            logger.warning(
+                "Топик {}: огромное медиа уходит в корень — форвард тем не умеет",
+                thread,
+            )
         return await client.forward_messages(target_id, message)
 
     file_name = None
@@ -99,6 +110,11 @@ async def send_copy(
             await client.download_media(message, file=tmp_path)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Не скачали медиа ({}), уходим в форвард: {}", type(exc).__name__, exc)
+            if thread is not None:
+                logger.warning(
+                    "Топик {}: нескачанное медиа уходит в корень — форвард тем не умеет",
+                    thread,
+                )
             return await client.forward_messages(target_id, message)
 
         # Ошибки отправки НЕ ловим: повторы — дело очереди доставки.
@@ -110,6 +126,7 @@ async def send_copy(
             parse_mode=None,
             supports_streaming=True,
             buttons=rows,
+            comment_to=thread,
         )
     finally:
         try:
@@ -135,11 +152,21 @@ async def pin_sent(
 
 
 async def _send_once(client: Any, rule: RuleSnapshot, message: Any, text: str) -> Any:
+    topic = int(getattr(rule.filters, "topic_id", 0) or 0)
     if rule.mode == "forward":
+        if topic:
+            # Сюда проходят только задачи, созданные мимо кабинета: форма
+            # топик в режиме «форвард» не даёт сохранить. Пост не теряем —
+            # уходит в корень, а в логе видно, чья настройка кривая.
+            logger.warning(
+                "Правило #{}: топик {} работает только в режиме «копия» — шлём в корень",
+                rule.id, topic,
+            )
         return await client.forward_messages(rule.target_id, message)
     return await send_copy(
         client, rule.target_id, message, text,
         buttons=getattr(rule.filters, "buttons", None),
+        topic_id=topic,
     )
 
 
