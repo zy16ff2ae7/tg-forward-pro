@@ -311,7 +311,9 @@ async def test_broadcast_stops_at_cap_mid_round(create_user, create_account):
     assert any("исчерпан" in line for _, line in journal)
 
 
-async def test_streaming_autosubscribe_dedups_attempts(create_user, create_account, monkeypatch):
+async def test_streaming_autosubscribe_dedups_attempts(
+    create_user, create_account, monkeypatch
+):
     """Одни ссылки при каждом посте: второй заход в тот же день — мимо."""
     from app.telegram_client import jobs
     from tests.test_oneshot_journal import OneShotClient
@@ -327,6 +329,8 @@ async def test_streaming_autosubscribe_dedups_attempts(create_user, create_accou
 
     await jobs._autosubscribe(client, message, snapshot)
     await jobs._autosubscribe(client, message, snapshot)
+    # Вступление ушло в фон — забираем его перед проверкой.
+    await asyncio.gather(*list(jobs._join_tasks))
 
     assert client.tried == ["somechannel"]
 
@@ -436,3 +440,103 @@ async def test_typing_waits_random_span(create_user, create_account, monkeypatch
 
     assert len(sleeps) == 1
     assert 1.5 <= sleeps[0] <= 4.0
+
+
+# ─────────────────── пачка 4: круг подлиннее, фон, пауза ───────────────────
+
+
+async def test_cycle_default_is_an_hour(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Круг по умолчанию — раз в час: чаще — спам-темп."""
+    assert FilterConfig().cycle_seconds == 3600
+    edit = await _created_mailing_edit(client, auth_headers, create_account, {})
+    assert edit["cycle"] == 3600
+
+
+async def test_account_gate_waits_twenty_seconds(monkeypatch):
+    """Общий темп аккаунта — 20 секунд между отправками любых задач."""
+    import asyncio as aio
+
+    from app.telegram_client import antispam
+
+    assert antispam.ACCOUNT_SEND_GAP == 20.0
+    monkeypatch.setattr(
+        "app.telegram_client.manager.ACCOUNT_SEND_GAP", 20.0
+    )
+    sleeps: list[float] = []
+
+    async def recorder(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(aio, "sleep", recorder)
+    manager._last_send_at.pop(4949, None)
+    async with manager.account_send_slot(4949):
+        pass
+    async with manager.account_send_slot(4949):
+        pass
+
+    assert len(sleeps) == 1
+    assert 19.0 <= sleeps[0] <= 20.0
+
+
+async def test_streaming_joins_dont_block_worker(
+    create_user, create_account, monkeypatch
+):
+    """Воркер возвращается сразу: вступление на минутах — в фоне."""
+    import time as time_module
+
+    from types import SimpleNamespace as NS
+
+    from app.telegram_client import jobs
+
+    calls: list[str] = []
+
+    async def slow_join_all(client, targets, outcome=None, **kwargs):
+        calls.extend(targets)
+        await aio_sleep(2.0)
+        return outcome
+
+    async def aio_sleep(delay):
+        import asyncio as aio
+
+        await aio.sleep(delay)
+
+    monkeypatch.setattr(jobs, "_join_all", slow_join_all)
+    monkeypatch.setattr(jobs, "_split_already_member", _passthrough_member)
+    user_id = await create_user()
+    account_id = await create_account(user_id)
+    snapshot = _snapshot(1202, user_id, account_id, "autosubscribe")
+    snapshot.filters = FilterConfig.from_dict({"join_gap": 0, "daily_join_limit": 0})
+    message = NS(id=10, message="вступайте https://t.me/fonchannel", media=None)
+
+    started = time_module.monotonic()
+    await jobs._autosubscribe(object(), message, snapshot)
+    elapsed = time_module.monotonic() - started
+
+    assert elapsed < 1.0, "воркер ждал вступление"
+    await asyncio.gather(*list(jobs._join_tasks))
+    assert calls == ["fonchannel"]
+
+
+async def _passthrough_member(account_id, targets):
+    """Заглушка отсева «где уже сидим»: все цели — новые."""
+    return list(targets), 0
+
+
+async def test_accounts_show_spamblock_pause(
+    client, auth_headers, create_user, create_account
+):
+    """Кабинет показывает паузу спамблока: «стоят до …», а не тишина."""
+    from app.telegram_client.manager import manager as manager_singleton
+
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    await manager_singleton.note_peer_flood(account_id, None)
+
+    response = await client.get("/api/accounts", headers=auth_headers)
+
+    assert response.status == 200
+    accounts = (await response.json())["accounts"]
+    mine = next(item for item in accounts if item["id"] == account_id)
+    assert mine["paused_until"] is not None

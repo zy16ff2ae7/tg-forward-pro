@@ -163,7 +163,7 @@ const FIELD_SPEC = {
   start: { label: 'Начало (ЧЧ:ММ)', placeholder: '00:00', note: 'по вашим часам — кабинет берёт их с этого устройства' },
   end: { label: 'Конец (ЧЧ:ММ)', placeholder: '23:59', note: 'после этого времени круги ждут до утра' },
   gap: { label: 'Пауза между чатами (сек)', control: 'number', placeholder: '60', note: 'минимум 30 — быстрее нельзя: риск спамблока' },
-  cycle: { label: 'Пауза перед новым кругом (сек)', control: 'number', placeholder: '600', note: 'минимум 60' },
+  cycle: { label: 'Пауза перед новым кругом (сек)', control: 'number', placeholder: '3600', note: 'минимум 60 — круг раз в час и реже' },
   repeats: { label: 'Сколько кругов', control: 'number', placeholder: '1', note: 'можно задать свой предел отправок' },
   repeat_forever: { label: 'Без ограничений: продолжать до остановки', control: 'check', note: 'Паузы, дневной лимит и ограничения Telegram всё равно действуют.' },
   typing: { label: 'Показывать «печатает» перед отправкой', control: 'check' },
@@ -556,7 +556,7 @@ const DEMO_STATE = {
       edit: {
         account_id: 1, names: { 1006: 'Команда (чат)', 1005: 'Подборки' },
         targets: ['1006', '1005'], message: 'Напоминаем: показ сегодня в 19:00.',
-        library_ids: [], send_mode: 'queue', gap: 60, cycle: 600, repeats: 3,
+        library_ids: [], send_mode: 'queue', gap: 60, cycle: 3600, repeats: 3,
         typing: true, random_pick: true, link_preview: false,
       },
       created_at: '2026-08-29T14:15:00' },
@@ -3829,6 +3829,19 @@ function renderAccountList() {
   holder.innerHTML = pendingHtml + state.accounts.map(accountHtml).join('');
 }
 
+/* Пауза спамблока приходит ISO-строкой — показываем «сегодня в 14:30».
+   Дата проставляется, только если это не сегодня: лишние цифры в карточке
+   никто не читает. */
+function fmtPauseUntil(iso) {
+  const when = new Date(iso);
+  const time = when.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  const today = new Date();
+  const sameDay = when.toDateString() === today.toDateString();
+  if (sameDay) return `сегодня в ${time}`;
+  const date = when.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+  return `${date} в ${time}`;
+}
+
 /* Карточка аккаунта. Причина, по которой он офлайн, стоит отдельной строкой и с
    кнопкой: раньше её дописывали к «ID 2» мелким серым текстом — она обрезалась
    на 390 px и ничего не предлагала сделать, хотя пересылка в это время стояла.
@@ -3862,6 +3875,7 @@ function accountHtml(account) {
                   aria-label="Отключить аккаунт ${esc(account.phone)}" title="Отключить аккаунт">${icon('i-trash')}</button>
         </div>
         ${trouble}
+        ${account.paused_until ? `<div class="account__reason">⏸ Спамблок: отправки стоят до ${esc(fmtPauseUntil(account.paused_until))}. Не запускайте задачи вручную — ограничение спадёт само.</div>` : ''}
       </div>`;
 }
 

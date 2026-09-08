@@ -1283,6 +1283,11 @@ async def _checks(client: Any, message: Any, rule: RuleSnapshot) -> None:
 # и держало паузами слот воркера очереди. Успехи и так отсекает проверка
 # членства, а провалы (приват, флуд) — эта метка. Живёт сутки, в памяти.
 _JOIN_ATTEMPT_TTL = 24 * 3600
+# Фоновые вступления потоковой подписки: замок на задачу не даёт двум
+# сообщениям вступать наперегонки, а множество держит задачи живыми —
+# иначе сборщик мусора молча убьёт вступление на первой же паузе.
+_join_locks: dict[int, asyncio.Lock] = {}
+_join_tasks: set[asyncio.Task] = set()
 _join_attempted_at: dict[tuple[int, str], float] = {}
 
 
@@ -1317,30 +1322,59 @@ async def _autosubscribe(client: Any, message: Any, rule: RuleSnapshot) -> None:
     conf = rule.filters
     gap = max(0, int(getattr(conf, "join_gap", JOIN_PAUSE_SECONDS) or 0))
     retries = max(0, int(getattr(conf, "join_retries", 0) or 0))
-    # Дневной лимит действует и здесь; исчерпанный — тихий пропуск, а не
-    # ошибка: журнал не должен краснеть каждый вечер.
-    stop_at: int | None = None
     daily = max(0, int(getattr(conf, "daily_join_limit", 0) or 0))
-    if daily > 0:
-        async with SessionLocal() as session:
-            already_today = await repo.count_joins_today(session, rule.id)
-        if already_today >= daily:
-            return
-        stop_at = daily - already_today
 
-    # Где уже сидим — туда не вступаем, см. run_autosubscribe: одни и те же ссылки
-    # мелькают в источнике при каждом посте, и без отсева каждое сообщение
-    # долбило бы JoinChannel по кругу.
-    todo, skipped = await _split_already_member(rule.account_id, targets)
-    if not todo:
-        return
-    outcome = await _join_all(
-        client, todo, rule=rule, gap=gap, retries=retries, stop_at=stop_at
-    )
-    outcome.already += skipped
-    if outcome.joined:
-        await record_ok(rule, message, count=outcome.joined)
-        logger.info("Автоподписка #{}: вступили в {} чат(ов)", rule.id, outcome.joined)
+    # Паузы между вступлениями — минуты, а воркер очереди один на всех:
+    # спать их здесь — остановить доставку аккаунта. Поэтому само вступление
+    # уходит в фон, воркер возвращается сразу. Замок на задачу не даёт двум
+    # сообщениям вступать наперегонки и держит дневной лимит: второе увидит
+    # вступления первого. Исчерпанный лимит — тихий пропуск, а не ошибка:
+    # журнал не должен краснеть каждый вечер.
+    lock = _join_locks.setdefault(rule.id, asyncio.Lock())
+
+    async def _join_in_background() -> None:
+        outcome = JoinOutcome()
+        try:
+            async with lock:
+                stop_at: int | None = None
+                if daily > 0:
+                    async with SessionLocal() as session:
+                        already_today = await repo.count_joins_today(
+                            session, rule.id
+                        )
+                    if already_today >= daily:
+                        return
+                    stop_at = daily - already_today
+                # Где уже сидим — туда не вступаем: одни и те же ссылки
+                # мелькают в источнике при каждом посте, и без отсева каждое
+                # сообщение долбило бы JoinChannel по кругу.
+                todo, skipped = await _split_already_member(
+                    rule.account_id, targets
+                )
+                outcome.already += skipped
+                if not todo:
+                    return
+                await _join_all(
+                    client, todo, outcome,
+                    rule=rule, gap=gap, retries=retries, stop_at=stop_at,
+                )
+        except FloodWaitError as exc:
+            logger.warning(
+                "Автоподписка #{}: Telegram просит подождать {} сек — стоим",
+                rule.id, exc.seconds,
+            )
+        except Exception:
+            logger.exception("Автоподписка #{}: вступление сорвалось", rule.id)
+        if outcome.joined:
+            await record_ok(rule, message, count=outcome.joined)
+            logger.info(
+                "Автоподписка #{}: вступили в {} чат(ов)",
+                rule.id, outcome.joined,
+            )
+
+    task = asyncio.create_task(_join_in_background())
+    _join_tasks.add(task)
+    task.add_done_callback(_join_tasks.discard)
 
 
 _HANDLERS: dict[str, Callable[[Any, Any, RuleSnapshot], Awaitable[None]]] = {

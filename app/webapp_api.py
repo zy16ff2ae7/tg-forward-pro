@@ -955,7 +955,7 @@ async def _apply_task_settings(
         for field, name, default, floor in (
             ("gap", "gap_seconds", 60, MAILING_MIN_GAP),
             ("gap_jitter", "gap_jitter", 10, 0),
-            ("cycle", "cycle_seconds", 600, MAILING_MIN_CYCLE),
+            ("cycle", "cycle_seconds", 3600, MAILING_MIN_CYCLE),
             ("cycle_jitter", "cycle_jitter", 60, 0),
             ("repeats", "repeats", 1, 0),
         ):
@@ -2389,6 +2389,14 @@ async def message_preflight(request: web.Request) -> web.Response:
     })
 
 
+def _pause_iso(account_id: int) -> str | None:
+    """Пауза спамблока для кабинета: ISO-строка или ничего."""
+    until = manager.sending_paused_until(account_id)
+    if until is None:
+        return None
+    return datetime.fromtimestamp(until, timezone.utc).isoformat()
+
+
 @routes.get("/api/accounts")
 @require_auth
 async def list_accounts(request: web.Request) -> web.Response:
@@ -2414,6 +2422,9 @@ async def list_accounts(request: web.Request) -> web.Response:
                 # не «попробовать снова», а вход по номеру заново.
                 "needs_login": account.last_error in HOPELESS_ERRORS,
                 "created_at": account.created_at.isoformat() if account.created_at else None,
+                # Спамблок виден и здесь, а не только в боте: иначе человек
+                # гадает, почему «на связи», а ничего не уходит.
+                "paused_until": _pause_iso(account.id),
             }
         )
 
