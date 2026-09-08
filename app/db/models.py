@@ -104,6 +104,9 @@ class TelegramAccount(Base):
     # сообщение до самого повторного входа. Удачный вход метку снимает — о
     # следующем таком случае надо сказать снова.
     error_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Когда аккаунт выключили с причиной (см. set_account_error). Нужна сторожу:
+    # «умерли сегодня» — это волна заморозок, а «умерли когда-то» — фон.
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="accounts")
     rules: Mapped[list["Rule"]] = relationship(
@@ -251,7 +254,7 @@ class ForwardLog(Base):
 class SendCounter(Base):
     """Сколько аккаунт отправил за сутки. Антибан-лимит считает по этим строкам.
 
-    Одна строка на аккаунт в сутки: вчерашние стираются при записи сегодняшних,
+    Одна строка на аккаунт в сутки: старше недели стираются при записи,
     таблица не растёт.
     """
 
@@ -303,6 +306,24 @@ class JoinLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     rule_id: Mapped[int] = mapped_column(Integer, nullable=False)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
+class AccountPause(Base):
+    """Пауза отправок после спамблока: рубильник на весь аккаунт.
+
+    Ставится, когда Telegram отвечает ``PeerFloodError`` — аккаунт помечен за
+    спам, и слать/вступать ему сейчас нельзя. Все задачи аккаунта стоят до
+    ``paused_until``; рестарт процесса паузу не снимает — она в БД, а не в
+    памяти. Протухшие строки подчищает загрузка при старте.
+    """
+
+    __tablename__ = "account_pauses"
+
+    account_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    paused_until: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    reason: Mapped[str] = mapped_column(String(32), default="peer_flood", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
 

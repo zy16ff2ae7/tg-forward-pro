@@ -8,6 +8,7 @@ class LoginStates(StatesGroup):
     """Вход в личный аккаунт Telegram: номер или QR-код."""
 
     choice = State()
+    keys = State()
     phone = State()
     code = State()
     password = State()

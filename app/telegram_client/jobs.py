@@ -32,6 +32,7 @@ from telethon.errors import (
     ChatIdInvalidError,
     ChatWriteForbiddenError,
     FloodWaitError,
+    PeerFloodError,
     RPCError,
     UserBannedInChannelError,
 )
@@ -44,6 +45,11 @@ from telethon.tl.types import ChannelParticipantsAdmins, MessageEntityMentionNam
 from app.db import repo
 from app.errors import ValidationError
 from app.db.database import SessionLocal
+from app.telegram_client.antispam import (
+    ACCOUNT_DAILY_JOIN_CAP,
+    BROADCAST_CHAT_GAP,
+    JOIN_MIN_GAP,
+)
 from app.telegram_client.filters import URL_RE, FilterConfig, message_text, transform_text
 from app.telegram_client.forwarder import (
     check_send_cap,
@@ -131,8 +137,9 @@ JOIN_ALREADY_FINE: frozenset[str] = frozenset(
     {"UserAlreadyParticipantError", "InviteRequestSentError"}
 )
 
-# Пауза между вступлениями: без неё Telegram быстро отвечает «подождите».
-JOIN_PAUSE_SECONDS = 2
+# Пауза между вступлениями: без неё Telegram быстро отвечает «подождите» — а при
+# залпе подписок отвечает уже не паузой, а заморозкой. Пол — в JOIN_MIN_GAP.
+JOIN_PAUSE_SECONDS = 30
 
 
 @dataclass
@@ -150,6 +157,9 @@ class JoinOutcome:
     # Остановились не потому, что кончились чаты, а потому, что кончился
     # дневной лимит: остаток — завтра, а не «не пустили».
     limited: bool = False
+    # Остановились, потому что Telegram ограничил аккаунт за спам (PeerFlood):
+    # остаток — после паузы, а не «не пустили» и не «лимит».
+    paused: bool = False
 
 
 def task_title(rule: Any) -> str:
@@ -267,6 +277,15 @@ async def run_job(client: Any, message: Any, rule: RuleSnapshot) -> None:
         # блокировать воркер и остальные правила (см. queue.DeliveryQueue._run).
         # Порядок важен: FloodWaitError — подкласс RPCError, ловим его первым.
         raise
+    except PeerFloodError:
+        # Аккаунт помечен за спам: встают все его отправки, а не одна задача.
+        # Ретрая нет — долбить дальше значит продлевать ограничение.
+        from app.telegram_client.manager import manager
+
+        await manager.note_peer_flood(rule.account_id, rule, f" ({rule.kind})")
+        await record_error(
+            rule, message, "Telegram ограничил аккаунт за спам — отправки на паузе"
+        )
     except RPCError as exc:
         await record_error(rule, message, f"{type(exc).__name__}: {exc}")
     except Exception as exc:  # noqa: BLE001 — одна задача не должна ронять аккаунт
@@ -334,7 +353,13 @@ def chat_recipients(rule: Any) -> list[int]:
 # Логика вынесена из планировщика отдельными чистыми функциями: их видно в
 # тестах без Telethon, а планировщик остаётся про порядок вызовов.
 
-MAILING_MIN_GAP = 1  # быстрее секунды между чатами Telegram всё равно не даст
+# Пол пауз рассылки — антиспамный, а не технический. Десятки одинаковых сообщений
+# в минуту — спам-паттерн: Telegram сначала ограничивает (PeerFlood), потом
+# банит. Поэтому быстрее 30 секунд между чатами слать нельзя, даже если в
+# настройках задачи стоит меньше (старые задачи с gap=5 лечатся сами).
+MAILING_MIN_GAP = 30
+# Круг за кругом без передышки — тот же спам-паттерн, вид сбоку.
+MAILING_MIN_CYCLE = 60
 MAILING_MAX_GAP = 7 * 24 * 3600  # неделя: дальше это уже не «пауза», а ошибка ввода
 
 # ── Авто-постинг (kind="poster"): темп обхода чатов ──
@@ -419,8 +444,8 @@ def window_allows(config: Any, *, now: float | None = None) -> bool:
     Окно одно на всех: постер ждёт его кругами, рассылка — тиком, пересылка —
     задержкой. Часы — хозяина задачи (``window_tz``), а не сервера.
     """
-    start = hhmm_to_sec(getattr(config, "window_start", "00:00"))
-    end = hhmm_to_sec(getattr(config, "window_end", "23:59"))
+    start = hhmm_to_sec(getattr(config, "window_start", "09:00"))
+    end = hhmm_to_sec(getattr(config, "window_end", "22:00"))
     now_sec = window_now_sec(window_tz_minutes(getattr(config, "window_tz", None)), now)
     return in_window(now_sec, start, end)
 
@@ -433,8 +458,8 @@ def quiet_wait_seconds(config: Any, *, now: float | None = None) -> int:
     """
     tz = window_tz_minutes(getattr(config, "window_tz", None))
     now_sec = window_now_sec(tz, now)
-    start = hhmm_to_sec(getattr(config, "window_start", "00:00"))
-    end = hhmm_to_sec(getattr(config, "window_end", "23:59"))
+    start = hhmm_to_sec(getattr(config, "window_start", "09:00"))
+    end = hhmm_to_sec(getattr(config, "window_end", "22:00"))
     if in_window(now_sec, start, end):
         return 0
     if start <= end:
@@ -462,7 +487,8 @@ def mailing_gap(config: FilterConfig, *, cycle: bool = False) -> float:
     """
     base = int(getattr(config, "cycle_seconds" if cycle else "gap_seconds", 0) or 0)
     spread = int(getattr(config, "cycle_jitter" if cycle else "gap_jitter", 0) or 0)
-    gap = max(MAILING_MIN_GAP, base) + (random.uniform(0, spread) if spread > 0 else 0.0)
+    floor = MAILING_MIN_CYCLE if cycle else MAILING_MIN_GAP
+    gap = max(floor, base) + (random.uniform(0, spread) if spread > 0 else 0.0)
     return float(min(gap, MAILING_MAX_GAP))
 
 
@@ -493,7 +519,9 @@ class MailingMessageGone(RuntimeError):
 
 
 # Сколько «печатать» перед отправкой, когда режим «печатает» включён
-MAILING_TYPING_SECONDS = 2
+# «Печатает» — живым разбросом, а не метрономом ровно в 2 секунды.
+MAILING_TYPING_MIN_SECONDS = 1.5
+MAILING_TYPING_MAX_SECONDS = 4.0
 
 
 async def load_mailing_library(
@@ -625,6 +653,11 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
     else:
         text = transform_text(getattr(item, "text", "") or "", filters)
 
+    if filters.translate_to:
+        # Один текст на несколько языков руками никто вбивать не будет —
+        # переводим здесь, как веер переводит чужие посты.
+        text = await maybe_translate(text, filters.translate_to)
+
     thread = int(getattr(filters, "topic_id", 0) or 0) or None
     entities: list = []
     if filters.mention_all:
@@ -649,14 +682,24 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
             formatting_entities=entities or None,
         )
 
-    if filters.typing:
-        # «Печатает» видно в чате — так рассылка не выглядит ботом. Пауза
-        # внутри блока: вышли из него — индикатор погас.
-        async with client.action(target_id, "typing"):
-            await asyncio.sleep(MAILING_TYPING_SECONDS)
+    from app.telegram_client.manager import manager
+
+    # Общий темп аккаунта: свой круг и своя пауза у каждой задачи, но
+    # круги идут одновременно — без слота три рассылки на одном номере
+    # дали бы три сообщения в секунду.
+    async with manager.account_send_slot(rule.account_id):
+        if filters.typing:
+            # «Печатает» видно в чате — так рассылка не выглядит ботом.
+            # Пауза внутри блока: вышли из него — индикатор погас.
+            async with client.action(target_id, "typing"):
+                await asyncio.sleep(
+                random.uniform(
+                    MAILING_TYPING_MIN_SECONDS, MAILING_TYPING_MAX_SECONDS
+                )
+            )
+                sent = await _send()
+        else:
             sent = await _send()
-    else:
-        sent = await _send()
     sent_id = getattr(sent, "id", None)
     return int(sent_id) if sent_id else None
 
@@ -791,12 +834,27 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
         await record_error(rule, message, "У рассылки нет получателей")
         return
 
+    from app.telegram_client.manager import manager
+
+    if manager.sending_paused_until(rule.account_id):
+        # Аккаунт на паузе после спамблока: слать нельзя, сообщение пропускаем.
+        # Причина уже лежит в журнале (её положил рубильник), дублировать её
+        # на каждое сообщение — топить карточку одинаковыми сбоями.
+        logger.warning(
+            "Веер #{}: аккаунт на паузе после спамблока — сообщение пропущено",
+            rule.id,
+        )
+        return
+
     # Лимит — до перевода и отправок: как у пересылки, пост пропускается,
-    # а в журнал ложится одна строка на день (см. note_cap_hit).
+    # а в журнал ложится одна строка на день (см. note_cap_hit). Внутри круга
+    # сверяем на каждый чат: одна проверка на сообщение перелетала бы лимит
+    # на размер веера (счётчик растёт только в конце, см. note_sends).
     hit, used, cap = await check_send_cap(rule)
     if hit:
         await note_cap_hit(rule, used, cap, int(getattr(message, "id", 0) or 0))
         return
+    msg_id = int(getattr(message, "id", 0) or 0)
 
     raw_text = message_text(message)
     if rule.filters.translate_to:
@@ -807,19 +865,30 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
     delivered: list[int] = []
     pin = bool(getattr(rule.filters, "pin_on_send", False))
     mention = bool(getattr(rule.filters, "mention_all", False))
-    for target in targets:
+    for pos, target in enumerate(targets):
+        if used + sent >= cap:
+            await note_cap_hit(rule, used + sent, cap, msg_id)
+            break
+        if pos:
+            # Веер — не пулемёт: залп в сотни чатов со скоростью сети — верный
+            # спамблок. Пауза та же, что у постера, только своя константа.
+            spread = max(0, int(getattr(rule.filters, "gap_jitter", 0) or 0))
+            await asyncio.sleep(
+                BROADCAST_CHAT_GAP + (random.uniform(0, spread) if spread else 0)
+            )
         try:
             item_text, item_entities = text, None
             if mention:
                 # Состав у каждого чата свой — упоминания собираем на каждый.
                 suffix, found = await mention_suffix(client, target, len(text))
                 item_text, item_entities = text + suffix, found or None
-            posted = await send_copy(
-                client, target, message, item_text,
-                buttons=getattr(rule.filters, "buttons", None),
-                topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
-                entities=item_entities,
-            )
+            async with manager.account_send_slot(rule.account_id):
+                posted = await send_copy(
+                    client, target, message, item_text,
+                    buttons=getattr(rule.filters, "buttons", None),
+                    topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
+                    entities=item_entities,
+                )
             sent += 1
             delivered.append(target)
             posted_id = getattr(posted, "id", None)
@@ -1208,31 +1277,104 @@ async def _checks(client: Any, message: Any, rule: RuleSnapshot) -> None:
     await record_ok(rule, message)
 
 
+# Куда уже пытались вступать потоковой автоподпиской: (rule_id, цель) →
+# монотонное время попытки. Одни и те же ссылки мелькают в источнике при
+# каждом посте: без дедупа каждое сообщение долбило бы JoinChannel по кругу
+# и держало паузами слот воркера очереди. Успехи и так отсекает проверка
+# членства, а провалы (приват, флуд) — эта метка. Живёт сутки, в памяти.
+_JOIN_ATTEMPT_TTL = 24 * 3600
+# Фоновые вступления потоковой подписки: замок на задачу не даёт двум
+# сообщениям вступать наперегонки, а множество держит задачи живыми —
+# иначе сборщик мусора молча убьёт вступление на первой же паузе.
+_join_locks: dict[int, asyncio.Lock] = {}
+_join_tasks: set[asyncio.Task] = set()
+_join_attempted_at: dict[tuple[int, str], float] = {}
+
+
+def _fresh_join_targets(rule_id: int, targets: list[str]) -> list[str]:
+    """Убирает цели, куда пытались вступать менее суток назад."""
+    now = time.monotonic()
+    fresh = []
+    for target in targets:
+        tried_at = _join_attempted_at.get((rule_id, target))
+        # Метки не было — не пытались никогда (ноль здесь врал бы: при аптайме
+        # меньше суток «0 + сутки» ещё в будущем и цель отсеивалась бы всегда).
+        if tried_at is None or tried_at + _JOIN_ATTEMPT_TTL <= now:
+            fresh.append(target)
+    if len(_join_attempted_at) > 10000:
+        # Давно не чистили: сбрасываем только протухшее, свежее живёт.
+        for key, at in list(_join_attempted_at.items()):
+            if at + _JOIN_ATTEMPT_TTL <= now:
+                del _join_attempted_at[key]
+    for target in fresh:
+        _join_attempted_at[(rule_id, target)] = now
+    return fresh
+
+
 async def _autosubscribe(client: Any, message: Any, rule: RuleSnapshot) -> None:
     """Находит ссылки на каналы в сообщениях источника и вступает в них."""
     targets = _invite_targets(message_text(message))
     if not targets:
         return
+    targets = _fresh_join_targets(rule.id, targets)
+    if not targets:
+        return
     conf = rule.filters
     gap = max(0, int(getattr(conf, "join_gap", JOIN_PAUSE_SECONDS) or 0))
     retries = max(0, int(getattr(conf, "join_retries", 0) or 0))
-    # Дневной лимит действует и здесь; исчерпанный — тихий пропуск, а не
-    # ошибка: журнал не должен краснеть каждый вечер.
-    stop_at: int | None = None
     daily = max(0, int(getattr(conf, "daily_join_limit", 0) or 0))
-    if daily > 0:
-        async with SessionLocal() as session:
-            already_today = await repo.count_joins_today(session, rule.id)
-        if already_today >= daily:
-            return
-        stop_at = daily - already_today
 
-    outcome = await _join_all(
-        client, targets, rule=rule, gap=gap, retries=retries, stop_at=stop_at
-    )
-    if outcome.joined:
-        await record_ok(rule, message, count=outcome.joined)
-        logger.info("Автоподписка #{}: вступили в {} чат(ов)", rule.id, outcome.joined)
+    # Паузы между вступлениями — минуты, а воркер очереди один на всех:
+    # спать их здесь — остановить доставку аккаунта. Поэтому само вступление
+    # уходит в фон, воркер возвращается сразу. Замок на задачу не даёт двум
+    # сообщениям вступать наперегонки и держит дневной лимит: второе увидит
+    # вступления первого. Исчерпанный лимит — тихий пропуск, а не ошибка:
+    # журнал не должен краснеть каждый вечер.
+    lock = _join_locks.setdefault(rule.id, asyncio.Lock())
+
+    async def _join_in_background() -> None:
+        outcome = JoinOutcome()
+        try:
+            async with lock:
+                stop_at: int | None = None
+                if daily > 0:
+                    async with SessionLocal() as session:
+                        already_today = await repo.count_joins_today(
+                            session, rule.id
+                        )
+                    if already_today >= daily:
+                        return
+                    stop_at = daily - already_today
+                # Где уже сидим — туда не вступаем: одни и те же ссылки
+                # мелькают в источнике при каждом посте, и без отсева каждое
+                # сообщение долбило бы JoinChannel по кругу.
+                todo, skipped = await _split_already_member(
+                    rule.account_id, targets
+                )
+                outcome.already += skipped
+                if not todo:
+                    return
+                await _join_all(
+                    client, todo, outcome,
+                    rule=rule, gap=gap, retries=retries, stop_at=stop_at,
+                )
+        except FloodWaitError as exc:
+            logger.warning(
+                "Автоподписка #{}: Telegram просит подождать {} сек — стоим",
+                rule.id, exc.seconds,
+            )
+        except Exception:
+            logger.exception("Автоподписка #{}: вступление сорвалось", rule.id)
+        if outcome.joined:
+            await record_ok(rule, message, count=outcome.joined)
+            logger.info(
+                "Автоподписка #{}: вступили в {} чат(ов)",
+                rule.id, outcome.joined,
+            )
+
+    task = asyncio.create_task(_join_in_background())
+    _join_tasks.add(task)
+    task.add_done_callback(_join_tasks.discard)
 
 
 _HANDLERS: dict[str, Callable[[Any, Any, RuleSnapshot], Awaitable[None]]] = {
@@ -1436,6 +1578,20 @@ async def invite_collected(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
                 "failed": failed,
                 "pending": len(pending) - invited - failed,
                 "wait_seconds": seconds,
+                "partial": True,
+            }
+        except PeerFloodError:
+            # Инвайты под спамблоком — верный путь к заморозке: пачку
+            # останавливаем целиком, а не идём к следующему человеку.
+            from app.telegram_client.manager import manager
+
+            await manager.note_peer_flood(rule.account_id, rule, " (приглашения)")
+            return {
+                "ok": False,
+                "error": "Telegram ограничил аккаунт за спам — приглашения на паузе",
+                "invited": invited,
+                "failed": failed,
+                "pending": len(pending) - invited - failed,
                 "partial": True,
             }
         except RPCError as exc:
@@ -1670,6 +1826,12 @@ async def run_autosubscribe(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
     per_run = max(0, int(getattr(conf, "join_limit", 0) or 0))
     if per_run > 0:
         unique = unique[:per_run]
+    # Где уже сидим — туда не вступаем: повторный заход по всему списку при
+    # каждом запуске — лишняя активность, которую Telegram считает.
+    todo, skipped = await _split_already_member(rule.account_id, unique)
+    outcome.already += skipped
+    if not todo:
+        return {"ok": True, **_join_summary(outcome, len(unique))}
     # Дневной лимит: сколько уже вступили сегодня — столько мест занято.
     # Исчерпанный лимит — не ошибка: остаток вступит завтра.
     stop_at: int | None = None
@@ -1684,13 +1846,21 @@ async def run_autosubscribe(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
         stop_at = daily - already_today
 
     try:
-        await _join_all(client, unique, outcome, rule=rule, gap=gap, retries=retries, stop_at=stop_at)
+        await _join_all(client, todo, outcome, rule=rule, gap=gap, retries=retries, stop_at=stop_at)
     except FloodWaitError as exc:
         # Вступления, сделанные до отказа, остались в outcome — их и показываем:
         # «вступили в 0» после трёх удачных заходов было бы неправдой.
         return {
             "ok": False,
             "error": f"Telegram просит подождать {int(getattr(exc, 'seconds', 60))} сек",
+            **_join_summary(outcome, len(unique)),
+        }
+    if outcome.paused:
+        # Спамблок: рубильник уже встал, остаток — после паузы. Это сбой, а не
+        # «вступили сколько смогли»: за кнопкой должен вернуться человек.
+        return {
+            "ok": False,
+            "error": "Telegram ограничил аккаунт за спам — вступления на паузе",
             **_join_summary(outcome, len(unique)),
         }
     if outcome.limited:
@@ -1708,6 +1878,8 @@ def _join_summary(outcome: JoinOutcome, total: int) -> dict[str, Any]:
     }
     if outcome.limited:
         summary["limited"] = True
+    if outcome.paused:
+        summary["paused"] = True
     return summary
 
 
@@ -1747,13 +1919,59 @@ def _invite_targets(text: str) -> list[str]:
     return found
 
 
+async def _join_account_allowance(rule: RuleSnapshot) -> int:
+    """Сколько вступлений аккаунту ещё можно сегодня — поверх лимитов задач.
+
+    Лимит задачи считается по её строкам, а Telegram считает по аккаунту: три
+    задачи с лимитом 10 — это 30 вступлений с одного номера. Потолок аккаунта
+    режет такой суммарный залп.
+    """
+    async with SessionLocal() as session:
+        done = await repo.count_joins_today_for_account(session, rule.account_id)
+    return max(0, ACCOUNT_DAILY_JOIN_CAP - done)
+
+
+async def _split_already_member(
+    account_id: int, targets: list[str]
+) -> tuple[list[str], int]:
+    """Убирает из списка чаты, в которых аккаунт уже сидит.
+
+    Каждый повторный запуск долбил ``JoinChannel`` по всему списку заново — а
+    каждое вступление, даже в свой же канал, это активность, которую Telegram
+    считает. Сверяемся с диалогами аккаунта (кэш менеджера, лишних запросов
+    нет): совпал юзернейм — вступление не нужно. Ссылки-приглашения сверить
+    не с чем — они всегда идут дальше, там разберётся сам Telegram.
+    Возвращает (осталось_вступить, уже_внутри).
+    """
+    from app.telegram_client.manager import manager
+
+    try:
+        dialogs = await manager.list_dialogs(account_id)
+    except Exception:  # noqa: BLE001 — список не прочитали, вступаем как есть
+        return list(targets), 0
+    known = {
+        str(chat.get("username") or "").lower()
+        for chat in dialogs
+        if chat.get("username")
+    }
+    todo: list[str] = []
+    already = 0
+    for target in targets:
+        name = target.lstrip("@").lower()
+        if "/" in target or target.startswith("+") or not name or name not in known:
+            todo.append(target)
+        else:
+            already += 1
+    return todo, already
+
+
 async def _join_all(
     client: Any,
     targets: list[str],
     outcome: JoinOutcome | None = None,
     *,
     rule: RuleSnapshot | None = None,
-    gap: int = JOIN_PAUSE_SECONDS,
+    gap: int | None = None,
     retries: int = 0,
     stop_at: int | None = None,
 ) -> JoinOutcome:
@@ -1768,11 +1986,26 @@ async def _join_all(
     лимит); ``stop_at`` — остановиться, когда столько уже вступили в этом
     запуске (дневной лимит). Повторы (``retries``) переживают только короткий
     FloodWait — до минуты: часовое «подождите» сном не леча.
+
+    Пауза — не ниже ``JOIN_MIN_GAP``: быстрее вступать нельзя, даже если в
+    настройках задачи стоит меньше. А поверх лимита задачи действует потолок
+    аккаунта: Telegram считает вступления с номера, а не с задачи.
     """
     from telethon.tl.functions.channels import JoinChannelRequest
     from telethon.tl.functions.messages import ImportChatInviteRequest
 
     result = outcome if outcome is not None else JoinOutcome()
+    pause = max(JOIN_MIN_GAP, int(JOIN_PAUSE_SECONDS if gap is None else gap or 0))
+    if rule is not None:
+        room = await _join_account_allowance(rule)
+        if room <= 0:
+            result.limited = True
+            result.problems.append(
+                "дневной лимит вступлений аккаунта исчерпан "
+                f"({ACCOUNT_DAILY_JOIN_CAP} в сутки)"
+            )
+            return result
+        stop_at = room if stop_at is None else min(stop_at, room)
     for target in targets:
         if stop_at is not None and result.joined >= stop_at:
             result.limited = True
@@ -1796,6 +2029,20 @@ async def _join_all(
                     raise
                 logger.info("Автоподписка: FloodWait {} сек — ждём и повторяем {}", wait, target)
                 await asyncio.sleep(wait + 1)
+            except PeerFloodError:
+                # Вступления под спамблоком — верный путь к заморозке: встаёт
+                # весь аккаунт, а не одна задача. Рубильник ставит паузу сам.
+                if rule is not None:
+                    from app.telegram_client.manager import manager
+
+                    await manager.note_peer_flood(
+                        rule.account_id, rule, " (вступления)"
+                    )
+                result.paused = True
+                result.problems.append(
+                    "Telegram ограничил вступления (спамблок) — остаток позже"
+                )
+                break
             except RPCError as exc:
                 name = type(exc).__name__
                 logger.info("Автоподписка: не вступили в {}: {}", target, name)
@@ -1806,9 +2053,12 @@ async def _join_all(
                 else:
                     result.problems.append(f"не пустили в {target} ({name})")
                 break
-        # пауза между вступлениями, иначе Telegram быстро присылает FloodWait
-        if gap > 0:
-            await asyncio.sleep(gap)
+        if result.paused:
+            # Спамблок остановил заход: дальше по списку не идём.
+            break
+        # Пауза между вступлениями, иначе Telegram быстро присылает FloodWait —
+        # а при залпе отвечает уже не паузой, а заморозкой.
+        await asyncio.sleep(pause)
     return result
 
 

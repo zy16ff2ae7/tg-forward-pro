@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -35,7 +36,16 @@ router = Router(name="accounts")
 CHOICE_TEXT = (
     "🔑 <b>Как подключить аккаунт?</b>\n\n"
     "📱 <b>По номеру</b> — Telegram пришлёт код, введёте его сюда.\n"
-    "📷 <b>По QR-коду</b> — отсканируете код приложением, номер набирать не нужно."
+    "📷 <b>По QR-коду</b> — отсканируете код приложением, номер набирать не нужно.\n\n"
+    "🔑 <b>Свои ключи API</b> — необязательно: вход через ваше приложение "
+    "с my.telegram.org/apps не делит лимиты с чужими аккаунтами."
+)
+KEYS_PROMPT = (
+    "🔑 <b>Свои ключи API</b>\n\n"
+    "Возьмите их на my.telegram.org/apps (App api_id и App api_hash) и "
+    "пришлите одним сообщением через пробел:\n\n"
+    "<code>123456 0123456789abcdef0123456789abcdef</code>\n\n"
+    "Ключи уходят только в этот вход и стираются из переписки."
 )
 QR_CAPTION = (
     "📷 Наведите камеру: в приложении Telegram откройте Настройки → Устройства → "
@@ -101,6 +111,7 @@ async def _accounts_text(user_id: int) -> tuple[str, object]:
         "",
         "Подключённые номера читают источники и пересылают посты.",
         f"Подключено: {len(accounts)}",
+        "🛡 Безопасный режим включён: паузы, лимиты и остановка при спам-ограничении.",
     ]
     if pending is not None:
         step = "код из Telegram" if pending.stage == login.STAGE_CODE else "облачный пароль"
@@ -112,7 +123,10 @@ async def _accounts_text(user_id: int) -> tuple[str, object]:
             "Кабинет, меню, подписки и платежи работают. Вход (номер или "
             "QR-код) откроется после подключения MTProto-шлюза сервиса.",
         ]
-    return "\n".join(lines), kb.accounts_menu(accounts, pending_login=pending is not None)
+    paused = {a.id for a in accounts if manager.sending_paused_until(a.id)}
+    return "\n".join(lines), kb.accounts_menu(
+        accounts, pending_login=pending is not None, paused=paused
+    )
 
 
 @router.message(Command("accounts"))
@@ -204,6 +218,38 @@ async def resume_account_login(callback: CallbackQuery, state: FSMContext) -> No
 # ───────────────────────────── Выбор способа входа ────────────────────────────
 
 
+@router.callback_query(F.data == "acc:keys")
+async def ask_own_keys(callback: CallbackQuery, state: FSMContext) -> None:
+    """Свои ключи API — необязательный шаг перед номером или QR-кодом."""
+    await callback.answer()
+    await state.set_state(LoginStates.keys)
+    if callback.message is not None:
+        await smart_edit(callback.message, KEYS_PROMPT, reply_markup=kb.cancel_kb())
+
+
+@router.message(LoginStates.keys)
+async def process_keys(message: Message, state: FSMContext) -> None:
+    assert message.from_user is not None
+    await _delete_secret(message)
+    tokens = (message.text or "").split()
+    try:
+        if len(tokens) != 2:
+            raise ValidationError("Нужно два значения: API ID и API Hash через пробел.")
+        creds = login.normalize_creds(tokens[0], tokens[1])
+    except AppError as exc:
+        await message.answer(
+            f"❌ {exc.message}\n\n{KEYS_PROMPT}", reply_markup=kb.cancel_kb()
+        )
+        return
+    assert creds is not None
+    await state.update_data(api_id=creds.api_id, api_hash=creds.api_hash)
+    await state.set_state(LoginStates.choice)
+    await message.answer(
+        CHOICE_TEXT + "\n\n🔑 Свои ключи приняты — вход пойдёт через них.",
+        reply_markup=kb.login_choice_kb(keys_added=True),
+    )
+
+
 @router.callback_query(F.data == "acc:method:phone")
 async def choose_phone_login(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
@@ -223,8 +269,13 @@ async def choose_qr_login(callback: CallbackQuery, state: FSMContext) -> None:
     """QR-ветка: код — новым сообщением с фото, проверка — кнопкой под ним."""
     assert callback.from_user is not None
     await callback.answer("Готовлю код…")
+    data = await state.get_data()
     try:
-        begun = await login.qr_start(callback.from_user.id)
+        begun = await login.qr_start(
+            callback.from_user.id,
+            api_id=data.get("api_id"),
+            api_hash=data.get("api_hash"),
+        )
     except AppError as exc:
         await state.clear()
         if callback.message is not None:
@@ -323,8 +374,14 @@ def _finish_text(step: login.LoginStep) -> str:
 async def process_phone(message: Message, state: FSMContext) -> None:
     assert message.from_user is not None
     wait_msg = await message.answer("⏳ Отправляю код…")
+    data = await state.get_data()
     try:
-        step = await login.start(message.from_user.id, message.text)
+        step = await login.start(
+            message.from_user.id,
+            message.text,
+            api_id=data.get("api_id"),
+            api_hash=data.get("api_hash"),
+        )
     except AppError as exc:
         # Отказ может сам сказать, где человеку теперь место: код на этот номер
         # уже ушёл — значит, ждём код, а не номер. Раньше такой отказ чистил FSM,
@@ -465,11 +522,20 @@ async def open_account(callback: CallbackQuery) -> None:
         await callback.answer("Аккаунт не найден", show_alert=True)
         return
     online = manager.is_online(account_id)
+    paused_until = manager.sending_paused_until(account_id)
     text = (
-        f"👤 <b>{account.phone}</b>\n\n"
+        f"👤 <b>{account.phone}</b>\n"
+        "🛡 Безопасный режим включён\n\n"
         f"Статус: {'🟢 на связи' if online else '🔴 не в сети'}\n"
         f"Ошибка: {account.last_error or 'нет'}"
     )
+    if paused_until is not None:
+        when = datetime.fromtimestamp(paused_until, timezone.utc).strftime("%H:%M")
+        text += (
+            f"\n\n⏸ <b>Пауза после спамблока до {when} UTC</b>\n"
+            "Отправки всех задач стоят, ограничение спадёт само. "
+            "Не запускайте задачи вручную."
+        )
     if callback.message is not None:
         await smart_edit(callback.message, text, reply_markup=kb.account_menu(account_id))
 

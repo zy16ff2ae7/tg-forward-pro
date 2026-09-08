@@ -93,7 +93,9 @@ class FakeGateway:
             raise self.code_error
         return SIGNED
 
-    async def sign_in_password(self, password: str, session_string: str, creds=None) -> str:
+    async def sign_in_password(
+        self, password: str, session_string: str, creds=None, fingerprint_seed=None
+    ) -> str:
         self.passwords.append(password)
         if self.password_error is not None:
             raise self.password_error
@@ -976,7 +978,7 @@ class FakeTelethonClient:
 async def test_gateway_lets_2fa_request_through(monkeypatch) -> None:
     """Требование облачного пароля обязано дойти до сценария, а не пропасть."""
     client = FakeTelethonClient(SessionPasswordNeededError(request=None))
-    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None: client)
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None, **kwargs: client)
 
     with pytest.raises(SessionPasswordNeededError):
         await manager.sign_in_code(
@@ -990,7 +992,7 @@ async def test_gateway_lets_2fa_request_through(monkeypatch) -> None:
 async def test_gateway_returns_session_when_code_is_enough(monkeypatch) -> None:
     """Без 2FA шлюз отдаёт сохранённую сессию — её сценарий и записывает."""
     client = FakeTelethonClient()
-    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None: client)
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None, **kwargs: client)
 
     saved = await manager.sign_in_code(
         phone=PHONE, code="11111", session_string=SESSION, phone_code_hash="hash"
@@ -1056,7 +1058,7 @@ def test_delivery_info_survives_unknown_types():
 
 async def test_gateway_send_code_returns_delivery(monkeypatch) -> None:
     client = FakeCodeClient(FakeSentCode("SentCodeTypeSms", "SentCodeTypeCall", 120))
-    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None: client)
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None, **kwargs: client)
 
     session, code_hash, delivery = await manager.send_code(PHONE)
 
@@ -1074,7 +1076,7 @@ async def test_gateway_resend_uses_resend_request(monkeypatch) -> None:
         FakeSentCode("SentCodeTypeApp"),
         FakeSentCode("SentCodeTypeSms", "SentCodeTypeCall", 60),
     )
-    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None: client)
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None, **kwargs: client)
 
     _, code_hash, delivery = await manager.resend_code(
         phone=PHONE, session_string=SESSION, phone_code_hash="old-hash"

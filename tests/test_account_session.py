@@ -129,7 +129,7 @@ async def account_state(account_id: int) -> tuple[str | None, bool]:
 def dead(monkeypatch) -> FakeClient:
     """Ключ есть, но Telegram его больше не признаёт."""
     client = FakeClient(authorized=False)
-    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None: client)
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None, **kwargs: client)
     return client
 
 
@@ -168,7 +168,7 @@ async def test_the_dead_connection_is_released(account, dead: FakeClient):
 async def test_a_live_session_goes_online(account, monkeypatch):
     """Обычный аккаунт поднимается как раньше — и слушает входящие."""
     client = FakeClient(authorized=True)
-    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None: client)
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None, **kwargs: client)
 
     ok = await manager.start_account(account, SESSION)
 
@@ -181,7 +181,7 @@ async def test_a_live_session_goes_online(account, monkeypatch):
 async def test_a_broken_link_is_not_a_revoked_session(account, monkeypatch):
     """Сеть отвалилась — так и написано: это другая беда, чинится сама."""
     client = FakeClient(connect_error=OSError("network is unreachable"))
-    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None: client)
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None, **kwargs: client)
 
     ok = await manager.start_account(account, SESSION)
 
@@ -235,7 +235,7 @@ async def test_start_all_clears_an_old_reason_on_success(account_id, mtproto_on,
         row.last_error = SESSION_REVOKED
 
     client = FakeClient(authorized=True)
-    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None: client)
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None, **kwargs: client)
 
     await manager.start_all()
 

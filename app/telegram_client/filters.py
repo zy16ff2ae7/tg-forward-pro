@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import random
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,15 +42,18 @@ def default_filters() -> dict:
         "keywords": [],         # ловец чеков и уведомления: слова-триггеры
         "limit": 200,           # парсер: сколько участников собрать за запуск
         # ── Рассылка по чатам (kind="mailing") ──
-        "gap_seconds": 5,       # пауза между получателями
-        "gap_jitter": 0,        # к паузе между получателями добавляем 0..N секунд
-        "cycle_seconds": 10,    # пауза перед следующим кругом рассылки
-        "cycle_jitter": 0,      # к паузе между кругами добавляем 0..N секунд
+        # Темп — как у человека, а не у спам-бота: десятки одинаковых сообщений
+        # в минуту — прямой путь под спамблок, см. MAILING_MIN_GAP.
+        "gap_seconds": 60,      # пауза между получателями
+        "gap_jitter": 10,       # к паузе между получателями добавляем 0..N секунд
+        "cycle_seconds": 3600,  # пауза перед следующим кругом рассылки
+        "cycle_jitter": 60,     # к паузе между кругами добавляем 0..N секунд
         "repeats": 0,           # сколько кругов сделать (0 — без лимита)
         "repeat_forever": False, # пользователь явно включил бесконечный режим
         "typing": False,        # показывать «печатает» перед отправкой
         "link_preview": False,  # оставлять блок предпросмотра ссылки
-        "random_pick": False,   # брать из набора случайное сообщение, а не по кругу
+        "random_pick": True,    # брать из набора случайное сообщение, а не по кругу
+        "shuffle_chats": False, # тасовать порядок чатов каждый круг
         "library_ids": [],      # id сохранённых сообщений (таблица saved_messages)
     }
 
@@ -119,14 +123,14 @@ class FilterConfig:
     ignore_muted: bool = True  # не уведомлять из заглушённых чатов
     # ── Автоподписка (kind="autosubscribe") ──
     join_limit: int = 0  # вступить за один запуск (0 — во все)
-    join_gap: int = 2  # пауза между вступлениями, сек
+    join_gap: int = 30  # пауза между вступлениями, сек
     join_retries: int = 0  # повторы вступления при коротком FloodWait
-    daily_join_limit: int = 0  # вступлений в сутки на задачу (0 — без лимита)
+    daily_join_limit: int = 10  # вступлений в сутки на задачу (0 — без лимита)
     # ── Настройки авто-постера (планировщик собственных сообщений) ──
     messages: list[str] = field(default_factory=list)  # тексты сообщений (по одному в строке)
     interval_seconds: int = 120  # интервал между отправками
-    window_start: str = "00:00"  # начало окна ЧЧ:ММ
-    window_end: str = "23:59"  # конец окна ЧЧ:ММ
+    window_start: str = "09:00"  # начало окна ЧЧ:ММ
+    window_end: str = "22:00"  # конец окна ЧЧ:ММ
     # Чьи это часы: смещение хозяина задачи от UTC в минутах (Москва — 180).
     # None — часы сервера, как у задач, созданных до появления настройки
     # (см. jobs.window_now_sec).
@@ -137,17 +141,18 @@ class FilterConfig:
     schedule_only: bool = False
     scheduled_posts: list = field(default_factory=list)
     # ── Рассылка по чатам (kind="mailing") ──
-    gap_seconds: int = 5  # пауза между получателями
-    gap_jitter: int = 0  # случайная добавка к паузе между получателями
-    cycle_seconds: int = 10  # пауза перед следующим кругом
-    cycle_jitter: int = 0  # случайная добавка к паузе между кругами
+    gap_seconds: int = 60  # пауза между получателями
+    gap_jitter: int = 10  # случайная добавка к паузе между получателями
+    cycle_seconds: int = 3600  # пауза перед следующим кругом
+    cycle_jitter: int = 60  # случайная добавка к паузе между кругами
     # Кругов по умолчанию нет предела: настройка не задана — значит рассылка
     # крутится, пока её не остановят. Число кругов приходит из кабинета явно.
     repeats: int = 0  # сколько кругов (0 — без лимита)
     repeat_forever: bool = False  # явный переключатель бесконечного режима
     typing: bool = False  # показывать «печатает»
     link_preview: bool = False  # оставлять предпросмотр ссылки
-    random_pick: bool = False  # случайное сообщение из набора
+    random_pick: bool = True  # случайное сообщение из набора
+    shuffle_chats: bool = False  # тасовать порядок чатов каждый круг
     library_ids: list[int] = field(default_factory=list)  # id из saved_messages
     # Закреплять каждое отправленное сообщение (нужны права в приёмнике).
     pin_on_send: bool = False
@@ -238,6 +243,7 @@ class FilterConfig:
             "typing": self.typing,
             "link_preview": self.link_preview,
             "random_pick": self.random_pick,
+            "shuffle_chats": self.shuffle_chats,
             "library_ids": self.library_ids,
             "pin_on_send": self.pin_on_send,
             "autodelete_hours": self.autodelete_hours,
@@ -321,9 +327,27 @@ def should_forward(message: Any, config: FilterConfig) -> bool:
     return True
 
 
+# Спинтакс: {вариант1|вариант2} — каждый показ случайно выбирает вариант.
+# Вложенности нет специально: её никто не читает, а парсер с ней ошибается.
+_SPIN_RE = re.compile(r"\{([^{}]+)\}")
+
+
+def spin_text(text: str) -> str:
+    """Раскрывает спинтакс: {добрый день|здравствуйте} — один вариант наугад.
+
+    Одинаковый текст в сотне чатов — сильнейший спам-сигнал; пара таких
+    скобок в сообщении делает каждый показ непохожим на соседний. Пустой
+    вариант ({слово|} или {|слово}) — «может быть, а может нет».
+    """
+    if not text or "{" not in text:
+        return text
+    return _SPIN_RE.sub(lambda match: random.choice(match.group(1).split("|")), text)
+
+
 def transform_text(text: str, config: FilterConfig) -> str:
     """Применяет к тексту замены, вырезание ссылок/упоминаний и суффикс."""
-    result = text
+    # Спинтакс — первым: замены и подпись ложатся уже на выбранный вариант.
+    result = spin_text(text)
 
     for pair in config.replace:
         src = (pair or {}).get("from") or ""

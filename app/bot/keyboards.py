@@ -1,7 +1,7 @@
 """Клавиатуры бота."""
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Container, Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -62,11 +62,17 @@ def main_menu(
 
 
 def accounts_menu(
-    accounts: Sequence[TelegramAccount], pending_login: bool = False
+    accounts: Sequence[TelegramAccount],
+    pending_login: bool = False,
+    paused: Container[int] | None = None,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    paused = paused or frozenset()
     for account in accounts:
-        status = "🟢" if account.is_active else "🔴"
+        if account.id in paused:
+            status = "⏸"
+        else:
+            status = "🟢" if account.is_active else "🔴"
         builder.row(
             InlineKeyboardButton(
                 text=f"{status} {account.phone}", callback_data=f"acc:open:{account.id}"
@@ -425,8 +431,12 @@ def bank_menu(banked_days: int, active_days: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def login_choice_kb() -> InlineKeyboardMarkup:
-    """Выбор, как входить: код на номер или скан QR-кода."""
+def login_choice_kb(*, keys_added: bool = False) -> InlineKeyboardMarkup:
+    """Выбор, как входить: код на номер или скан QR-кода.
+
+    Свои ключи API — необязательная строка: вход через своё приложение
+    (my.telegram.org/apps) не делит лимиты с чужими аккаунтами сервиса.
+    """
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="📱 По номеру", callback_data="acc:method:phone")
@@ -434,6 +444,8 @@ def login_choice_kb() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="📷 По QR-коду", callback_data="acc:method:qr")
     )
+    keys_label = "🔑 Свои ключи API ✅" if keys_added else "🔑 Свои ключи API"
+    builder.row(InlineKeyboardButton(text=keys_label, callback_data="acc:keys"))
     builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="nav:cancel"))
     return builder.as_markup()
 

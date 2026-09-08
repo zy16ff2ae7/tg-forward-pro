@@ -228,6 +228,7 @@ async def cancel_action(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     if current in {
         LoginStates.choice.state,
+        LoginStates.keys.state,
         LoginStates.phone.state,
         LoginStates.code.state,
         LoginStates.password.state,

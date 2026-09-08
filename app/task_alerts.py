@@ -61,3 +61,26 @@ async def maybe_alert_problem(rule: Any, reason: str) -> None:
         )
     except Exception as exc:  # noqa: BLE001 — алерт не должен ронять доставку
         logger.warning("Не удалось отправить алерт задачи #{}: {}", getattr(rule, "id", "?"), exc)
+async def alert_pause_started(user_id: int, phone: str, until_text: str) -> None:
+    """Пишет, что аккаунт встал на паузу после спам-ограничения. Не падает никогда.
+
+    В отличие от писем о больных задачах, это письмо — не про третью ошибку, а
+    про рубильник: он встаёт один раз на много часов, и человек должен узнать
+    об этом сразу из лички, а не когда-нибудь из карточки. Настройку «alerts»
+    задачи не смотрим: пауза — событие аккаунта, а не задачи.
+    """
+    try:
+        if _bot is None or not user_id:
+            return
+        from app.bot.keyboards import cabinet_button
+
+        await _bot.send_message(
+            user_id,
+            f"🛡 <b>Безопасный режим: {escape(phone)}</b>\n"
+            "Telegram ограничил аккаунт за спам — отправки всех его задач "
+            f"на паузе до {escape(until_text)}.\n"
+            "Не запускайте задачи вручную: ограничение спадёт само.",
+            reply_markup=cabinet_button(),
+        )
+    except Exception as exc:  # noqa: BLE001 — алерт не должен ронять доставку
+        logger.warning("Не удалось отправить письмо о паузе аккаунта: {}", exc)

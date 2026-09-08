@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from loguru import logger
-from telethon.errors import FloodWaitError, RPCError
+from telethon.errors import FloodWaitError, PeerFloodError, RPCError, SlowModeWaitError
 
 from app.config import settings
 from app.telegram_client.types import DeliveryResult, RuleSnapshot
@@ -598,7 +598,11 @@ class DeliveryQueue:
                 async with self._semaphore:
                     await limiter.acquire()
                     result = await self._handler(job.client, job.message, job.rule)
-            except FloodWaitError as exc:
+            except (FloodWaitError, SlowModeWaitError) as exc:
+                # Медленный режим — тот же FloodWait, вид сбоку: у него тоже
+                # есть seconds, и ждать надо ровно столько, сколько просят.
+                # Отдельной веткой он стоит, потому что подклассом FloodWait
+                # не является — раньше уходил в общий RPC-ретрай.
                 wait = int(getattr(exc, "seconds", 5)) + 1
                 if wait > self._flood_max or attempt >= self._attempts:
                     if wait > self._flood_max:
@@ -619,6 +623,16 @@ class DeliveryQueue:
                     self._attempts,
                 )
                 delay = float(wait)
+            except PeerFloodError as exc:
+                # Аккаунт помечен за спам: ретраить нечего — каждая повторная
+                # попытка продлевает ограничение. Сразу в журнал, а рубильник
+                # на весь аккаунт ставит обработчик ошибки (см. forwarder).
+                logger.warning(
+                    "Правило #{}: PeerFlood — без повторов, в журнал",
+                    job.rule.id,
+                )
+                await self._fail(job, exc)
+                return
             except RPCError as exc:
                 if attempt >= self._attempts:
                     await self._fail(job, exc)

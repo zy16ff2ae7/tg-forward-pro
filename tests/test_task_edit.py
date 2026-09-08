@@ -230,12 +230,12 @@ async def test_same_text_does_not_pile_up_in_the_library(
     assert task["edit"]["message"] == "первое\n\nвторое"
 
     same = await patch_task(
-        client, auth_headers, task["id"], message="первое\n\nвторое", gap=9
+        client, auth_headers, task["id"], message="первое\n\nвторое", gap=90
     )
     assert same.status == 200, await same.text()
     assert await library_size() == 2, "тот же текст — те же записи"
     assert (await same.json())["task"]["edit"]["message"] == "первое\n\nвторое"
-    assert (await same.json())["task"]["mailing"]["gap_seconds"] == 9
+    assert (await same.json())["task"]["mailing"]["gap_seconds"] == 90
 
     other = await patch_task(client, auth_headers, task["id"], message="третье")
     assert other.status == 200, await other.text()
@@ -275,7 +275,7 @@ ROUND_TRIP: list[tuple[str, dict]] = [
     ),
     (
         "mailing",
-        {"targets": ["@ch-1", "@ch-2"], "message": "текст", "gap": 7, "cycle": 30,
+        {"targets": ["@ch-1", "@ch-2"], "message": "текст", "gap": 70, "cycle": 300,
          "repeats": 3, "typing": True, "random_pick": True},
     ),
 ]
@@ -353,9 +353,9 @@ FULL_FORM: list[tuple[str, dict, dict]] = [
     (
         "sender",
         {"targets": ["@ch-1", "@ch-2"], "message": "текст", "send_mode": "queue",
-         "gap": 7, "cycle": 30, "repeats": 3, "typing": True, "random_pick": True,
+         "gap": 70, "cycle": 300, "repeats": 3, "typing": True, "random_pick": True,
          "link_preview": True},
-        {"targets": ["@ch-6"], "message": "другой текст", "gap": 11, "cycle": 40,
+        {"targets": ["@ch-6"], "message": "другой текст", "gap": 110, "cycle": 400,
          "repeats": 0, "typing": False, "random_pick": False},
     ),
 ]
@@ -461,12 +461,12 @@ async def test_sender_queue_mode_creates_mailing(
 
     task = await make_task(
         client, auth_headers, account_id, command="sender", send_mode="queue",
-        targets=["@ch-1"], message="текст", gap=7, repeats=3,
+        targets=["@ch-1"], message="текст", gap=70, repeats=3,
     )
 
     assert task["kind"] == "mailing"
     assert task["edit"]["send_mode"] == "queue"
-    assert task["edit"]["gap"] == 7
+    assert task["edit"]["gap"] == 70
     assert task["edit"]["repeats"] == 3
 
 
@@ -503,7 +503,7 @@ async def test_edit_switches_send_mode(
     )
 
     response = await patch_task(
-        client, auth_headers, task["id"], send_mode="queue", gap=9
+        client, auth_headers, task["id"], send_mode="queue", gap=90
     )
 
     assert response.status == 200, await response.text()
@@ -511,4 +511,4 @@ async def test_edit_switches_send_mode(
     assert edited["id"] == task["id"], "та же задача, а не новая"
     assert edited["kind"] == "mailing"
     assert edited["edit"]["send_mode"] == "queue"
-    assert edited["edit"]["gap"] == 9
+    assert edited["edit"]["gap"] == 90

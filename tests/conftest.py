@@ -65,6 +65,40 @@ async def delivery_queue_per_test():
     delivery_queue._queue = asyncio.Queue(maxsize=delivery_queue._maxsize)
 
 
+@pytest.fixture(autouse=True)
+def instant_broadcast(monkeypatch):
+    """Веер в бою ждёт секунды между чатами, в тесте — нет.
+
+    Саму паузу проверяет отдельный тест с замером сна; здесь она только
+    растягивала бы каждый веер на десятки секунд.
+    """
+    from app.telegram_client import jobs
+
+    monkeypatch.setattr(jobs, "BROADCAST_CHAT_GAP", 0)
+
+
+@pytest.fixture(autouse=True)
+def fresh_join_attempts():
+    """Метки попыток вступлений живут сутки — между тестами их забываем."""
+    from app.telegram_client import jobs
+
+    jobs._join_attempted_at.clear()
+    yield
+    jobs._join_attempted_at.clear()
+
+
+@pytest.fixture(autouse=True)
+def instant_account_gate(monkeypatch):
+    """Общий темп аккаунта в бою — секунды, в тесте — ноль.
+
+    Сам слот проверяет отдельный тест с живой паузой; здесь пауза только
+    растягивала бы каждую отправку.
+    """
+    from app.telegram_client import manager as manager_module
+
+    monkeypatch.setattr(manager_module, "ACCOUNT_SEND_GAP", 0)
+
+
 @pytest.fixture
 def mtproto_on(monkeypatch):
     """Ключи MTProto «на месте»: без них менеджер до аккаунтов не доходит.

@@ -761,7 +761,7 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
                 "targets": list(chats),
                 # Пустая строка делит сообщения, одиночный перенос — нет.
                 "message": "первое\n\nвторое",
-                "gap": 7,
+                "gap": 70,
                 "repeats": 2,
             },
         )
@@ -776,7 +776,7 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
             "получатели, тексты и пауза — из формы",
             info.get("recipients") == 2
             and info.get("messages_count") == 2
-            and info.get("gap_seconds") == 7,
+            and info.get("gap_seconds") == 70,
             f"{info}",
         )
         rep.check(
@@ -878,17 +878,17 @@ async def check_mailing_and_library(cab: Cabinet, rep: Report, account_id: int) 
             f"статус {status}, {(saved.get('edit') or {}).get('message')!r}",
         )
         status, body = await cab.patch(
-            f"/api/tasks/{mailing_id}", json={"message": "переписанный текст", "gap": 11}
+            f"/api/tasks/{mailing_id}", json={"message": "переписанный текст", "gap": 110}
         )
         saved = (body or {}).get("task") or {}
         status, body = await cab.get("/api/library")
         now = len((body or {}).get("items") or [])
         rep.check(
             "тот же текст не ложится в библиотеку второй раз",
-            now == was + 1 and (saved.get("mailing") or {}).get("gap_seconds") == 11,
+            now == was + 1 and (saved.get("mailing") or {}).get("gap_seconds") == 110,
             f"было {was}, стало {now}, пауза {(saved.get('mailing') or {}).get('gap_seconds')}",
         )
-        status, body = await cab.patch(f"/api/tasks/{mailing_id}", json={"gap": 7})
+        status, body = await cab.patch(f"/api/tasks/{mailing_id}", json={"gap": 70})
         saved = (body or {}).get("task") or {}
         rep.check(
             "правка настроек текст не трогает",
@@ -2507,7 +2507,9 @@ async def check_account_login(cab: Cabinet, rep: Report) -> None:
             raise PhoneCodeInvalidError(request=None)
         raise SessionPasswordNeededError(request=None)
 
-    async def sign_in_password(_password: str, _session: str, _creds: Any = None) -> str:
+    async def sign_in_password(
+        _password: str, _session: str, _creds: Any = None, **_kwargs: Any
+    ) -> str:
         return "smoke-session-after-2fa"
 
     async def check_session(
@@ -3070,7 +3072,7 @@ async def check_dead_session(cab: Cabinet, rep: Report) -> None:
 
     client = DeadClient()
     with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
-        _new_client=lambda session_string="", creds=None: client
+        _new_client=lambda session_string="", creds=None, **kwargs: client
     ):
         started = await manager.start_account(row, "1AaBb-dead-session")
 
@@ -3164,7 +3166,7 @@ async def check_account_revive(cab: Cabinet, rep: Report) -> None:
 
     client = FlakyClient()
     with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
-        _new_client=lambda session_string="", creds=None: client
+        _new_client=lambda session_string="", creds=None, **kwargs: client
     ):
         # Первый заход обрывается — так аккаунт и оказывался вне работы.
         status, body = await cab.post(f"/api/accounts/{revive_id}/retry")

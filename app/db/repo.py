@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.plans import rub_amount, stars_amount, usdt_amount
 from app.db.models import (
+    AccountPause,
     CollectedItem,
     ForwardLog,
     JoinLog,
@@ -1168,7 +1169,35 @@ async def set_account_error(
         # Аккаунт вернулся в работу: про следующее выпадение надо будет сказать
         # снова, иначе человек узнает о нём только из кабинета.
         account.error_notified_at = None
+        account.disabled_at = None
+    else:
+        account.disabled_at = utcnow()
     await session.flush()
+
+
+async def count_disabled_since(
+    session: AsyncSession, errors: Sequence[str], hours: int = 24
+) -> int:
+    """Сколько аккаунтов выключили с этими причинами за последние часы.
+
+    Причины передаёт вызывающий: безнадёжные тексты живут в менеджере, а репо
+    про менеджер не знает. Сторожу это число нужно, чтобы отличить волну
+    заморозок от фона.
+    """
+    if not errors:
+        return 0
+    since = utcnow() - timedelta(hours=max(1, hours))
+    result = await session.execute(
+        select(func.count())
+        .select_from(TelegramAccount)
+        .where(
+            TelegramAccount.is_active.is_(False),
+            TelegramAccount.last_error.in_(list(errors)),
+            TelegramAccount.disabled_at.is_not(None),
+            TelegramAccount.disabled_at >= since,
+        )
+    )
+    return int(result.scalar() or 0)
 
 
 async def note_account_trouble(
@@ -1528,6 +1557,75 @@ async def count_joins_today(session: AsyncSession, rule_id: int) -> int:
         .where(JoinLog.rule_id == rule_id, JoinLog.created_at >= today)
     )
     return int(result.scalar() or 0)
+
+
+async def count_joins_today_for_account(session: AsyncSession, account_id: int) -> int:
+    """Сколько вступлений сделал аккаунт за сутки — всеми задачами разом.
+
+    Лимит задачи считается по её строкам, а Telegram считает по аккаунту:
+    три задачи с лимитом 10 — это 30 вступлений с одного номера. Потолок
+    аккаунта (``ACCOUNT_DAILY_JOIN_CAP``) опирается на это число.
+    """
+    today = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    result = await session.execute(
+        select(func.count())
+        .select_from(JoinLog)
+        .join(Rule, Rule.id == JoinLog.rule_id)
+        .where(Rule.account_id == account_id, JoinLog.created_at >= today)
+    )
+    return int(result.scalar() or 0)
+
+
+async def set_account_pause(
+    session: AsyncSession,
+    account_id: int,
+    user_id: int,
+    paused_until: datetime,
+    reason: str = "peer_flood",
+) -> None:
+    """Ставит рубильник: отправки аккаунта стоят до ``paused_until``.
+
+    Строка одна на аккаунт — upsert вручную, чтобы не зависеть от диалекта
+    (SQLite и PostgreSQL ругаются по-разному). Более поздняя пауза перекрывает
+    раннюю: ограничение одно, и плодить строки нечего.
+    """
+    existing = await session.get(AccountPause, int(account_id))
+    if existing is None:
+        session.add(
+            AccountPause(
+                account_id=int(account_id),
+                user_id=int(user_id),
+                paused_until=paused_until,
+                reason=str(reason or "peer_flood")[:32],
+            )
+        )
+    elif paused_until > existing.paused_until:
+        existing.paused_until = paused_until
+        existing.reason = str(reason or "peer_flood")[:32]
+    await session.flush()
+
+
+async def clear_account_pause(session: AsyncSession, account_id: int) -> None:
+    """Снимает рубильник досрочно (человек разобрался сам)."""
+    await session.execute(
+        delete(AccountPause).where(AccountPause.account_id == int(account_id))
+    )
+    await session.flush()
+
+
+async def active_account_pauses(session: AsyncSession) -> Sequence[AccountPause]:
+    """Живые паузы — для загрузки рубильников при старте.
+
+    Протухшие стираем тут же: им больше нечего делать в таблице.
+    """
+    now = utcnow()
+    await session.execute(
+        delete(AccountPause).where(AccountPause.paused_until <= now)
+    )
+    result = await session.execute(
+        select(AccountPause).where(AccountPause.paused_until > now)
+    )
+    return result.scalars().all()
 
 
 async def list_collected_items(
@@ -2549,9 +2647,12 @@ async def bump_send_count(session: AsyncSession, account_id: int, count: int = 1
     который пишется в той же сессии.
     """
     today = utcnow().date()
+    # Неделю храним, старше — трём: потолок по живой активности смотрит
+    # на последние семь дней, а строк всё равно единицы на аккаунт.
+    cutoff = today - timedelta(days=6)
     await session.execute(
         delete(SendCounter).where(
-            SendCounter.account_id == account_id, SendCounter.day < today
+            SendCounter.account_id == account_id, SendCounter.day < cutoff
         )
     )
     try:
@@ -2570,6 +2671,19 @@ async def bump_send_count(session: AsyncSession, account_id: int, count: int = 1
     row.count = int(row.count or 0) + max(1, int(count))
     await session.flush()
     return int(row.count)
+
+
+async def send_count_since(
+    session: AsyncSession, account_id: int, *, days: int = 7
+) -> int:
+    """Сколько аккаунт отправил за последние дни (UTC, включая сегодня)."""
+    since = utcnow().date() - timedelta(days=max(1, days) - 1)
+    result = await session.execute(
+        select(func.coalesce(func.sum(SendCounter.count), 0)).where(
+            SendCounter.account_id == account_id, SendCounter.day >= since
+        )
+    )
+    return int(result.scalar() or 0)
 
 
 async def send_count_today(session: AsyncSession, account_id: int) -> int:

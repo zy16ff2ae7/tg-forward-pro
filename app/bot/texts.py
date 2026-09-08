@@ -1,7 +1,7 @@
 """Тексты сообщений бота."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape
 
 from app.config import settings
@@ -193,6 +193,7 @@ def rule_card(
     health: dict | None = None,
     online: bool = True,
     subscription_active: bool = True,
+    paused_until: float | None = None,
 ) -> str:
     """Карточка задачи. Состав строк зависит от типа задачи.
 
@@ -208,6 +209,10 @@ def rule_card(
     сутки падает с ошибкой, и у задачи с отключённым аккаунтом, и у задачи без
     абонемента: причину было видно только в кабинете. Значения по умолчанию —
     «всё хорошо», чтобы карточку можно было собрать и без походов в базу.
+
+    ``paused_until`` — unix-время, до которого стоят отправки аккаунта
+    (рубильник после спам-ограничения). Пока оно в будущем, задача ждёт —
+    и карточка говорит это прямо, а не «работает ✅».
     """
     from app.task_health import chat_names, error_text
     from app.telegram_client.filters import FilterConfig
@@ -238,6 +243,8 @@ def rule_card(
         state = "нет абонемента ⛔"
     elif not online:
         state = "нет связи 🔌"
+    elif paused_until:
+        state = "пауза после спамблока ⏸"
     elif health.get("failing"):
         state = "сбой ⚠️"
     elif one_shot:
@@ -266,6 +273,12 @@ def rule_card(
             lines.append(
                 "🔌 Аккаунт не в сети — задача ждёт связи. Перезапустите его "
                 "в «👤 Аккаунты»."
+            )
+        elif paused_until:
+            when = datetime.fromtimestamp(paused_until, timezone.utc).strftime("%H:%M")
+            lines.append(
+                f"⏸ Аккаунт на паузе после спамблока до {when} UTC — задача ждёт. "
+                "Не запускайте вручную: ограничение спадёт само."
             )
     # Причина сбоя — сразу под состоянием: без неё «сбой ⚠️» ничего не
     # объясняет, а в журнал службы человек не полезет. Починенный сбой тоже

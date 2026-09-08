@@ -107,8 +107,9 @@ const FIELD_SPEC = {
     note: 'вступим перед первым кругом; приватные заявки и отсутствие доступа покажем как статус, не как падение',
     control: 'textarea',
   },
-  join_gap: { label: 'Пауза между вступлениями (сек)', control: 'number', placeholder: '2', note: 'защита Telegram, минимум не навязываем' },
-  daily_join_limit: { label: 'Лимит вступлений в сутки', control: 'number', placeholder: '0', note: '0 — без дополнительного лимита задачи; штатная защита всё равно действует' },
+  join_gap: { label: 'Пауза между вступлениями (сек)', control: 'number', placeholder: '60', note: 'минимум 30 — быстрее вступать опасно: заморозка' },
+  join_limit: { label: 'Вступать за один запуск', control: 'number', placeholder: '10', note: '0 — во все сразу (рискованно)' },
+  daily_join_limit: { label: 'Лимит вступлений в сутки', control: 'number', placeholder: '10', note: 'на задачу; 0 — без лимита (рискованно)' },
   target_user: { label: 'За кем следим', placeholder: '@username или ссылка на профиль' },
   keywords: {
     label: 'Ключевые слова',
@@ -161,12 +162,12 @@ const FIELD_SPEC = {
   interval: { label: 'Интервал (мин)', control: 'number', placeholder: '2', note: 'минимум 1 минута' },
   start: { label: 'Начало (ЧЧ:ММ)', placeholder: '00:00', note: 'по вашим часам — кабинет берёт их с этого устройства' },
   end: { label: 'Конец (ЧЧ:ММ)', placeholder: '23:59', note: 'после этого времени круги ждут до утра' },
-  gap: { label: 'Пауза между чатами (сек)', control: 'number', placeholder: '5', note: 'быстрее секунды Telegram всё равно не даст' },
-  cycle: { label: 'Пауза перед новым кругом (сек)', control: 'number', placeholder: '10' },
+  gap: { label: 'Пауза между чатами (сек)', control: 'number', placeholder: '60', note: 'минимум 30 — быстрее нельзя: риск спамблока' },
+  cycle: { label: 'Пауза перед новым кругом (сек)', control: 'number', placeholder: '3600', note: 'минимум 60 — круг раз в час и реже' },
   repeats: { label: 'Сколько кругов', control: 'number', placeholder: '1', note: 'можно задать свой предел отправок' },
   repeat_forever: { label: 'Без ограничений: продолжать до остановки', control: 'check', note: 'Паузы, дневной лимит и ограничения Telegram всё равно действуют.' },
   typing: { label: 'Показывать «печатает» перед отправкой', control: 'check' },
-  random_pick: { label: 'Брать сообщение наугад, а не по очереди', control: 'check' },
+  random_pick: { label: 'Брать сообщение наугад, а не по очереди', control: 'check', checked: true },
   link_preview: { label: 'Оставлять предпросмотр ссылок', control: 'check' },
   send_mode: { label: 'Как отправлять', control: 'send_mode' },
   buttons: {
@@ -222,7 +223,7 @@ const FIELD_SPEC = {
   mention_all: {
     label: 'Упоминать всех участников',
     control: 'check',
-    note: 'первые 30 живых, незаметно — без видимого текста',
+    note: 'первые 30 живых, незаметно — без видимого текста. В чужих чатах это жалобы и спамблок',
   },
   delay_jitter: {
     label: 'Разброс задержки (сек)',
@@ -233,13 +234,18 @@ const FIELD_SPEC = {
   gap_jitter: {
     label: 'Разброс паузы между чатами (сек)',
     control: 'number',
-    placeholder: '0',
+    placeholder: '10',
     note: '0 — пауза всегда одинаковая, роботов видно',
+  },
+  shuffle_chats: {
+    label: 'Тасовать порядок чатов каждый круг',
+    control: 'check',
+    note: 'один и тот же порядок обхода — машинный след',
   },
   cycle_jitter: {
     label: 'Разброс паузы между кругами (сек)',
     control: 'number',
-    placeholder: '0',
+    placeholder: '60',
     note: 'только очередь: круги ходят с плавающим перерывом',
   },
   daily_cap: {
@@ -545,13 +551,13 @@ const DEMO_STATE = {
       chats: [{ id: '1006', title: 'Команда (чат)' }, { id: '1005', title: 'Подборки' }],
       mailing: {
         recipients: 2, messages_count: 1, whole_library: false, messages_gone: 0,
-        gap_seconds: 8, cycle_seconds: 60, repeats: 3, typing: true, random_pick: false,
+        gap_seconds: 60, cycle_seconds: 600, repeats: 3, typing: true, random_pick: true,
       },
       edit: {
         account_id: 1, names: { 1006: 'Команда (чат)', 1005: 'Подборки' },
         targets: ['1006', '1005'], message: 'Напоминаем: показ сегодня в 19:00.',
-        library_ids: [], send_mode: 'queue', gap: 8, cycle: 60, repeats: 3,
-        typing: true, random_pick: false, link_preview: false,
+        library_ids: [], send_mode: 'queue', gap: 60, cycle: 3600, repeats: 3,
+        typing: true, random_pick: true, link_preview: false,
       },
       created_at: '2026-08-29T14:15:00' },
     // Разовая задача в работе: без неё в демо не было ни кнопки «Запустить», ни
@@ -617,9 +623,9 @@ const DEMO_COMMAND_GROUPS = [
 const DEMO_COMMANDS = [
   { id: 'sender', group: 'own', kind: 'poster', kinds: ['poster', 'mailing'], emoji: '📤', title: 'Постинг и рассылка', status: 'ready',
     needs: ['account', 'targets', 'message'],
-    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'pin_on_send', 'topic', 'autodelete_hours', 'mention_all', 'gap_jitter', 'cycle_jitter', 'daily_cap', 'alerts', 'subscribe_links', 'join_gap', 'daily_join_limit'],
+    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'translate_to', 'uniquify', 'pin_on_send', 'topic', 'autodelete_hours', 'mention_all', 'gap_jitter', 'cycle_jitter', 'shuffle_chats', 'daily_cap', 'alerts', 'subscribe_links', 'join_gap', 'daily_join_limit'],
     description: 'Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.',
-    hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
+    hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят наугад. Спинтакс {a|b} тасует текст. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
     tags: ['ваш текст', 'расписание или очередь'] },
   { id: 'copy_channel', group: 'publish', kind: 'forward', emoji: '🔁', title: 'Копирование канала', status: 'ready',
     needs: ['account', 'source', 'target'], optional: ['mode', 'buttons', 'translate_to', 'uniquify', 'start', 'end', 'pin_on_send', 'topic', 'autodelete_hours', 'delay_jitter', 'daily_cap', 'alerts'],
@@ -643,9 +649,9 @@ const DEMO_COMMANDS = [
     hint: 'Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Режим «участники» листает состав чата, «история» — авторов последних сообщений. Запускается сразу, результат — кнопкой «Результаты».',
     tags: ['список участников', 'фильтры и режимы', 'запуск вручную'] },
   { id: 'autosubscribe', group: 'audience', kind: 'autosubscribe', emoji: '🤝', title: 'Автоподписка', status: 'ready',
-    needs: ['account', 'targets'], optional: ['source'],
+    needs: ['account', 'targets'], optional: ['source', 'join_gap', 'join_limit', 'daily_join_limit'],
     description: 'Вступает в каналы из списка и подхватывает ссылки из источника.',
-    hint: 'Каналы — через запятую: @chan1, t.me/+invite.',
+    hint: 'Каналы — через запятую: @chan1, t.me/+invite. Вступает не залпом: пауза от 30 секунд, за раз — до 10, в сутки — до 10.',
     tags: ['вступает сама', 'ссылки из источника'] },
   { id: 'checks', group: 'inbox', kind: 'checks', emoji: '🧾', title: 'Ловец чеков', status: 'ready',
     needs: ['account', 'source', 'target'], optional: ['keywords', 'alerts'],
@@ -1144,8 +1150,8 @@ function demoTaskFill(task, body, command) {
     task.mailing = {
       recipients: chats.length,
       ...demoOwnTextsState(libraryIds),
-      gap_seconds: Number(body.gap) || 5,
-      cycle_seconds: Number(body.cycle) || 10,
+      gap_seconds: Number(body.gap) || 60,
+      cycle_seconds: Number(body.cycle) || 600,
       repeats,
       typing: Boolean(body.typing),
       random_pick: Boolean(body.random_pick),
@@ -1219,8 +1225,8 @@ function demoTaskEdit(body, command, chats, libraryIds) {
     edit.start = body.start || '00:00';
     edit.end = body.end || '23:59';
     edit.tz = body.tz === undefined ? browserTz() : windowTz(body.tz);
-    edit.gap = Number(body.gap) || 5;
-    edit.cycle = Number(body.cycle) || 10;
+    edit.gap = Number(body.gap) || 60;
+    edit.cycle = Number(body.cycle) || 600;
     edit.repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
     edit.typing = Boolean(body.typing);
     edit.random_pick = Boolean(body.random_pick);
@@ -2899,7 +2905,7 @@ function taskMetaLines(task) {
   } else if (kind === 'mailing') {
     // Рассылка: её расписание — это паузы и число кругов, а не «задержка».
     const info = task.mailing || {};
-    lines.push(`пауза ${info.gap_seconds || 5} сек`);
+    lines.push(`пауза ${info.gap_seconds || 60} сек`);
     if (info.messages_count) lines.push(`${info.messages_count} сообщ.`);
     else if (info.whole_library) lines.push('вся библиотека');
     // Сообщения удалили из библиотеки, а рассылка на них ссылается: без этой
@@ -3823,6 +3829,19 @@ function renderAccountList() {
   holder.innerHTML = pendingHtml + state.accounts.map(accountHtml).join('');
 }
 
+/* Пауза спамблока приходит ISO-строкой — показываем «сегодня в 14:30».
+   Дата проставляется, только если это не сегодня: лишние цифры в карточке
+   никто не читает. */
+function fmtPauseUntil(iso) {
+  const when = new Date(iso);
+  const time = when.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  const today = new Date();
+  const sameDay = when.toDateString() === today.toDateString();
+  if (sameDay) return `сегодня в ${time}`;
+  const date = when.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+  return `${date} в ${time}`;
+}
+
 /* Карточка аккаунта. Причина, по которой он офлайн, стоит отдельной строкой и с
    кнопкой: раньше её дописывали к «ID 2» мелким серым текстом — она обрезалась
    на 390 px и ничего не предлагала сделать, хотя пересылка в это время стояла.
@@ -3856,6 +3875,7 @@ function accountHtml(account) {
                   aria-label="Отключить аккаунт ${esc(account.phone)}" title="Отключить аккаунт">${icon('i-trash')}</button>
         </div>
         ${trouble}
+        ${account.paused_until ? `<div class="account__reason">⏸ Спамблок: отправки стоят до ${esc(fmtPauseUntil(account.paused_until))}. Не запускайте задачи вручную — ограничение спадёт само.</div>` : ''}
       </div>`;
 }
 
@@ -4631,7 +4651,7 @@ function taskDraftSnapshot() {
   const fields = [
     'targets', 'message', 'subscribe_links', 'gap', 'cycle', 'repeats',
     'repeat_forever', 'typing', 'random_pick', 'link_preview', 'cycle_jitter',
-    'join_gap', 'daily_join_limit', 'daily_cap', 'mention_all', 'alerts',
+    'join_gap', 'join_limit', 'daily_join_limit', 'daily_cap', 'mention_all', 'alerts',
   ];
   const draft = { command: command.id, send_mode: state.sendMode || 'schedule', saved_at: Date.now() };
   let meaningful = false;
@@ -4849,9 +4869,9 @@ function applyTaskPrefill(prefill) {
   ['keywords', 'reaction', 'limit', 'scan', 'online_within_hours', 'api_delay',
     'message', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'translate_to', 'history', 'invite_to',
     'banned_words', 'max_warns', 'mute_hours', 'topic', 'autodelete_hours',
-    'delay_jitter', 'gap_jitter', 'cycle_jitter', 'daily_cap', 'subscribe_links', 'join_gap', 'daily_join_limit']
+    'delay_jitter', 'gap_jitter', 'cycle_jitter', 'daily_cap', 'subscribe_links', 'join_gap', 'join_limit', 'daily_join_limit']
     .forEach((key) => setValue(key, prefill[key]));
-  ['typing', 'random_pick', 'link_preview', 'repeat_forever', 'schedule_only', 'uniquify', 'alerts', 'block_links',
+  ['typing', 'random_pick', 'link_preview', 'repeat_forever', 'schedule_only', 'uniquify', 'shuffle_chats', 'alerts', 'block_links',
     'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only',
     'ignore_bots', 'ignore_archived', 'ignore_muted', 'pin_on_send', 'mention_all']
     .forEach((key) => {
@@ -4923,8 +4943,8 @@ function applyTaskPrefill(prefill) {
    не попадает (см. collectTaskPayload), а его значение лежит в задаче и ждёт
    переключения режима обратно. */
 const SEND_MODE_FIELDS = {
-  schedule: ['schedule_only', 'interval', 'start', 'end'],
-  queue: ['gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'cycle_jitter', 'subscribe_links', 'join_gap', 'daily_join_limit'],
+  schedule: ['schedule_only', 'interval', 'start', 'end', 'translate_to', 'uniquify'],
+  queue: ['gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'translate_to', 'uniquify', 'cycle_jitter', 'shuffle_chats', 'subscribe_links', 'join_gap', 'daily_join_limit'],
 };
 
 /* ─────────────── Редактор дат постинга ─────────────── */
@@ -5645,6 +5665,9 @@ function collectTaskPayload() {
   }
   number('limit', values.limit);
   number('scan', values.scan);
+  number('join_gap', values.join_gap);
+  number('join_limit', values.join_limit);
+  number('daily_join_limit', values.daily_join_limit);
   number('online_within_hours', values.online_within_hours);
   number('api_delay', values.api_delay);
   number('interval', values.interval);

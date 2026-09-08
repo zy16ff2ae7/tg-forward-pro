@@ -39,10 +39,11 @@ def _aged(days: int):
 # ────────────────────────── лимит: свой или прогрев ───────────────────────────
 
 
-def test_override_wins_over_warmup():
-    """Свой лимит из задачи перекрывает прогрев полностью."""
+def test_override_wins_over_warmup_but_hits_the_ceiling():
+    """Свой лимит перекрывает прогрев, но не беспредельно: потолок держит."""
     assert forwarder.send_cap_for(_aged(0), 5) == 5
-    assert forwarder.send_cap_for(_aged(30), 2000) == 2000
+    assert forwarder.send_cap_for(_aged(30), 2000) == 1000
+    assert forwarder.send_cap_for(_aged(0), 2000) == 100
 
 
 def test_warmup_ramps_by_age():
@@ -55,9 +56,27 @@ def test_warmup_ramps_by_age():
     assert forwarder.send_cap_for(_aged(365)) == 1000
 
 
-def test_unknown_age_is_mature():
-    """Возраст не знаем (строка без даты) — не душим: полный лимит."""
-    assert forwarder.send_cap_for(None) == 1000
+def test_unknown_age_is_a_newcomer():
+    """Возраст не знаем (строка без даты) — считаем новичком, а не ветераном."""
+    assert forwarder.send_cap_for(None) == 50
+
+
+def test_bulk_tasks_get_a_cut_default():
+    """Веер, постинг и рассылка: тысяча в чужие чаты — спамблок к полуночи."""
+    for kind in ("broadcast", "poster", "mailing"):
+        assert forwarder.send_cap_for(_aged(30), 0, kind) == 50
+        assert forwarder.send_cap_for(_aged(30), 2000, kind) == 1000
+        assert forwarder.send_cap_for(_aged(0), 2000, kind) == 100
+    assert forwarder.send_cap_for(_aged(30), 0, "forward") == 1000
+
+
+def test_activity_ladder():
+    """Тихо слал — новичок: шкала та же, что у прогрева по дате."""
+    assert forwarder.activity_cap_for(0) == 50
+    assert forwarder.activity_cap_for(49) == 50
+    assert forwarder.activity_cap_for(50) == 150
+    assert forwarder.activity_cap_for(399) == 400
+    assert forwarder.activity_cap_for(400) is None
 
 
 # ─────────────────────────────── счётчик отправок ─────────────────────────────

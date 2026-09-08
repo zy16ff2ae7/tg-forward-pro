@@ -34,8 +34,10 @@ from tests.helpers import TEST_USER_ID
 
 
 def config(**overrides) -> FilterConfig:
-    """Настройки рассылки: defaults как в FilterConfig, поверх — правки теста."""
-    return FilterConfig.from_dict({"kind": "mailing", **overrides})
+    """Настройки рассылки: точный темп без разброса, поверх — правки теста."""
+    pinned = {"kind": "mailing", "gap_jitter": 0, "cycle_jitter": 0}
+    pinned.update(overrides)
+    return FilterConfig.from_dict(pinned)
 
 
 def test_gap_is_never_shorter_than_a_second():
@@ -56,9 +58,16 @@ def test_jitter_only_adds_to_the_pause():
 
 
 def test_cycle_pause_has_its_own_setting():
-    pause = config(gap_seconds=1, cycle_seconds=42)
-    assert jobs.mailing_gap(pause) == 1
-    assert jobs.mailing_gap(pause, cycle=True) == 42
+    pause = config(gap_seconds=90, cycle_seconds=420)
+    assert jobs.mailing_gap(pause) == 90
+    assert jobs.mailing_gap(pause, cycle=True) == 420
+
+
+def test_tiny_pauses_are_lifted_to_the_antispam_floor():
+    """Паузы ниже пола поднимаются: старые задачи с gap=5 лечатся сами."""
+    tiny = config(gap_seconds=5, cycle_seconds=10)
+    assert jobs.mailing_gap(tiny) == jobs.MAILING_MIN_GAP
+    assert jobs.mailing_gap(tiny, cycle=True) == jobs.MAILING_MIN_CYCLE
 
 
 def test_absurd_pause_is_capped():
@@ -149,6 +158,8 @@ def clean_manager():
     manager._clients.clear()
     manager._poster_rules = []
     manager._poster_state.clear()
+    manager._send_pause_until.clear()
+    manager._last_send_at.clear()
 
 
 @pytest.fixture
@@ -188,7 +199,14 @@ async def make_mailing(
         )
         session.add(rule)
         await session.flush()
-        rule.filters = {"targets": list(targets[1:]), **settings}
+        rule.filters = {
+            "targets": list(targets[1:]),
+            "window_start": "00:00",
+            "window_end": "23:59",
+            "gap_jitter": 0,
+            "cycle_jitter": 0,
+            **settings,
+        }
         for text in texts:
             await repo.add_saved_message(session, user_id=user_id, text=text)
 
@@ -216,7 +234,8 @@ async def test_mailing_goes_round_over_the_recipients(create_user, create_accoun
 async def test_each_step_takes_the_next_message(create_user, create_account, no_pauses):
     """Сообщения идут по очереди: за круг получатели видят разные тексты."""
     rule_id, user_id, account_id = await make_mailing(
-        create_user, create_account, targets=[-1001, -1002], texts=["первое", "второе"]
+        create_user, create_account, targets=[-1001, -1002], texts=["первое", "второе"],
+        random_pick=False,
     )
     client = FakeClient()
     manager._clients[account_id] = client
@@ -460,7 +479,7 @@ async def test_mailing_from_the_cabinet_fills_the_library(
             # Пустая строка — граница сообщений. Одиночный перенос её не делает,
             # см. test_line_breaks_inside_a_message_stay_in_one_message.
             "message": "первое\n\nвторое",
-            "gap": 7,
+            "gap": 70,
             "repeats": 2,
         },
         headers=auth_headers,
@@ -471,7 +490,7 @@ async def test_mailing_from_the_cabinet_fills_the_library(
     assert task["kind"] == "mailing"
     assert task["mailing"]["recipients"] == 2
     assert task["mailing"]["messages_count"] == 2
-    assert task["mailing"]["gap_seconds"] == 7
+    assert task["mailing"]["gap_seconds"] == 70
     # Два получателя × два круга — вот и вся работа задачи, она измерима.
     assert task["progress"] == {"done": 0, "total": 4}
 

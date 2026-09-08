@@ -83,7 +83,7 @@ async def park(account_id: int, error: str) -> None:
 
 def live(monkeypatch) -> FakeClient:
     client = FakeClient(authorized=True)
-    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None: client)
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None, **kwargs: client)
     return client
 
 
@@ -249,7 +249,7 @@ async def test_retry_brings_the_account_back(account_id, monkeypatch):
 async def test_retry_names_the_reason_when_it_fails_again(account_id, monkeypatch):
     """Не вышло — человек слышит причину, а аккаунт остаётся в работе."""
     client = FakeClient(connect_error=OSError("network is unreachable"))
-    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None: client)
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None, **kwargs: client)
 
     online, error = await manager.retry_account(account_id)
 
@@ -262,7 +262,7 @@ async def test_retry_names_the_reason_when_it_fails_again(account_id, monkeypatc
 async def test_retry_of_a_dead_session_says_what_to_do(account_id, monkeypatch):
     """Повтор мёртвой сессии честно отвечает, что нужен вход по номеру."""
     client = FakeClient(authorized=False)
-    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None: client)
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None, **kwargs: client)
 
     online, error = await manager.retry_account(account_id)
 
@@ -291,7 +291,7 @@ async def test_a_silent_telegram_keeps_the_account_in_work(account, monkeypatch)
     """Соединение есть, данных нет: причина записана, аккаунт не выключен."""
     client = FakeClient(authorized=True)
     client.me = None
-    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None: client)
+    monkeypatch.setattr(manager, "_new_client", lambda session_string="", creds=None, **kwargs: client)
 
     ok = await manager.start_account(account, SESSION)
 

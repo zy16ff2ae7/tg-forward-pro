@@ -1,0 +1,542 @@
+"""Общая безопасность отправок: темп, потолки, живые тексты.
+
+Три рассылки на одном номере больше не дают три сообщения в секунду (общий
+слот аккаунта), дневной лимит не снимается одной цифрой, а тексты не идут
+байт-в-байт (спинтакс, случайный выбор, перевод и уникализация у рассылки).
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+from datetime import timedelta
+
+import pytest
+
+from app.db import repo
+from app.db.database import session_scope
+from app.db.models import SendCounter
+from app.telegram_client.filters import FilterConfig, spin_text, transform_text
+from app.telegram_client.forwarder import check_send_cap
+from app.telegram_client.manager import manager
+from app.telegram_client.types import RuleSnapshot
+from tests.helpers import TEST_USER_ID
+from tests.test_mailing import (  # noqa: F401
+    FakeClient,
+    clean_manager,
+    login_open,
+    make_mailing,
+    no_pauses,
+    resolved_chats,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_gate():
+    yield
+    manager._last_send_at.clear()
+
+
+# ────────────────────────── общий слот аккаунта ──────────────────────────
+
+
+async def test_send_slot_spaces_sends():
+    """Два слота подряд — второй ждёт паузу, а не влетает следом."""
+    manager._last_send_at.clear()
+    started = time.monotonic()
+    async with manager.account_send_slot(4242, gap=0.05):
+        pass
+    async with manager.account_send_slot(4242, gap=0.05):
+        pass
+    assert time.monotonic() - started >= 0.05
+
+
+async def test_send_slot_serializes_concurrent():
+    """Два отправителя в одну секунду уходят друг за другом через паузу."""
+    manager._last_send_at.clear()
+    order: list[str] = []
+
+    async def sender(name: str):
+        async with manager.account_send_slot(4343, gap=0.05):
+            order.append(name)
+
+    started = time.monotonic()
+    await asyncio.gather(sender("a"), sender("b"))
+    assert sorted(order) == ["a", "b"]
+    assert time.monotonic() - started >= 0.05
+
+
+async def test_mailing_tick_marks_the_ledger(create_user, create_account, no_pauses):
+    """Тик рассылки отмечается в журнале темпа — слот реально используется."""
+    _, _, account_id = await make_mailing(
+        create_user, create_account, targets=[-1001], texts=["всем привет"]
+    )
+    manager._clients[account_id] = FakeClient()
+    manager._last_send_at.clear()
+
+    await manager._mailing_tick()
+
+    assert account_id in manager._last_send_at
+
+
+# ─────────────────────────────── живые тексты ───────────────────────────────
+
+
+def test_spintax_picks_variants():
+    """{a|b} тасуется: за 20 показов видно оба варианта."""
+    seen = {spin_text("{первое|второе}") for _ in range(20)}
+    assert seen == {"первое", "второе"}
+    assert spin_text("без скобок") == "без скобок"
+
+
+def test_transform_applies_spintax():
+    """Спинтакс раскрывается в общем конвейере текста."""
+    conf = FilterConfig.from_dict({})
+    seen = {transform_text("{a|b}!", conf) for _ in range(20)}
+    assert seen == {"a!", "b!"}
+
+
+def test_random_pick_default_true_explicit_false_kept():
+    """По умолчанию — наугад; явный False из старых задач уважается."""
+    assert FilterConfig.from_dict({}).random_pick is True
+    assert FilterConfig.from_dict({"random_pick": False}).random_pick is False
+
+
+async def test_create_defaults_random_pick_true(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Форма без галочки — сервер включает «наугад» сам."""
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    response = await client.post(
+        "/api/tasks",
+        json={
+            "command": "mailing",
+            "account_id": account_id,
+            "targets": ["@a"],
+            "message": "раз",
+            "gap": 70,
+        },
+        headers=auth_headers,
+    )
+    assert response.status == 201, await response.text()
+    assert (await response.json())["task"]["edit"]["random_pick"] is True
+
+
+async def test_translate_uniquify_opened_for_mailing(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Рассылке доступны перевод и уникализация — как вееру."""
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    response = await client.post(
+        "/api/tasks",
+        json={
+            "command": "mailing",
+            "account_id": account_id,
+            "targets": ["@a"],
+            "message": "раз",
+            "gap": 70,
+            "translate_to": "en",
+            "uniquify": True,
+        },
+        headers=auth_headers,
+    )
+    assert response.status == 201, await response.text()
+    edit = (await response.json())["task"]["edit"]
+    assert edit["translate_to"] == "en"
+    assert edit["uniquify"] is True
+
+
+# ─────────────────────────── потолки и активность ───────────────────────────
+
+
+async def test_daily_cap_clamped_at_create(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Цифра 999999 на записи жмётся к потолку — предохранитель не снять."""
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    response = await client.post(
+        "/api/tasks",
+        json={
+            "command": "mailing",
+            "account_id": account_id,
+            "targets": ["@a"],
+            "message": "раз",
+            "gap": 70,
+            "daily_cap": 999999,
+        },
+        headers=auth_headers,
+    )
+    assert response.status == 201, await response.text()
+    assert (await response.json())["task"]["edit"]["daily_cap"] == 1000
+
+
+def _snapshot(rule_id: int, user_id: int, account_id: int, kind: str) -> RuleSnapshot:
+    return RuleSnapshot(
+        id=rule_id, user_id=user_id, target_id=-1, account_id=account_id,
+        mode="copy", delay_seconds=0, kind=kind,
+    )
+
+
+async def test_quiet_veteran_capped_by_activity(create_user, create_account):
+    """Ветеран по дате, но тихий по жизни — жмётся к новичку."""
+    user_id = await create_user()
+    account_id = await create_account(user_id)
+    async with session_scope() as session:
+        from app.db.models import TelegramAccount
+
+        account = await session.get(TelegramAccount, account_id)
+        assert account is not None
+        account.created_at = repo.utcnow() - timedelta(days=30)
+        await session.commit()
+
+    hit, used, cap = await check_send_cap(_snapshot(1, user_id, account_id, "forward"))
+
+    assert (hit, used, cap) == (False, 0, 50)
+
+
+async def test_working_veteran_keeps_full_cap(create_user, create_account):
+    """Ветеран, который реально слал, — полный лимит, активность не душит."""
+    user_id = await create_user()
+    account_id = await create_account(user_id)
+    async with session_scope() as session:
+        from app.db.models import TelegramAccount
+
+        account = await session.get(TelegramAccount, account_id)
+        assert account is not None
+        account.created_at = repo.utcnow() - timedelta(days=30)
+        session.add(SendCounter(
+            account_id=account_id,
+            day=(repo.utcnow() - timedelta(days=1)).date(),
+            count=500,
+        ))
+        await session.commit()
+
+    hit, used, cap = await check_send_cap(_snapshot(1, user_id, account_id, "forward"))
+
+    assert (hit, used, cap) == (False, 0, 1000)
+
+
+# ─────────────────────────── живучесть кругов ───────────────────────────
+
+
+class FlakyChatClient(FakeClient):
+    """Один чат всегда ломается небезнадёжно — остальные принимают."""
+
+    def __init__(self, dead_chat: int) -> None:
+        super().__init__()
+        self.dead_chat = dead_chat
+
+    async def send_message(self, chat_id: int, text: str, **kwargs):
+        if chat_id == self.dead_chat:
+            raise RuntimeError("сеть моргнула")
+        return await super().send_message(chat_id, text, **kwargs)
+
+
+async def test_stuck_chat_skipped_after_three_strikes(
+    create_user, create_account, no_pauses
+):
+    """«Полуживой» чат не держит рассылку вечно: три сбоя — пропуск."""
+    from tests.test_task_health import logged
+
+    rule_id, _, account_id = await make_mailing(
+        create_user, create_account, targets=[-1001, -1002], texts=["всем привет"]
+    )
+    client = FlakyChatClient(dead_chat=-1001)
+    manager._clients[account_id] = client
+
+    for _ in range(3):
+        await manager._mailing_tick()
+        manager._mailing_state[rule_id]["not_before"] = 0.0
+    await manager._mailing_tick()
+
+    assert -1002 in client.recipients, "после трёх сбоев круг пошёл дальше"
+    journal = await logged(rule_id)
+    assert any("пропускаем" in line for _, line in journal)
+
+
+class FanClient:
+    def __init__(self) -> None:
+        self.sent: list[int] = []
+
+    async def send_message(self, chat_id: int, text: str, **kwargs):
+        self.sent.append(chat_id)
+        from types import SimpleNamespace as NS
+
+        return NS(id=len(self.sent))
+
+
+async def test_broadcast_stops_at_cap_mid_round(create_user, create_account):
+    """Веер встаёт ровно на лимите, а не перелетает его на размер веера."""
+    from app.db.models import TelegramAccount
+
+    user_id = await create_user()
+    account_id = await create_account(user_id)
+    async with session_scope() as session:
+        account = await session.get(TelegramAccount, account_id)
+        assert account is not None
+        account.created_at = repo.utcnow() - timedelta(days=30)
+        session.add(SendCounter(
+            account_id=account_id,
+            day=(repo.utcnow() - timedelta(days=1)).date(),
+            count=500,
+        ))
+        await session.commit()
+    async with session_scope() as session:
+        from app.db.models import Rule
+
+        rule = Rule(
+            user_id=user_id, account_id=account_id, source_id=-100,
+            target_id=-1, kind="broadcast", enabled=True,
+            filters={"targets": [-2, -3], "daily_cap": 2},
+        )
+        session.add(rule)
+        await session.flush()
+        rule_id = rule.id
+
+    from app.telegram_client import jobs
+    from tests.test_task_health import logged
+    from types import SimpleNamespace as NS
+
+    snapshot = _snapshot(rule_id, user_id, account_id, "broadcast")
+    snapshot.filters = FilterConfig.from_dict(
+        {"targets": [-2, -3], "daily_cap": 2, "gap_jitter": 0}
+    )
+    client = FanClient()
+    await jobs._broadcast(client, NS(id=7, message="пост", media=None), snapshot)
+
+    assert client.sent == [-1, -2], "третий чат за лимитом — не ушёл"
+    journal = await logged(rule_id)
+    assert any("исчерпан" in line for _, line in journal)
+
+
+async def test_streaming_autosubscribe_dedups_attempts(
+    create_user, create_account, monkeypatch
+):
+    """Одни ссылки при каждом посте: второй заход в тот же день — мимо."""
+    from app.telegram_client import jobs
+    from tests.test_oneshot_journal import OneShotClient
+    from types import SimpleNamespace as NS
+
+    monkeypatch.setattr(jobs, "JOIN_MIN_GAP", 0)
+    user_id = await create_user()
+    account_id = await create_account(user_id)
+    snapshot = _snapshot(1201, user_id, account_id, "autosubscribe")
+    snapshot.filters = FilterConfig.from_dict({"join_gap": 0, "daily_join_limit": 0})
+    message = NS(id=9, message="вступайте https://t.me/somechannel", media=None)
+    client = OneShotClient()
+
+    await jobs._autosubscribe(client, message, snapshot)
+    await jobs._autosubscribe(client, message, snapshot)
+    # Вступление ушло в фон — забираем его перед проверкой.
+    await asyncio.gather(*list(jobs._join_tasks))
+
+    assert client.tried == ["somechannel"]
+
+
+# ─────────────────────── очеловечивание темпа ───────────────────────
+
+
+async def _created_mailing_edit(client, auth_headers, create_account, extra):
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    response = await client.post(
+        "/api/tasks",
+        json={
+            "command": "mailing",
+            "account_id": account_id,
+            "targets": ["@a"],
+            "message": "раз",
+            "gap": 70,
+            **extra,
+        },
+        headers=auth_headers,
+    )
+    assert response.status == 201, await response.text()
+    return (await response.json())["task"]["edit"]
+
+
+async def test_window_defaults_to_daytime(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Без окна — день 09:00–22:00: ночная рассылка это жалобы."""
+    edit = await _created_mailing_edit(client, auth_headers, create_account, {})
+    assert (edit["start"], edit["end"]) == ("09:00", "22:00")
+
+
+async def test_jitter_defaults_live(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Без разброса — живой: одинаковые паузы выдают робота."""
+    from app.db import repo as repo_module
+    from app.db.database import SessionLocal
+
+    edit = await _created_mailing_edit(client, auth_headers, create_account, {})
+    async with SessionLocal() as session:
+        rules = await repo_module.list_rules(session, TEST_USER_ID)
+        filters = rules[-1].filters
+    assert (filters["gap_jitter"], filters["cycle_jitter"]) == (10, 60)
+    assert edit["start"] == "09:00"
+
+
+async def test_shuffle_flag_roundtrip(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Галочка тасования сохраняется и видна в правке."""
+    edit = await _created_mailing_edit(
+        client, auth_headers, create_account, {"shuffle_chats": True}
+    )
+    assert edit["shuffle_chats"] is True
+
+
+async def test_shuffle_changes_order_across_cycles(
+    create_user, create_account, no_pauses
+):
+    """Тасование: круги идут разным порядком, но все чаты на месте."""
+    targets = [-(1000 + n) for n in range(10)]
+    await make_mailing(
+        create_user, create_account, targets=targets, texts=["раз"],
+        shuffle_chats=True,
+    )
+    from app.telegram_client.manager import manager as manager_singleton
+
+    account_id = manager_singleton._mailing_rules[0].account_id
+    client = FakeClient()
+    manager._clients[account_id] = client
+    for _ in range(20):
+        await manager._mailing_tick()
+
+    first, second = client.recipients[:10], client.recipients[10:20]
+    assert sorted(first) == sorted(targets)
+    assert sorted(second) == sorted(targets)
+    assert first != second
+
+
+async def test_typing_waits_random_span(create_user, create_account, monkeypatch):
+    """«Печатает» — 1.5–4 секунды наугад, а не метроном."""
+    import asyncio
+
+    from app.telegram_client import jobs
+
+    rule_id, user_id, account_id = await make_mailing(
+        create_user, create_account, targets=[-1001], texts=["раз"], typing=True
+    )
+    async with session_scope() as session:
+        from app.db.models import Rule
+
+        db_rule = await session.get(Rule, rule_id)
+        snapshot = _snapshot(
+            db_rule.id, user_id, account_id, "mailing",
+        )
+        snapshot.filters = FilterConfig.from_dict(db_rule.filters)
+    sleeps: list[float] = []
+
+    async def recorder(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", recorder)
+    await jobs.mailing_send(FakeClient(), snapshot, jobs.own_text_item("раз"), -1001)
+
+    assert len(sleeps) == 1
+    assert 1.5 <= sleeps[0] <= 4.0
+
+
+# ─────────────────── пачка 4: круг подлиннее, фон, пауза ───────────────────
+
+
+async def test_cycle_default_is_an_hour(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Круг по умолчанию — раз в час: чаще — спам-темп."""
+    assert FilterConfig().cycle_seconds == 3600
+    edit = await _created_mailing_edit(client, auth_headers, create_account, {})
+    assert edit["cycle"] == 3600
+
+
+async def test_account_gate_waits_twenty_seconds(monkeypatch):
+    """Общий темп аккаунта — 20 секунд между отправками любых задач."""
+    import asyncio as aio
+
+    from app.telegram_client import antispam
+
+    assert antispam.ACCOUNT_SEND_GAP == 20.0
+    monkeypatch.setattr(
+        "app.telegram_client.manager.ACCOUNT_SEND_GAP", 20.0
+    )
+    sleeps: list[float] = []
+
+    async def recorder(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(aio, "sleep", recorder)
+    manager._last_send_at.pop(4949, None)
+    async with manager.account_send_slot(4949):
+        pass
+    async with manager.account_send_slot(4949):
+        pass
+
+    assert len(sleeps) == 1
+    assert 19.0 <= sleeps[0] <= 20.0
+
+
+async def test_streaming_joins_dont_block_worker(
+    create_user, create_account, monkeypatch
+):
+    """Воркер возвращается сразу: вступление на минутах — в фоне."""
+    import time as time_module
+
+    from types import SimpleNamespace as NS
+
+    from app.telegram_client import jobs
+
+    calls: list[str] = []
+
+    async def slow_join_all(client, targets, outcome=None, **kwargs):
+        calls.extend(targets)
+        await aio_sleep(2.0)
+        return outcome
+
+    async def aio_sleep(delay):
+        import asyncio as aio
+
+        await aio.sleep(delay)
+
+    monkeypatch.setattr(jobs, "_join_all", slow_join_all)
+    monkeypatch.setattr(jobs, "_split_already_member", _passthrough_member)
+    user_id = await create_user()
+    account_id = await create_account(user_id)
+    snapshot = _snapshot(1202, user_id, account_id, "autosubscribe")
+    snapshot.filters = FilterConfig.from_dict({"join_gap": 0, "daily_join_limit": 0})
+    message = NS(id=10, message="вступайте https://t.me/fonchannel", media=None)
+
+    started = time_module.monotonic()
+    await jobs._autosubscribe(object(), message, snapshot)
+    elapsed = time_module.monotonic() - started
+
+    assert elapsed < 1.0, "воркер ждал вступление"
+    await asyncio.gather(*list(jobs._join_tasks))
+    assert calls == ["fonchannel"]
+
+
+async def _passthrough_member(account_id, targets):
+    """Заглушка отсева «где уже сидим»: все цели — новые."""
+    return list(targets), 0
+
+
+async def test_accounts_show_spamblock_pause(
+    client, auth_headers, create_user, create_account
+):
+    """Кабинет показывает паузу спамблока: «стоят до …», а не тишина."""
+    from app.telegram_client.manager import manager as manager_singleton
+
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    await manager_singleton.note_peer_flood(account_id, None)
+
+    response = await client.get("/api/accounts", headers=auth_headers)
+
+    assert response.status == 200
+    accounts = (await response.json())["accounts"]
+    mine = next(item for item in accounts if item["id"] == account_id)
+    assert mine["paused_until"] is not None

@@ -75,6 +75,7 @@ async def _rule_view(rule) -> tuple[str, InlineKeyboardMarkup]:
         health=health,
         online=manager.is_online(rule.account_id),
         subscription_active=subscription_active,
+        paused_until=manager.sending_paused_until(rule.account_id),
     )
     return card, kb.rule_menu(rule, collected=collected)
 
