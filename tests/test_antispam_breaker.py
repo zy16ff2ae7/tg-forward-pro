@@ -23,7 +23,10 @@ from telethon.errors import (
 
 from app.db import repo
 from app.db.database import session_scope
-from app.db.models import AccountPause
+from app.bot import keyboards as kb
+from app.bot import texts
+from app.db.models import AccountPause, Rule, TelegramAccount
+from app.task_alerts import set_alert_bot
 from app.telegram_client import jobs
 from app.telegram_client.antispam import (
     ACCOUNT_DAILY_JOIN_CAP,
@@ -391,7 +394,6 @@ async def test_account_join_cap_cuts_across_tasks(create_user, create_account, m
         for _ in range(ACCOUNT_DAILY_JOIN_CAP):
             await repo.log_join(session, rule_id, user_id)
 
-    from app.db.models import Rule
 
     async with session_scope() as session:
         db_rule = await session.get(Rule, rule_id)
@@ -423,7 +425,6 @@ async def test_already_joined_channels_are_not_rejoined(
 
     monkeypatch.setattr(manager, "list_dialogs", dialogs)
 
-    from app.db.models import Rule
 
     async with session_scope() as session:
         db_rule = await session.get(Rule, rule_id)
@@ -436,3 +437,91 @@ async def test_already_joined_channels_are_not_rejoined(
 
     assert (result["joined"], result["already"]) == (1, 1)
     assert client.tried == ["@b"]
+
+
+# ─────────────────── безопасный режим видно в боте ───────────────────
+
+
+class FakeBot:
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str]] = []
+
+    async def send_message(self, chat_id: int, text: str, **kwargs):
+        self.sent.append((chat_id, text))
+        return SimpleNamespace(message_id=len(self.sent))
+
+
+@pytest.fixture(autouse=True)
+def clean_alert_bot():
+    yield
+    set_alert_bot(None)
+
+
+async def test_peer_flood_sends_one_safe_mode_letter(
+    create_user, create_account, no_pauses
+):
+    """Рубильник пишет в личку сразу — и только один раз за паузу."""
+    rule_id, user_id, account_id = await make_mailing(
+        create_user, create_account, targets=[-1001], texts=["всем привет"]
+    )
+    bot = FakeBot()
+    set_alert_bot(bot)
+    manager._clients[account_id] = FakeClient(error=PeerFloodError(request=None))
+
+    await manager._mailing_tick()
+    await manager._mailing_tick()
+
+    assert len(bot.sent) == 1
+    chat_id, text = bot.sent[0]
+    assert chat_id == user_id
+    assert "Безопасный режим" in text and "UTC" in text
+
+
+async def test_dead_account_sends_letter(create_user, create_account):
+    """Мёртвый аккаунт не молча гаснет: причина уходит в личку."""
+    user_id = await create_user()
+    account_id = await create_account(user_id)
+    bot = FakeBot()
+    set_alert_bot(bot)
+
+    await manager.kill_dead_account(account_id, "сессия отозвана")
+
+    assert len(bot.sent) == 1
+    chat_id, text = bot.sent[0]
+    assert chat_id == user_id
+    assert "+79000000000" in text and "сессия отозвана" in text
+
+
+def test_rule_card_names_the_pause():
+    """Карточка задачи говорит «пауза после спамблока», а не «работает ✅»."""
+    rule = Rule(
+        id=1, kind="forward", mode="copy", enabled=True, archived=False,
+        delay_seconds=0, forwarded_count=0, source_id=-100, target_id=-200,
+    )
+    card = texts.rule_card(rule, paused_until=time.time() + 3600)
+
+    assert "пауза после спамблока ⏸" in card
+    assert "UTC" in card and "вручную" in card
+
+
+def test_rule_card_without_pause_has_no_pause_line():
+    """Без паузы карточка прежняя — новых строк не появляется."""
+    rule = Rule(
+        id=1, kind="forward", mode="copy", enabled=True, archived=False,
+        delay_seconds=0, forwarded_count=0, source_id=-100, target_id=-200,
+    )
+    card = texts.rule_card(rule)
+
+    assert "спамблок" not in card and "спамблока" not in card
+
+
+def test_accounts_menu_marks_paused():
+    """В списке аккаунтов пауза видна значком, а не только внутри карточки."""
+    account = TelegramAccount(
+        id=7, user_id=1, phone="+700", session_encrypted="x", is_active=True
+    )
+    paused = kb.accounts_menu([account], paused={7})
+    plain = kb.accounts_menu([account])
+
+    assert paused.inline_keyboard[0][0].text.startswith("⏸")
+    assert plain.inline_keyboard[0][0].text.startswith("🟢")

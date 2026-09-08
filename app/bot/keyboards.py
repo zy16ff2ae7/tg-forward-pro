@@ -1,7 +1,7 @@
 """Клавиатуры бота."""
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Container, Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -62,11 +62,17 @@ def main_menu(
 
 
 def accounts_menu(
-    accounts: Sequence[TelegramAccount], pending_login: bool = False
+    accounts: Sequence[TelegramAccount],
+    pending_login: bool = False,
+    paused: Container[int] | None = None,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    paused = paused or frozenset()
     for account in accounts:
-        status = "🟢" if account.is_active else "🔴"
+        if account.id in paused:
+            status = "⏸"
+        else:
+            status = "🟢" if account.is_active else "🔴"
         builder.row(
             InlineKeyboardButton(
                 text=f"{status} {account.phone}", callback_data=f"acc:open:{account.id}"

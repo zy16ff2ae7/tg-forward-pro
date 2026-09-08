@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -101,6 +102,7 @@ async def _accounts_text(user_id: int) -> tuple[str, object]:
         "",
         "Подключённые номера читают источники и пересылают посты.",
         f"Подключено: {len(accounts)}",
+        "🛡 Безопасный режим включён: паузы, лимиты и остановка при спам-ограничении.",
     ]
     if pending is not None:
         step = "код из Telegram" if pending.stage == login.STAGE_CODE else "облачный пароль"
@@ -112,7 +114,10 @@ async def _accounts_text(user_id: int) -> tuple[str, object]:
             "Кабинет, меню, подписки и платежи работают. Вход (номер или "
             "QR-код) откроется после подключения MTProto-шлюза сервиса.",
         ]
-    return "\n".join(lines), kb.accounts_menu(accounts, pending_login=pending is not None)
+    paused = {a.id for a in accounts if manager.sending_paused_until(a.id)}
+    return "\n".join(lines), kb.accounts_menu(
+        accounts, pending_login=pending is not None, paused=paused
+    )
 
 
 @router.message(Command("accounts"))
@@ -465,11 +470,20 @@ async def open_account(callback: CallbackQuery) -> None:
         await callback.answer("Аккаунт не найден", show_alert=True)
         return
     online = manager.is_online(account_id)
+    paused_until = manager.sending_paused_until(account_id)
     text = (
-        f"👤 <b>{account.phone}</b>\n\n"
+        f"👤 <b>{account.phone}</b>\n"
+        "🛡 Безопасный режим включён\n\n"
         f"Статус: {'🟢 на связи' if online else '🔴 не в сети'}\n"
         f"Ошибка: {account.last_error or 'нет'}"
     )
+    if paused_until is not None:
+        when = datetime.fromtimestamp(paused_until, timezone.utc).strftime("%H:%M")
+        text += (
+            f"\n\n⏸ <b>Пауза после спамблока до {when} UTC</b>\n"
+            "Отправки всех задач стоят, ограничение спадёт само. "
+            "Не запускайте задачи вручную."
+        )
     if callback.message is not None:
         await smart_edit(callback.message, text, reply_markup=kb.account_menu(account_id))
 

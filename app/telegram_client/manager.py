@@ -668,6 +668,8 @@ class ClientManager:
             "Не запускайте задачи вручную: ограничение спадёт само."
         )
         logger.warning("Аккаунт #{}: {}", account_id, text)
+        notify_user_id = int(rule.user_id) if rule is not None else 0
+        phone = ""
         try:
             async with session_scope() as session:
                 naive = datetime.fromtimestamp(until, timezone.utc).replace(tzinfo=None)
@@ -693,8 +695,19 @@ class ClientManager:
                     # Беда временная: аккаунт остаётся в работе (на связи), но
                     # причина видна в кабинете, а не только в журнале задачи.
                     await repo.note_account_trouble(session, db_account, text)
+                    phone = db_account.phone or ""
+                    if not notify_user_id:
+                        notify_user_id = db_account.user_id
         except Exception as exc:  # noqa: BLE001 — пауза в памяти уже стоит
             logger.warning("Аккаунт #{}: паузу не записали в БД: {}", account_id, exc)
+        # Письмо — сразу в личку: пауза стоит 12 часов, и человек должен
+        # узнать о ней не из карточки, а из сообщения. Рубильник встаёт
+        # один раз за паузу — дублей нет, сам алерт не падает никогда.
+        from app.task_alerts import alert_pause_started
+
+        await alert_pause_started(
+            notify_user_id, phone or f"#{account_id}", f"{when} UTC"
+        )
 
     async def kill_dead_account(self, account_id: int, message: str) -> None:
         """Гасит аккаунт с мёртвой сессией: ключ отозван или номера больше нет.
@@ -704,14 +717,23 @@ class ClientManager:
         отключается, а подъём заново его пропускает (см. HOPELESS_ERRORS).
         """
         logger.error("Аккаунт #{}: {}", account_id, message)
+        notify_user_id = 0
+        phone = ""
         try:
             async with session_scope() as session:
                 db_account = await session.get(TelegramAccount, int(account_id))
                 if db_account is not None:
                     await repo.set_account_error(session, db_account, message)
+                    notify_user_id = db_account.user_id
+                    phone = db_account.phone or ""
         except Exception as exc:  # noqa: BLE001 — гашение важнее журнала
             logger.warning("Аккаунт #{}: причину не записали: {}", account_id, exc)
         await self.stop_account(int(account_id))
+        from app.task_alerts import alert_account_dead
+
+        await alert_account_dead(
+            notify_user_id, phone or f"#{account_id}", message
+        )
 
     def pause_refusal(self, account_id: int) -> str | None:
         """Аккаунт на паузе после спамблока: текст отказа для ручных запусков.
