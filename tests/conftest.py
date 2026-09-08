@@ -78,6 +78,16 @@ def instant_broadcast(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def fresh_join_attempts():
+    """Метки попыток вступлений живут сутки — между тестами их забываем."""
+    from app.telegram_client import jobs
+
+    jobs._join_attempted_at.clear()
+    yield
+    jobs._join_attempted_at.clear()
+
+
+@pytest.fixture(autouse=True)
 def instant_account_gate(monkeypatch):
     """Общий темп аккаунта в бою — секунды, в тесте — ноль.
 

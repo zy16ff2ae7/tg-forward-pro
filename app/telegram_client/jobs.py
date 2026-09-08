@@ -841,11 +841,14 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
         return
 
     # Лимит — до перевода и отправок: как у пересылки, пост пропускается,
-    # а в журнал ложится одна строка на день (см. note_cap_hit).
+    # а в журнал ложится одна строка на день (см. note_cap_hit). Внутри круга
+    # сверяем на каждый чат: одна проверка на сообщение перелетала бы лимит
+    # на размер веера (счётчик растёт только в конце, см. note_sends).
     hit, used, cap = await check_send_cap(rule)
     if hit:
         await note_cap_hit(rule, used, cap, int(getattr(message, "id", 0) or 0))
         return
+    msg_id = int(getattr(message, "id", 0) or 0)
 
     raw_text = message_text(message)
     if rule.filters.translate_to:
@@ -857,6 +860,9 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
     pin = bool(getattr(rule.filters, "pin_on_send", False))
     mention = bool(getattr(rule.filters, "mention_all", False))
     for pos, target in enumerate(targets):
+        if used + sent >= cap:
+            await note_cap_hit(rule, used + sent, cap, msg_id)
+            break
         if pos:
             # Веер — не пулемёт: залп в сотни чатов со скоростью сети — верный
             # спамблок. Пауза та же, что у постера, только своя константа.
@@ -1265,9 +1271,41 @@ async def _checks(client: Any, message: Any, rule: RuleSnapshot) -> None:
     await record_ok(rule, message)
 
 
+# Куда уже пытались вступать потоковой автоподпиской: (rule_id, цель) →
+# монотонное время попытки. Одни и те же ссылки мелькают в источнике при
+# каждом посте: без дедупа каждое сообщение долбило бы JoinChannel по кругу
+# и держало паузами слот воркера очереди. Успехи и так отсекает проверка
+# членства, а провалы (приват, флуд) — эта метка. Живёт сутки, в памяти.
+_JOIN_ATTEMPT_TTL = 24 * 3600
+_join_attempted_at: dict[tuple[int, str], float] = {}
+
+
+def _fresh_join_targets(rule_id: int, targets: list[str]) -> list[str]:
+    """Убирает цели, куда пытались вступать менее суток назад."""
+    now = time.monotonic()
+    fresh = []
+    for target in targets:
+        tried_at = _join_attempted_at.get((rule_id, target))
+        # Метки не было — не пытались никогда (ноль здесь врал бы: при аптайме
+        # меньше суток «0 + сутки» ещё в будущем и цель отсеивалась бы всегда).
+        if tried_at is None or tried_at + _JOIN_ATTEMPT_TTL <= now:
+            fresh.append(target)
+    if len(_join_attempted_at) > 10000:
+        # Давно не чистили: сбрасываем только протухшее, свежее живёт.
+        for key, at in list(_join_attempted_at.items()):
+            if at + _JOIN_ATTEMPT_TTL <= now:
+                del _join_attempted_at[key]
+    for target in fresh:
+        _join_attempted_at[(rule_id, target)] = now
+    return fresh
+
+
 async def _autosubscribe(client: Any, message: Any, rule: RuleSnapshot) -> None:
     """Находит ссылки на каналы в сообщениях источника и вступает в них."""
     targets = _invite_targets(message_text(message))
+    if not targets:
+        return
+    targets = _fresh_join_targets(rule.id, targets)
     if not targets:
         return
     conf = rule.filters

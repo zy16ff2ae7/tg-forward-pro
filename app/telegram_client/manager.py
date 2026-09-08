@@ -694,11 +694,10 @@ class ClientManager:
             gap = ACCOUNT_SEND_GAP
         lock = self._send_locks.setdefault(int(account_id), asyncio.Lock())
         async with lock:
-            wait = (
-                self._last_send_at.get(int(account_id), 0.0)
-                + gap
-                - time.monotonic()
-            )
+            # Отправок ещё не было — ждать нечего (ноль вместо метки врал бы
+            # на свежем процессе: «0 + пауза» там ещё в будущем).
+            last = self._last_send_at.get(int(account_id))
+            wait = last + gap - time.monotonic() if last is not None else 0.0
             if wait > 0:
                 await asyncio.sleep(wait)
             yield
@@ -1987,6 +1986,8 @@ class ClientManager:
                 continue
 
             st["pos"] += 1
+            # Чат принял — серия его сбоев обнуляется.
+            st.get("fail_streaks", {}).pop(target_id, None)
             cycle_closed = st["pos"] >= len(recipients)
             if cycle_closed:
                 st["pos"] = 0
@@ -2038,7 +2039,26 @@ class ClientManager:
             exc,
         )
         await record_batch(rule, failed=[f"{target_id}: {type(exc).__name__}"])
-        from app.telegram_client.jobs import is_hopeless_chat_error, record_pruned_chats
+        from app.telegram_client.jobs import (
+            is_hopeless_chat_error,
+            mailing_recipients,
+            record_pruned_chats,
+        )
+
+        # «Полуживой» чат: не принимает, но и не безнадёжен — позиция на нём
+        # стояла бы вечно. Три сбоя подряд — пропускаем до следующего круга.
+        streaks = state.setdefault("fail_streaks", {})
+        streaks[target_id] = streaks.get(target_id, 0) + 1
+        if streaks[target_id] >= 3:
+            streaks.pop(target_id, None)
+            recipients = mailing_recipients(rule)
+            if recipients:
+                state["pos"] = (state["pos"] + 1) % len(recipients)
+                if state["pos"] == 0:
+                    state["cycle"] += 1
+            await record_batch(
+                rule, failed=[f"{target_id}: не принимает 3 раза подряд — пропускаем"]
+            )
 
         if is_hopeless_chat_error(exc):
             # Безнадёжный получатель держит рассылку: позиция не двигается,

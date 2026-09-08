@@ -216,3 +216,114 @@ async def test_working_veteran_keeps_full_cap(create_user, create_account):
     hit, used, cap = await check_send_cap(_snapshot(1, user_id, account_id, "forward"))
 
     assert (hit, used, cap) == (False, 0, 1000)
+
+
+# ─────────────────────────── живучесть кругов ───────────────────────────
+
+
+class FlakyChatClient(FakeClient):
+    """Один чат всегда ломается небезнадёжно — остальные принимают."""
+
+    def __init__(self, dead_chat: int) -> None:
+        super().__init__()
+        self.dead_chat = dead_chat
+
+    async def send_message(self, chat_id: int, text: str, **kwargs):
+        if chat_id == self.dead_chat:
+            raise RuntimeError("сеть моргнула")
+        return await super().send_message(chat_id, text, **kwargs)
+
+
+async def test_stuck_chat_skipped_after_three_strikes(
+    create_user, create_account, no_pauses
+):
+    """«Полуживой» чат не держит рассылку вечно: три сбоя — пропуск."""
+    from tests.test_task_health import logged
+
+    rule_id, _, account_id = await make_mailing(
+        create_user, create_account, targets=[-1001, -1002], texts=["всем привет"]
+    )
+    client = FlakyChatClient(dead_chat=-1001)
+    manager._clients[account_id] = client
+
+    for _ in range(3):
+        await manager._mailing_tick()
+        manager._mailing_state[rule_id]["not_before"] = 0.0
+    await manager._mailing_tick()
+
+    assert -1002 in client.recipients, "после трёх сбоев круг пошёл дальше"
+    journal = await logged(rule_id)
+    assert any("пропускаем" in line for _, line in journal)
+
+
+class FanClient:
+    def __init__(self) -> None:
+        self.sent: list[int] = []
+
+    async def send_message(self, chat_id: int, text: str, **kwargs):
+        self.sent.append(chat_id)
+        from types import SimpleNamespace as NS
+
+        return NS(id=len(self.sent))
+
+
+async def test_broadcast_stops_at_cap_mid_round(create_user, create_account):
+    """Веер встаёт ровно на лимите, а не перелетает его на размер веера."""
+    from app.db.models import TelegramAccount
+
+    user_id = await create_user()
+    account_id = await create_account(user_id)
+    async with session_scope() as session:
+        account = await session.get(TelegramAccount, account_id)
+        assert account is not None
+        account.created_at = repo.utcnow() - timedelta(days=30)
+        session.add(SendCounter(
+            account_id=account_id,
+            day=(repo.utcnow() - timedelta(days=1)).date(),
+            count=500,
+        ))
+        await session.commit()
+    async with session_scope() as session:
+        from app.db.models import Rule
+
+        rule = Rule(
+            user_id=user_id, account_id=account_id, source_id=-100,
+            target_id=-1, kind="broadcast", enabled=True,
+            filters={"targets": [-2, -3], "daily_cap": 2},
+        )
+        session.add(rule)
+        await session.flush()
+        rule_id = rule.id
+
+    from app.telegram_client import jobs
+    from tests.test_task_health import logged
+    from types import SimpleNamespace as NS
+
+    snapshot = _snapshot(rule_id, user_id, account_id, "broadcast")
+    snapshot.filters = FilterConfig.from_dict({"targets": [-2, -3], "daily_cap": 2})
+    client = FanClient()
+    await jobs._broadcast(client, NS(id=7, message="пост", media=None), snapshot)
+
+    assert client.sent == [-1, -2], "третий чат за лимитом — не ушёл"
+    journal = await logged(rule_id)
+    assert any("исчерпан" in line for _, line in journal)
+
+
+async def test_streaming_autosubscribe_dedups_attempts(create_user, create_account, monkeypatch):
+    """Одни ссылки при каждом посте: второй заход в тот же день — мимо."""
+    from app.telegram_client import jobs
+    from tests.test_oneshot_journal import OneShotClient
+    from types import SimpleNamespace as NS
+
+    monkeypatch.setattr(jobs, "JOIN_MIN_GAP", 0)
+    user_id = await create_user()
+    account_id = await create_account(user_id)
+    snapshot = _snapshot(1201, user_id, account_id, "autosubscribe")
+    snapshot.filters = FilterConfig.from_dict({"join_gap": 0, "daily_join_limit": 0})
+    message = NS(id=9, message="вступайте https://t.me/somechannel", media=None)
+    client = OneShotClient()
+
+    await jobs._autosubscribe(client, message, snapshot)
+    await jobs._autosubscribe(client, message, snapshot)
+
+    assert client.tried == ["somechannel"]
