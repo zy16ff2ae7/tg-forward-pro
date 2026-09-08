@@ -45,8 +45,9 @@ from tests.test_task_health import health_of, logged  # noqa: F401
 
 @pytest.fixture(autouse=True)
 def instant_joins(monkeypatch):
-    """Пауза между вступлениями: в бою две секунды на чат, в тесте не нужна."""
+    """Пауза между вступлениями: в бою десятки секунд на чат, в тесте не нужна."""
     monkeypatch.setattr(jobs, "JOIN_PAUSE_SECONDS", 0)
+    monkeypatch.setattr(jobs, "JOIN_MIN_GAP", 0)
 
 
 def _join_key(request) -> str:
@@ -172,7 +173,10 @@ async def make_oneshot(
         )
         session.add(rule)
         await session.flush()
-        rule.filters = {"kind": kind, **settings}
+        # Вступления в тесте — без пауз: темп проверяется отдельно, а здесь
+        # каждая секунда sleep растягивала бы прогон на минуты.
+        speed = {"join_gap": 0} if kind == "autosubscribe" else {}
+        rule.filters = {"kind": kind, **speed, **settings}
         return rule.id, user_id, account_id
 
 

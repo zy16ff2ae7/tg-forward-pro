@@ -306,6 +306,24 @@ class JoinLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
 
 
+class AccountPause(Base):
+    """Пауза отправок после спамблока: рубильник на весь аккаунт.
+
+    Ставится, когда Telegram отвечает ``PeerFloodError`` — аккаунт помечен за
+    спам, и слать/вступать ему сейчас нельзя. Все задачи аккаунта стоят до
+    ``paused_until``; рестарт процесса паузу не снимает — она в БД, а не в
+    памяти. Протухшие строки подчищает загрузка при старте.
+    """
+
+    __tablename__ = "account_pauses"
+
+    account_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    paused_until: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    reason: Mapped[str] = mapped_column(String(32), default="peer_flood", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, nullable=False)
+
+
 class CollectedItem(Base):
     """То, что насобирали задачи-сборщики: парсер аудитории и ловец чеков.
 

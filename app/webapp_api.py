@@ -844,6 +844,28 @@ async def _apply_task_settings(
         # Ссылки-приглашения храним как есть: вступать по ним будет сама задача.
         if targets is not None:
             filters["subscribe_to"] = targets
+        # Темп вступлений — настройки задачи, а не константы: залп подписок с
+        # паузой в пару секунд Telegram читает как ботнет. Пол паузы жёсткий
+        # (см. JOIN_MIN_GAP), лимиты 0 — «без лимита», как раньше.
+        from app.telegram_client.antispam import (
+            JOIN_DEFAULT_DAILY,
+            JOIN_DEFAULT_GAP,
+            JOIN_DEFAULT_LIMIT,
+            JOIN_MIN_GAP,
+        )
+
+        if given("join_gap"):
+            filters["join_gap"] = max(
+                JOIN_MIN_GAP, min(_as_int(payload.get("join_gap"), JOIN_DEFAULT_GAP), 3600)
+            )
+        if given("join_limit"):
+            filters["join_limit"] = max(
+                0, min(_as_int(payload.get("join_limit"), JOIN_DEFAULT_LIMIT), 1000)
+            )
+        if given("daily_join_limit"):
+            filters["daily_join_limit"] = max(
+                0, min(_as_int(payload.get("daily_join_limit"), JOIN_DEFAULT_DAILY), 1000)
+            )
     elif kind == "baiting":
         if given("reaction"):
             filters["reaction"] = str(payload.get("reaction") or "").strip() or "👍"
@@ -914,15 +936,25 @@ async def _apply_task_settings(
                 filters.get("scheduled_posts"), fresh
             )
     elif kind == "mailing":
-        for field, name, default in (
-            ("gap", "gap_seconds", 5),
-            ("gap_jitter", "gap_jitter", 0),
-            ("cycle", "cycle_seconds", 10),
-            ("cycle_jitter", "cycle_jitter", 0),
-            ("repeats", "repeats", 1),
+        # Темп — как у человека: десятки одинаковых сообщений в минуту —
+        # спам-паттерн, за который прилетает PeerFlood. Полы жёсткие (движок
+        # их тоже держит, см. mailing_gap), умолчания — с запасом.
+        from app.telegram_client.antispam import (
+            JOIN_DEFAULT_DAILY,
+            JOIN_DEFAULT_GAP,
+            JOIN_MIN_GAP,
+        )
+        from app.telegram_client.jobs import MAILING_MIN_CYCLE, MAILING_MIN_GAP
+
+        for field, name, default, floor in (
+            ("gap", "gap_seconds", 60, MAILING_MIN_GAP),
+            ("gap_jitter", "gap_jitter", 0, 0),
+            ("cycle", "cycle_seconds", 600, MAILING_MIN_CYCLE),
+            ("cycle_jitter", "cycle_jitter", 0, 0),
+            ("repeats", "repeats", 1, 0),
         ):
             if given(field):
-                filters[name] = max(0, _as_int(payload.get(field), default))
+                filters[name] = max(floor, _as_int(payload.get(field), default))
         for field in ("typing", "random_pick", "link_preview"):
             if given(field):
                 filters[field] = _as_bool(payload.get(field))
@@ -949,9 +981,13 @@ async def _apply_task_settings(
             ]
             filters["subscribe_done"] = False
         if given("join_gap"):
-            filters["join_gap"] = max(0, min(_as_int(payload.get("join_gap"), 2), 3600))
+            filters["join_gap"] = max(
+                JOIN_MIN_GAP, min(_as_int(payload.get("join_gap"), JOIN_DEFAULT_GAP), 3600)
+            )
         if given("daily_join_limit"):
-            filters["daily_join_limit"] = max(0, min(_as_int(payload.get("daily_join_limit"), 0), 1000))
+            filters["daily_join_limit"] = max(
+                0, min(_as_int(payload.get("daily_join_limit"), JOIN_DEFAULT_DAILY), 1000)
+            )
 
     # Утреннее окно: постер и рассылка уже разобрали его в своих ветках
     # выше, остальным публикующим — тем же правилом и с теми же умолчаниями.
@@ -3308,12 +3344,16 @@ def _edit_view(
         edit["mention_all"] = bool(conf.mention_all)
     if kind in ("forward", "clone"):
         edit["delay_jitter"] = int(conf.delay_jitter or 0)
+    if kind in ("poster", "mailing", "autosubscribe"):
+        # Темп вступлений — и у автоподписки: раньше её форма этих полей не
+        # знала, и безопасный темп было не выставить вообще.
+        edit["join_gap"] = int(getattr(conf, "join_gap", 30) or 0)
+        edit["join_limit"] = int(getattr(conf, "join_limit", 0) or 0)
+        edit["daily_join_limit"] = int(getattr(conf, "daily_join_limit", 0) or 0)
     if kind in ("poster", "mailing"):
         # Общий слот формы показывает и блок ссылок/папок даже у постинга:
         # переключение в очередь не должно пересобирать редактор с потерей полей.
         edit["subscribe_links"] = list(conf.subscribe_to or [])
-        edit["join_gap"] = int(getattr(conf, "join_gap", 2) or 0)
-        edit["daily_join_limit"] = int(getattr(conf, "daily_join_limit", 0) or 0)
         edit["folder_ids"] = list(getattr(conf, "folder_ids", []) or [])
         edit["folder_titles"] = dict(getattr(conf, "folder_titles", {}) or {})
         # Форма у постинга и рассылки одна на двоих: разброс кругов постер
@@ -3536,8 +3576,8 @@ COMMANDS: list[dict] = [
         "description": "Вступает в каналы из списка и подхватывает ссылки из источника.",
         "status": "ready",
         "needs": ["account", "targets"],
-        "optional": ["source"],
-        "hint": "Каналы — через запятую: @chan1, t.me/+invite.",
+        "optional": ["source", "join_gap", "join_limit", "daily_join_limit"],
+        "hint": "Каналы — через запятую: @chan1, t.me/+invite. Вступает не залпом: пауза от 30 секунд, за раз — до 10, в сутки — до 10 на задачу и до 20 на аккаунт. Быстрее Telegram считает спамом.",
         "tags": ["вступает сама", "ссылки из источника"],
     },
     {

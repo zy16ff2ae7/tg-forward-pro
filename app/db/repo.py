@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.plans import rub_amount, stars_amount, usdt_amount
 from app.db.models import (
+    AccountPause,
     CollectedItem,
     ForwardLog,
     JoinLog,
@@ -1528,6 +1529,75 @@ async def count_joins_today(session: AsyncSession, rule_id: int) -> int:
         .where(JoinLog.rule_id == rule_id, JoinLog.created_at >= today)
     )
     return int(result.scalar() or 0)
+
+
+async def count_joins_today_for_account(session: AsyncSession, account_id: int) -> int:
+    """Сколько вступлений сделал аккаунт за сутки — всеми задачами разом.
+
+    Лимит задачи считается по её строкам, а Telegram считает по аккаунту:
+    три задачи с лимитом 10 — это 30 вступлений с одного номера. Потолок
+    аккаунта (``ACCOUNT_DAILY_JOIN_CAP``) опирается на это число.
+    """
+    today = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    result = await session.execute(
+        select(func.count())
+        .select_from(JoinLog)
+        .join(Rule, Rule.id == JoinLog.rule_id)
+        .where(Rule.account_id == account_id, JoinLog.created_at >= today)
+    )
+    return int(result.scalar() or 0)
+
+
+async def set_account_pause(
+    session: AsyncSession,
+    account_id: int,
+    user_id: int,
+    paused_until: datetime,
+    reason: str = "peer_flood",
+) -> None:
+    """Ставит рубильник: отправки аккаунта стоят до ``paused_until``.
+
+    Строка одна на аккаунт — upsert вручную, чтобы не зависеть от диалекта
+    (SQLite и PostgreSQL ругаются по-разному). Более поздняя пауза перекрывает
+    раннюю: ограничение одно, и плодить строки нечего.
+    """
+    existing = await session.get(AccountPause, int(account_id))
+    if existing is None:
+        session.add(
+            AccountPause(
+                account_id=int(account_id),
+                user_id=int(user_id),
+                paused_until=paused_until,
+                reason=str(reason or "peer_flood")[:32],
+            )
+        )
+    elif paused_until > existing.paused_until:
+        existing.paused_until = paused_until
+        existing.reason = str(reason or "peer_flood")[:32]
+    await session.flush()
+
+
+async def clear_account_pause(session: AsyncSession, account_id: int) -> None:
+    """Снимает рубильник досрочно (человек разобрался сам)."""
+    await session.execute(
+        delete(AccountPause).where(AccountPause.account_id == int(account_id))
+    )
+    await session.flush()
+
+
+async def active_account_pauses(session: AsyncSession) -> Sequence[AccountPause]:
+    """Живые паузы — для загрузки рубильников при старте.
+
+    Протухшие стираем тут же: им больше нечего делать в таблице.
+    """
+    now = utcnow()
+    await session.execute(
+        delete(AccountPause).where(AccountPause.paused_until <= now)
+    )
+    result = await session.execute(
+        select(AccountPause).where(AccountPause.paused_until > now)
+    )
+    return result.scalars().all()
 
 
 async def list_collected_items(

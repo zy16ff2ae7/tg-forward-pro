@@ -13,11 +13,13 @@ from loguru import logger
 from telethon import TelegramClient, events, utils
 from telethon.errors import (
     FloodWaitError,
+    PeerFloodError,
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     PhoneNumberInvalidError,
     RPCError,
     SessionPasswordNeededError,
+    SlowModeWaitError,
 )
 from telethon.sessions import StringSession
 from telethon.tl import functions, types
@@ -29,6 +31,7 @@ from app.db.database import SessionLocal, session_scope
 from app.db.models import TelegramAccount
 from app.db import repo
 from app.security import decrypt_session
+from app.telegram_client.antispam import PEER_FLOOD_PAUSE_HOURS, dead_session_kind
 from app.telegram_client.filters import FilterConfig
 from app.telegram_client.forwarder import (
     deliver,
@@ -64,7 +67,10 @@ SESSION_REVOKED = "Аккаунт вышел из Telegram — подключи�
 # оживить её нечем — нужен вход по номеру. Всё остальное (сеть, таймаут, Telegram
 # не ответил) проходит само, поэтому такие аккаунты сервис поднимает снова.
 SESSION_UNREADABLE = "Сохранённая сессия не читается — подключите номер заново"
-HOPELESS_ERRORS = (SESSION_REVOKED, SESSION_UNREADABLE)
+# Номера больше нет в Telegram: забанен или удалён. Вход по нему не поможет —
+# нужен другой номер, поэтому и текст отличается от «подключите заново».
+ACCOUNT_BANNED = "Аккаунт заблокирован или удалён в Telegram — подключите другой номер"
+HOPELESS_ERRORS = (SESSION_REVOKED, SESSION_UNREADABLE, ACCOUNT_BANNED)
 # Что написать, когда Telegram соединение принял, но себя не назвал. Бывает при
 # обрыве на полуслове; проходит само, поэтому аккаунт остаётся в работе.
 ACCOUNT_SILENT = "Telegram не отдал данные аккаунта — пробуем снова"
@@ -336,6 +342,10 @@ class ClientManager:
         # Мьютексы разовых запусков (парсер/автоподписка): один запуск
         # на пользователя — иначе спам кнопкой Run сажает общий API_ID на FloodWait.
         self._oneshot_locks: dict[int, asyncio.Lock] = {}
+        # Рубильник спамблока: account_id → unix-время, до которого стоят все
+        # отправки аккаунта. Ставит note_peer_flood, переживает рестарт (таблица
+        # account_pauses, загрузка — в start_all).
+        self._send_pause_until: dict[int, float] = {}
 
     # ───────────────────────────── Вход по номеру ─────────────────────────────
 
@@ -619,12 +629,129 @@ class ClientManager:
             except Exception:  # noqa: BLE001
                 logger.debug("Не удалось корректно закрыть клиент #{}", account_id)
 
+    # ─────────────────── Рубильник спамблока (весь аккаунт) ───────────────────
+
+    def sending_paused_until(self, account_id: int) -> float | None:
+        """До какого unix-времени стоят отправки аккаунта. Не стоят — None.
+
+        Протухшую паузу заодно забываем: таблица подчищается при старте, а
+        память — здесь, по факту проверки.
+        """
+        until = self._send_pause_until.get(int(account_id))
+        if until is None:
+            return None
+        if until <= time.time():
+            self._send_pause_until.pop(int(account_id), None)
+            return None
+        return until
+
+    async def note_peer_flood(
+        self, account_id: int, rule: RuleSnapshot | None, detail: str = ""
+    ) -> None:
+        """Аккаунт помечен за спам: все его отправки встают на паузу.
+
+        Раньше PeerFlood падал в общую кучу «ошибка отправки»: задача ждала
+        30 секунд и долбила дальше — а соседние задачи слали вообще без паузы.
+        Временное ограничение от такого превращается в полноценный спамблок.
+        Теперь встаёт весь аккаунт разом, ретраев нет, а человек читает в
+        карточке, до каких пор ждать и что не надо делать руками.
+        """
+        now = time.time()
+        if self._send_pause_until.get(int(account_id), 0.0) > now:
+            return
+        until = now + PEER_FLOOD_PAUSE_HOURS * 3600
+        self._send_pause_until[int(account_id)] = until
+        when = datetime.fromtimestamp(until, timezone.utc).strftime("%H:%M")
+        text = (
+            "Telegram ограничил аккаунт за спам (PeerFlood)"
+            f"{detail} — отправки на паузе до {when} UTC. "
+            "Не запускайте задачи вручную: ограничение спадёт само."
+        )
+        logger.warning("Аккаунт #{}: {}", account_id, text)
+        try:
+            async with session_scope() as session:
+                naive = datetime.fromtimestamp(until, timezone.utc).replace(tzinfo=None)
+                await repo.set_account_pause(
+                    session,
+                    int(account_id),
+                    int(rule.user_id) if rule is not None else 0,
+                    naive,
+                    "peer_flood",
+                )
+                if rule is not None:
+                    await repo.log_forward(
+                        session,
+                        rule_id=rule.id,
+                        user_id=rule.user_id,
+                        source_msg_id=0,
+                        target_msg_id=None,
+                        status="error",
+                        error=text,
+                    )
+                db_account = await session.get(TelegramAccount, int(account_id))
+                if db_account is not None:
+                    # Беда временная: аккаунт остаётся в работе (на связи), но
+                    # причина видна в кабинете, а не только в журнале задачи.
+                    await repo.note_account_trouble(session, db_account, text)
+        except Exception as exc:  # noqa: BLE001 — пауза в памяти уже стоит
+            logger.warning("Аккаунт #{}: паузу не записали в БД: {}", account_id, exc)
+
+    async def kill_dead_account(self, account_id: int, message: str) -> None:
+        """Гасит аккаунт с мёртвой сессией: ключ отозван или номера больше нет.
+
+        Ретраить тут нечего — чинить нечем. Аккаунт уходит из работы с
+        понятной причиной (та же, что при мёртвой сессии на старте), клиент
+        отключается, а подъём заново его пропускает (см. HOPELESS_ERRORS).
+        """
+        logger.error("Аккаунт #{}: {}", account_id, message)
+        try:
+            async with session_scope() as session:
+                db_account = await session.get(TelegramAccount, int(account_id))
+                if db_account is not None:
+                    await repo.set_account_error(session, db_account, message)
+        except Exception as exc:  # noqa: BLE001 — гашение важнее журнала
+            logger.warning("Аккаунт #{}: причину не записали: {}", account_id, exc)
+        await self.stop_account(int(account_id))
+
+    def pause_refusal(self, account_id: int) -> str | None:
+        """Аккаунт на паузе после спамблока: текст отказа для ручных запусков.
+
+        Кнопкой «Запустить» ограничение не снять — только продлить, поэтому
+        ручные запуски во время паузы отклоняются с понятной причиной.
+        """
+        until = self.sending_paused_until(account_id)
+        if until is None:
+            return None
+        when = datetime.fromtimestamp(until, timezone.utc).strftime("%H:%M")
+        return (
+            f"Аккаунт на паузе после спамблока до {when} UTC — "
+            "подождите, ограничение спадёт само."
+        )
+
+    async def _load_send_pauses(self) -> None:
+        """Поднимает рубильники из БД: рестарт спамблок-паузу не снимает."""
+        try:
+            async with session_scope() as session:
+                pauses = list(await repo.active_account_pauses(session))
+        except Exception as exc:  # noqa: BLE001 — старт важнее пауз
+            logger.warning("Паузы отправок не загрузились: {}", exc)
+            return
+        now = time.time()
+        for pause in pauses:
+            moment = pause.paused_until
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            if moment.timestamp() > now:
+                self._send_pause_until[int(pause.account_id)] = moment.timestamp()
+
     async def start_all(self) -> None:
         """Поднимает все активные аккаунты из БД."""
         await delivery_queue.start()
         # Поднимаем здесь, а не только в on_startup: после admin:restart
         # (stop_all → start_all) цикл обновления кэша иначе умирал навсегда.
         self.start_periodic_refresh()
+        # Рубильники спамблока переживают рестарт: пауза лежит в БД.
+        await self._load_send_pauses()
 
         if not settings.mtproto_ready:
             logger.warning(
@@ -1323,6 +1450,8 @@ class ClientManager:
             client = self._clients.get(rule.account_id)
             if client is None or not client.is_connected():
                 continue
+            if self.sending_paused_until(rule.account_id):
+                continue
 
             f = rule.filters
             chats = chat_recipients(rule)
@@ -1411,16 +1540,23 @@ class ClientManager:
                         await pin_sent(client, chat_id, sent_id, rule_id=rule.id)
                     if sent_id:
                         await schedule_autodelete(rule, chat_id, sent_id)
-                except FloodWaitError as exc:
+                except (FloodWaitError, SlowModeWaitError) as exc:
                     # Telegram явно говорит, сколько ждать. Слушаемся: иначе на
                     # следующем тике тот же отказ и поток предупреждений в журнале.
                     # Чат остаётся в очереди — круг продолжится после паузы.
+                    # Медленный режим — тот же FloodWait: у него тоже есть seconds.
                     wait = int(getattr(exc, "seconds", 30)) + 1
                     st["not_before"] = time.time() + wait
                     logger.warning(
                         "Постер #{}: Telegram просит подождать {} сек — ставлю паузу",
                         rule.id,
                         wait,
+                    )
+                    break
+                except PeerFloodError:
+                    # Аккаунт помечен за спам: встаёт весь аккаунт, круг — тоже.
+                    await self.note_peer_flood(
+                        rule.account_id, rule, f" (чат {chat_id})"
                     )
                     break
                 except MailingMessageGone as exc:
@@ -1433,6 +1569,17 @@ class ClientManager:
                     await self._nothing_to_send(rule, f"постить нечего: {exc}")
                     break
                 except Exception as exc:  # noqa: BLE001 — не спамим при ошибке
+                    if dead_session_kind(exc):
+                        # Ключ мёртв или номера нет: круг не продолжаем, аккаунт
+                        # гасится с причиной, а не долбится дальше.
+                        message = (
+                            ACCOUNT_BANNED
+                            if dead_session_kind(exc) == "banned"
+                            else SESSION_REVOKED
+                        )
+                        await self.kill_dead_account(rule.account_id, message)
+                        await self._nothing_to_send(rule, message)
+                        break
                     # Недоступный чат выкидываем из круга: иначе он держал бы
                     # очередь и остальные чаты не получили бы ничего.
                     logger.warning("Постер #{} не отправил в {}: {}", rule.id, chat_id, exc)
@@ -1624,6 +1771,8 @@ class ClientManager:
             client = self._clients.get(rule.account_id)
             if client is None or not client.is_connected():
                 continue
+            if self.sending_paused_until(rule.account_id):
+                continue
 
             # Тихие часы проверяем до создания состояния: рассылка вне окна
             # действительно ничего не меняет и после рестарта не оставляет пустой
@@ -1645,6 +1794,20 @@ class ClientManager:
                     st["not_before"] = time.time() + wait
                     logger.warning("Рассылка #{}: вступление просит подождать {} сек", rule.id, wait)
                     continue
+                except Exception as exc:
+                    # Вступление по мёртвой сессии: аккаунт гасится, а не
+                    # роняет планировщик каждую секунду. Остальное — наверх,
+                    # как раньше: тихий сон скрыл бы настоящий баг.
+                    if dead_session_kind(exc):
+                        message = (
+                            ACCOUNT_BANNED
+                            if dead_session_kind(exc) == "banned"
+                            else SESSION_REVOKED
+                        )
+                        await self.kill_dead_account(rule.account_id, message)
+                        await self._nothing_to_send(rule, message)
+                        continue
+                    raise
                 if not ready:
                     st["not_before"] = tomorrow_ts()
                     continue
@@ -1712,12 +1875,21 @@ class ClientManager:
                     await pin_sent(client, target_id, sent_id, rule_id=rule.id)
                 if sent_id:
                     await schedule_autodelete(rule, target_id, sent_id)
-            except FloodWaitError as exc:
+            except (FloodWaitError, SlowModeWaitError) as exc:
                 # Telegram явно сказал, сколько ждать, — слушаемся, иначе на
                 # следующем тике тот же отказ и поток предупреждений в журнале.
+                # Медленный режим — тот же случай: у него тоже есть seconds.
                 wait = int(getattr(exc, "seconds", 30)) + 1
                 st["not_before"] = time.time() + wait
                 logger.warning("Рассылка #{}: Telegram просит подождать {} сек", rule.id, wait)
+                continue
+            except PeerFloodError:
+                # Аккаунт помечен за спам: встаёт весь аккаунт, а не одна
+                # рассылка. Ретрая нет — раньше здесь была пауза 30 секунд и
+                # повтор в тот же чат, то есть продление ограничения.
+                await self.note_peer_flood(
+                    rule.account_id, rule, f" (чат {target_id})"
+                )
                 continue
             except Exception as exc:  # noqa: BLE001 — одна рассылка не роняет цикл
                 # Отказ по одному получателю (нет прав, чат удалён, сеть) — в
@@ -1759,6 +1931,17 @@ class ClientManager:
         журнале — чтобы сбой было видно на карточке задачи, а не только в логе
         службы, до которого человеку не добраться.
         """
+        if dead_session_kind(exc):
+            # Ключ мёртв или номера нет: чинить нечем, аккаунт гасится с
+            # причиной «подключите заново», а не ждёт 30 секунд и долбит снова.
+            message = (
+                ACCOUNT_BANNED
+                if dead_session_kind(exc) == "banned"
+                else SESSION_REVOKED
+            )
+            await self.kill_dead_account(rule.account_id, message)
+            await self._nothing_to_send(rule, message)
+            return
         logger.warning(
             "Рассылка #{}: не ушло в {}: {}: {}",
             rule.id,
@@ -1835,6 +2018,8 @@ class ClientManager:
         )
         if time.time() < st.get("not_before", 0.0):
             return
+        if self.sending_paused_until(rule.account_id):
+            return
         slots = list(getattr(rule.filters, "scheduled_posts", None) or [])
         slot = due_scheduled_slot(slots, repo.utcnow())
         if slot is None:
@@ -1867,7 +2052,7 @@ class ClientManager:
                     await pin_sent(client, chat_id, sent_id, rule_id=rule.id)
                 if sent_id:
                     await schedule_autodelete(rule, chat_id, sent_id)
-            except FloodWaitError as exc:
+            except (FloodWaitError, SlowModeWaitError) as exc:
                 # Чат не обработан — вернёмся к нему после паузы.
                 wait = int(getattr(exc, "seconds", 30)) + 1
                 st["not_before"] = time.time() + wait
@@ -1877,11 +2062,25 @@ class ClientManager:
                     wait,
                 )
                 break
+            except PeerFloodError:
+                await self.note_peer_flood(
+                    rule.account_id, rule, f" (чат {chat_id})"
+                )
+                break
             except MailingMessageGone as exc:
                 # Пост снесли посреди рассылки: остальным чатам он тоже не уйдёт.
                 await self._skip_scheduled_slot(rule, slot, str(exc))
                 return
             except Exception as exc:  # noqa: BLE001 — не спамим при ошибке
+                if dead_session_kind(exc):
+                    message = (
+                        ACCOUNT_BANNED
+                        if dead_session_kind(exc) == "banned"
+                        else SESSION_REVOKED
+                    )
+                    await self.kill_dead_account(rule.account_id, message)
+                    await self._nothing_to_send(rule, message)
+                    break
                 # Мёртвый чат — тоже обработанный: иначе слот никогда не
                 # закроется, а тик будет спотыкаться об один и тот же чат.
                 logger.warning("Постер #{} не отправил в {}: {}", rule.id, chat_id, exc)
@@ -2034,6 +2233,13 @@ class ClientManager:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Запуск задачи #{} не попал в журнал: {}", rule.id, exc)
             return result
+        if (refusal := self.pause_refusal(rule.account_id)) is not None:
+            result = {"ok": False, "error": refusal}
+            try:
+                await record_oneshot(snapshot, result)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Запуск задачи #{} не попал в журнал: {}", rule.id, exc)
+            return result
         client = self._clients.get(rule.account_id)
         if client is None or not client.is_connected():
             result = {
@@ -2076,6 +2282,8 @@ class ClientManager:
                 "error": "Приглашения доступны с абонементом — продлите подписку.",
                 "need_subscription": True,
             }
+        if (refusal := self.pause_refusal(rule.account_id)) is not None:
+            return {"ok": False, "error": refusal}
         client = self._clients.get(rule.account_id)
         if client is None or not client.is_connected():
             return {

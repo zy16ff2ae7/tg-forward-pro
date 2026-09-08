@@ -56,9 +56,16 @@ def test_jitter_only_adds_to_the_pause():
 
 
 def test_cycle_pause_has_its_own_setting():
-    pause = config(gap_seconds=1, cycle_seconds=42)
-    assert jobs.mailing_gap(pause) == 1
-    assert jobs.mailing_gap(pause, cycle=True) == 42
+    pause = config(gap_seconds=90, cycle_seconds=420)
+    assert jobs.mailing_gap(pause) == 90
+    assert jobs.mailing_gap(pause, cycle=True) == 420
+
+
+def test_tiny_pauses_are_lifted_to_the_antispam_floor():
+    """Паузы ниже пола поднимаются: старые задачи с gap=5 лечатся сами."""
+    tiny = config(gap_seconds=5, cycle_seconds=10)
+    assert jobs.mailing_gap(tiny) == jobs.MAILING_MIN_GAP
+    assert jobs.mailing_gap(tiny, cycle=True) == jobs.MAILING_MIN_CYCLE
 
 
 def test_absurd_pause_is_capped():
@@ -149,6 +156,7 @@ def clean_manager():
     manager._clients.clear()
     manager._poster_rules = []
     manager._poster_state.clear()
+    manager._send_pause_until.clear()
 
 
 @pytest.fixture
@@ -460,7 +468,7 @@ async def test_mailing_from_the_cabinet_fills_the_library(
             # Пустая строка — граница сообщений. Одиночный перенос её не делает,
             # см. test_line_breaks_inside_a_message_stay_in_one_message.
             "message": "первое\n\nвторое",
-            "gap": 7,
+            "gap": 70,
             "repeats": 2,
         },
         headers=auth_headers,
@@ -471,7 +479,7 @@ async def test_mailing_from_the_cabinet_fills_the_library(
     assert task["kind"] == "mailing"
     assert task["mailing"]["recipients"] == 2
     assert task["mailing"]["messages_count"] == 2
-    assert task["mailing"]["gap_seconds"] == 7
+    assert task["mailing"]["gap_seconds"] == 70
     # Два получателя × два круга — вот и вся работа задачи, она измерима.
     assert task["progress"] == {"done": 0, "total": 4}
 

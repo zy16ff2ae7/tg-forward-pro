@@ -351,6 +351,8 @@ async def log_delivery_error(
     client: Any, message: Any, rule: RuleSnapshot, error: BaseException
 ) -> None:
     """Пишет в журнал окончательную ошибку доставки (все повторы исчерпаны)."""
+    from app.telegram_client.antispam import dead_session_kind, is_peer_flood
+
     logger.error("Правило #{}: не удалось переслать — {}", rule.id, error)
     async with session_scope() as session:
         await repo.log_forward(
@@ -361,6 +363,24 @@ async def log_delivery_error(
             target_msg_id=None,
             status="error",
             error=f"{type(error).__name__}: {error}",
+        )
+    if is_peer_flood(error):
+        # Спамблок встаёт на весь аккаунт, а не на одно правило — иначе соседние
+        # задачи продолжат слать и продлят ограничение. Импорт отложенный:
+        # менеджер импортирует этот модуль.
+        from app.telegram_client.manager import manager
+
+        await manager.note_peer_flood(rule.account_id, rule, f" ({rule.kind})")
+    elif dead_session_kind(error):
+        # Ключ мёртв или номера нет: ретраить нечего, аккаунт гасится с
+        # причиной «подключите заново», а не долбится вечно.
+        from app.telegram_client.manager import ACCOUNT_BANNED, SESSION_REVOKED, manager
+
+        await manager.kill_dead_account(
+            rule.account_id,
+            ACCOUNT_BANNED
+            if dead_session_kind(error) == "banned"
+            else SESSION_REVOKED,
         )
     from app.task_alerts import maybe_alert_problem
 
