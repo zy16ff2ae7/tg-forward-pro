@@ -43,18 +43,23 @@ MAX_MEDIA_BYTES = 50 * 1024 * 1024
 # при нормальном темпе его не видно, а разогнавшуюся рассылку он останавливает
 # раньше, чем аккаунт заметит Telegram.
 DAILY_CAP_DEFAULT = 1000
+# Веер, постинг и рассылка шлют в чужие чаты: тысяча одинаковых сообщений
+# в сутки — спамблок задолго до полуночи. Своим каналам столько за раз
+# и не надо, а кому надо — поднимет цифрой (но см. потолок ниже).
+BULK_DAILY_CAP_DEFAULT = 50
+# Потолок ручной цифры из задачи: одной строкой предохранитель не снимается.
+DAILY_CAP_OVERRIDE_MAX = 1000
+# Задачи, которые шлют веером, а не по одному посту, — им урезанный дефолт.
+BULK_CAP_KINDS = ("broadcast", "poster", "mailing")
 # Прогрев новичка: (возраст аккаунта в днях включительно, лимит). Свежий
 # аккаунт, выстреливший тысячей сообщений в первый день, живёт недолго.
 WARMUP_CAPS: tuple[tuple[int, int], ...] = ((1, 50), (3, 150), (7, 400))
 
 
-def send_cap_for(created_at, override: int = 0) -> int:
-    """Дневной лимит отправок: свой из задачи или сервисный с прогревом."""
-    override = max(0, int(override or 0))
-    if override:
-        return override
+def _age_cap(created_at) -> int:
+    """Предел по дате подключения: младше — ниже. Возраста не знаем — новичок."""
     if created_at is None:
-        return DAILY_CAP_DEFAULT
+        return WARMUP_CAPS[0][1]
     try:
         age_days = max(0, (datetime.now(timezone.utc) - created_at).days)
     except TypeError:
@@ -65,6 +70,39 @@ def send_cap_for(created_at, override: int = 0) -> int:
         if age_days <= max_age:
             return cap
     return DAILY_CAP_DEFAULT
+
+
+def send_cap_for(created_at, override: int = 0, kind: str = "forward") -> int:
+    """Дневной лимит отправок: свой из задачи или сервисный с прогревом.
+
+    Своя цифра перекрывает прогрев, но не беспредельно: не выше абсолютного
+    потолка и не выше двойного возрастного — иначе один ноль в поле убивает
+    и лимит, и прогрев новичка разом. Урезанный дефолт веера на множитель
+    не влияет: ветеран вправе поднять цифру сам, она у него осознанная.
+    """
+    age = _age_cap(created_at)
+    service = age
+    if (kind or "forward") in BULK_CAP_KINDS:
+        service = min(service, BULK_DAILY_CAP_DEFAULT)
+    override = max(0, int(override or 0))
+    if override:
+        return min(override, DAILY_CAP_OVERRIDE_MAX, age * 2)
+    return service
+
+
+def activity_cap_for(sent_last_days: int) -> int | None:
+    """Потолок по живой активности: тихо слал — новичок, как бы стар ни был.
+
+    Дата подключения врёт в обе стороны: свежий спам-номер, подключённый
+    месяц назад, по дате уже «прогрет». Активность не врёт: кто за неделю
+    отправил мало, тому и сегодня много нельзя. Шкала та же, что у прогрева.
+    Активным не мешает — возвращает None, и предел остаётся возрастным.
+    """
+    sent = max(0, int(sent_last_days or 0))
+    for threshold, cap in ((50, 50), (150, 150), (400, 400)):
+        if sent < threshold:
+            return cap
+    return None
 
 
 def tomorrow_ts() -> float:
@@ -81,8 +119,17 @@ async def check_send_cap(rule) -> tuple[bool, int, int]:
     async with session_scope() as session:
         account = await repo.get_account(session, rule.account_id, rule.user_id)
         created = getattr(account, "created_at", None) if account is not None else None
-        cap = send_cap_for(created, getattr(rule.filters, "daily_cap", 0))
+        cap = send_cap_for(
+            created,
+            getattr(rule.filters, "daily_cap", 0),
+            getattr(rule, "kind", "forward"),
+        )
         used = await repo.send_count_today(session, rule.account_id)
+        # Живая активность поверх даты: тихий ветеран жмётся к новичку.
+        week = await repo.send_count_since(session, rule.account_id, days=7)
+        activity = activity_cap_for(week)
+        if activity is not None:
+            cap = min(cap, activity)
         return used >= cap, used, cap
 
 
@@ -311,6 +358,12 @@ async def deliver(client: Any, message: Any, rule: RuleSnapshot) -> DeliveryResu
 
     # Задержку из правила отрабатывает очередь — до постановки в работу.
     sent = await _send_once(client, rule, message, text)
+
+    # Отправка ушла — отмечаем в общем темпе аккаунта: bulk-отправители
+    # (рассылка, постер, веер) уступят и не встанут в ту же секунду.
+    from app.telegram_client.manager import manager
+
+    manager.note_account_send(rule.account_id)
 
     target_msg_id = getattr(sent, "id", None)
     if filters.pin_on_send and target_msg_id:

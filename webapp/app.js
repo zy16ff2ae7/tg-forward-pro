@@ -167,7 +167,7 @@ const FIELD_SPEC = {
   repeats: { label: 'Сколько кругов', control: 'number', placeholder: '1', note: 'можно задать свой предел отправок' },
   repeat_forever: { label: 'Без ограничений: продолжать до остановки', control: 'check', note: 'Паузы, дневной лимит и ограничения Telegram всё равно действуют.' },
   typing: { label: 'Показывать «печатает» перед отправкой', control: 'check' },
-  random_pick: { label: 'Брать сообщение наугад, а не по очереди', control: 'check' },
+  random_pick: { label: 'Брать сообщение наугад, а не по очереди', control: 'check', checked: true },
   link_preview: { label: 'Оставлять предпросмотр ссылок', control: 'check' },
   send_mode: { label: 'Как отправлять', control: 'send_mode' },
   buttons: {
@@ -546,13 +546,13 @@ const DEMO_STATE = {
       chats: [{ id: '1006', title: 'Команда (чат)' }, { id: '1005', title: 'Подборки' }],
       mailing: {
         recipients: 2, messages_count: 1, whole_library: false, messages_gone: 0,
-        gap_seconds: 60, cycle_seconds: 600, repeats: 3, typing: true, random_pick: false,
+        gap_seconds: 60, cycle_seconds: 600, repeats: 3, typing: true, random_pick: true,
       },
       edit: {
         account_id: 1, names: { 1006: 'Команда (чат)', 1005: 'Подборки' },
         targets: ['1006', '1005'], message: 'Напоминаем: показ сегодня в 19:00.',
         library_ids: [], send_mode: 'queue', gap: 60, cycle: 600, repeats: 3,
-        typing: true, random_pick: false, link_preview: false,
+        typing: true, random_pick: true, link_preview: false,
       },
       created_at: '2026-08-29T14:15:00' },
     // Разовая задача в работе: без неё в демо не было ни кнопки «Запустить», ни
@@ -618,9 +618,9 @@ const DEMO_COMMAND_GROUPS = [
 const DEMO_COMMANDS = [
   { id: 'sender', group: 'own', kind: 'poster', kinds: ['poster', 'mailing'], emoji: '📤', title: 'Постинг и рассылка', status: 'ready',
     needs: ['account', 'targets', 'message'],
-    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'pin_on_send', 'topic', 'autodelete_hours', 'mention_all', 'gap_jitter', 'cycle_jitter', 'daily_cap', 'alerts', 'subscribe_links', 'join_gap', 'daily_join_limit'],
+    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'translate_to', 'uniquify', 'pin_on_send', 'topic', 'autodelete_hours', 'mention_all', 'gap_jitter', 'cycle_jitter', 'daily_cap', 'alerts', 'subscribe_links', 'join_gap', 'daily_join_limit'],
     description: 'Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.',
-    hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
+    hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят наугад. Спинтакс {a|b} тасует текст. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
     tags: ['ваш текст', 'расписание или очередь'] },
   { id: 'copy_channel', group: 'publish', kind: 'forward', emoji: '🔁', title: 'Копирование канала', status: 'ready',
     needs: ['account', 'source', 'target'], optional: ['mode', 'buttons', 'translate_to', 'uniquify', 'start', 'end', 'pin_on_send', 'topic', 'autodelete_hours', 'delay_jitter', 'daily_cap', 'alerts'],
@@ -4924,8 +4924,8 @@ function applyTaskPrefill(prefill) {
    не попадает (см. collectTaskPayload), а его значение лежит в задаче и ждёт
    переключения режима обратно. */
 const SEND_MODE_FIELDS = {
-  schedule: ['schedule_only', 'interval', 'start', 'end'],
-  queue: ['gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'cycle_jitter', 'subscribe_links', 'join_gap', 'daily_join_limit'],
+  schedule: ['schedule_only', 'interval', 'start', 'end', 'translate_to', 'uniquify'],
+  queue: ['gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'translate_to', 'uniquify', 'cycle_jitter', 'subscribe_links', 'join_gap', 'daily_join_limit'],
 };
 
 /* ─────────────── Редактор дат постинга ─────────────── */

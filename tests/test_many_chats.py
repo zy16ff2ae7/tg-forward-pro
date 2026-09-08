@@ -21,7 +21,7 @@ from telethon.errors import FloodWaitError
 
 from app.db import repo
 from app.db.database import session_scope
-from app.db.models import Rule, Subscription, TelegramAccount
+from app.db.models import Rule, SendCounter, Subscription, TelegramAccount
 from app.telegram_client import jobs
 from app.telegram_client.manager import manager
 from tests.helpers import TEST_USER_ID
@@ -35,6 +35,21 @@ async def _mature(account_id: int) -> None:
         account = await session.get(TelegramAccount, account_id)
         assert account is not None
         account.created_at = repo.utcnow() - timedelta(days=30)
+        await session.commit()
+
+
+async def _worked_week(account_id: int) -> None:
+    """Активность за неделю: потолок по живой активности тест порций не жмёт.
+
+    Строка вчерашняя специально: сегодняшняя подняла бы и счётчик «уже ушло»,
+    а нужна только история.
+    """
+    async with session_scope() as session:
+        session.add(SendCounter(
+            account_id=account_id,
+            day=(repo.utcnow() - timedelta(days=1)).date(),
+            count=500,
+        ))
         await session.commit()
 # Ключи-заглушки: настоящие не нужны, но плейсхолдеры из .env.example менеджер
 # сам считает «шлюз не настроен» и честно отвечает пустотой.
@@ -249,9 +264,10 @@ async def test_poster_walks_all_chats_over_consecutive_ticks(
 
     chats = [-2000 - n for n in range(MANY)]
     _, _, account_id = await make_poster(
-        create_user, create_account, chats=chats, messages=["раз"]
+        create_user, create_account, chats=chats, messages=["раз"], daily_cap=MANY
     )
     await _mature(account_id)
+    await _worked_week(account_id)
     client = FakeClient()
     manager._clients[account_id] = client
 

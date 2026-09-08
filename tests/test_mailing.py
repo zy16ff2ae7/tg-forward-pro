@@ -157,6 +157,7 @@ def clean_manager():
     manager._poster_rules = []
     manager._poster_state.clear()
     manager._send_pause_until.clear()
+    manager._last_send_at.clear()
 
 
 @pytest.fixture
@@ -224,7 +225,8 @@ async def test_mailing_goes_round_over_the_recipients(create_user, create_accoun
 async def test_each_step_takes_the_next_message(create_user, create_account, no_pauses):
     """Сообщения идут по очереди: за круг получатели видят разные тексты."""
     rule_id, user_id, account_id = await make_mailing(
-        create_user, create_account, targets=[-1001, -1002], texts=["первое", "второе"]
+        create_user, create_account, targets=[-1001, -1002], texts=["первое", "второе"],
+        random_pick=False,
     )
     client = FakeClient()
     manager._clients[account_id] = client

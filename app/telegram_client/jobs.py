@@ -651,6 +651,11 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
     else:
         text = transform_text(getattr(item, "text", "") or "", filters)
 
+    if filters.translate_to:
+        # Один текст на несколько языков руками никто вбивать не будет —
+        # переводим здесь, как веер переводит чужие посты.
+        text = await maybe_translate(text, filters.translate_to)
+
     thread = int(getattr(filters, "topic_id", 0) or 0) or None
     entities: list = []
     if filters.mention_all:
@@ -675,14 +680,20 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
             formatting_entities=entities or None,
         )
 
-    if filters.typing:
-        # «Печатает» видно в чате — так рассылка не выглядит ботом. Пауза
-        # внутри блока: вышли из него — индикатор погас.
-        async with client.action(target_id, "typing"):
-            await asyncio.sleep(MAILING_TYPING_SECONDS)
+    from app.telegram_client.manager import manager
+
+    # Общий темп аккаунта: свой круг и своя пауза у каждой задачи, но
+    # круги идут одновременно — без слота три рассылки на одном номере
+    # дали бы три сообщения в секунду.
+    async with manager.account_send_slot(rule.account_id):
+        if filters.typing:
+            # «Печатает» видно в чате — так рассылка не выглядит ботом.
+            # Пауза внутри блока: вышли из него — индикатор погас.
+            async with client.action(target_id, "typing"):
+                await asyncio.sleep(MAILING_TYPING_SECONDS)
+                sent = await _send()
+        else:
             sent = await _send()
-    else:
-        sent = await _send()
     sent_id = getattr(sent, "id", None)
     return int(sent_id) if sent_id else None
 
@@ -859,12 +870,13 @@ async def _broadcast(client: Any, message: Any, rule: RuleSnapshot) -> None:
                 # Состав у каждого чата свой — упоминания собираем на каждый.
                 suffix, found = await mention_suffix(client, target, len(text))
                 item_text, item_entities = text + suffix, found or None
-            posted = await send_copy(
-                client, target, message, item_text,
-                buttons=getattr(rule.filters, "buttons", None),
-                topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
-                entities=item_entities,
-            )
+            async with manager.account_send_slot(rule.account_id):
+                posted = await send_copy(
+                    client, target, message, item_text,
+                    buttons=getattr(rule.filters, "buttons", None),
+                    topic_id=int(getattr(rule.filters, "topic_id", 0) or 0),
+                    entities=item_entities,
+                )
             sent += 1
             delivered.append(target)
             posted_id = getattr(posted, "id", None)

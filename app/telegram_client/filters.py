@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import random
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -51,7 +52,7 @@ def default_filters() -> dict:
         "repeat_forever": False, # пользователь явно включил бесконечный режим
         "typing": False,        # показывать «печатает» перед отправкой
         "link_preview": False,  # оставлять блок предпросмотра ссылки
-        "random_pick": False,   # брать из набора случайное сообщение, а не по кругу
+        "random_pick": True,    # брать из набора случайное сообщение, а не по кругу
         "library_ids": [],      # id сохранённых сообщений (таблица saved_messages)
     }
 
@@ -149,7 +150,7 @@ class FilterConfig:
     repeat_forever: bool = False  # явный переключатель бесконечного режима
     typing: bool = False  # показывать «печатает»
     link_preview: bool = False  # оставлять предпросмотр ссылки
-    random_pick: bool = False  # случайное сообщение из набора
+    random_pick: bool = True  # случайное сообщение из набора
     library_ids: list[int] = field(default_factory=list)  # id из saved_messages
     # Закреплять каждое отправленное сообщение (нужны права в приёмнике).
     pin_on_send: bool = False
@@ -323,9 +324,27 @@ def should_forward(message: Any, config: FilterConfig) -> bool:
     return True
 
 
+# Спинтакс: {вариант1|вариант2} — каждый показ случайно выбирает вариант.
+# Вложенности нет специально: её никто не читает, а парсер с ней ошибается.
+_SPIN_RE = re.compile(r"\{([^{}]+)\}")
+
+
+def spin_text(text: str) -> str:
+    """Раскрывает спинтакс: {добрый день|здравствуйте} — один вариант наугад.
+
+    Одинаковый текст в сотне чатов — сильнейший спам-сигнал; пара таких
+    скобок в сообщении делает каждый показ непохожим на соседний. Пустой
+    вариант ({слово|} или {|слово}) — «может быть, а может нет».
+    """
+    if not text or "{" not in text:
+        return text
+    return _SPIN_RE.sub(lambda match: random.choice(match.group(1).split("|")), text)
+
+
 def transform_text(text: str, config: FilterConfig) -> str:
     """Применяет к тексту замены, вырезание ссылок/упоминаний и суффикс."""
-    result = text
+    # Спинтакс — первым: замены и подпись ложатся уже на выбранный вариант.
+    result = spin_text(text)
 
     for pair in config.replace:
         src = (pair or {}).get("from") or ""

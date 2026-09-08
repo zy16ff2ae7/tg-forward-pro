@@ -4,9 +4,10 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterable, Sequence
+from typing import Any, AsyncIterator, Iterable, Sequence
 from urllib.parse import urlparse
 
 from loguru import logger
@@ -32,6 +33,7 @@ from app.db.models import TelegramAccount
 from app.db import repo
 from app.security import decrypt_session
 from app.telegram_client.antispam import (
+    ACCOUNT_SEND_GAP,
     PEER_FLOOD_PAUSE_HOURS,
     dead_session_kind,
     device_fingerprint,
@@ -347,6 +349,12 @@ class ClientManager:
         # Мьютексы разовых запусков (парсер/автоподписка): один запуск
         # на пользователя — иначе спам кнопкой Run сажает общий API_ID на FloodWait.
         self._oneshot_locks: dict[int, asyncio.Lock] = {}
+        # Общий темп отправок: account_id → монотонное время последней отправки.
+        # Слот (account_send_slot) сериализует bulk-отправителей аккаунта —
+        # рассылку, постер и веер, — а пересылка через очередь только
+        # отмечается здесь (note_account_send): свой темп у неё уже есть.
+        self._send_locks: dict[int, asyncio.Lock] = {}
+        self._last_send_at: dict[int, float] = {}
         # Рубильник спамблока: account_id → unix-время, до которого стоят все
         # отправки аккаунта. Ставит note_peer_flood, переживает рестарт (таблица
         # account_pauses, загрузка — в start_all).
@@ -660,6 +668,41 @@ class ClientManager:
                 await client.disconnect()
             except Exception:  # noqa: BLE001
                 logger.debug("Не удалось корректно закрыть клиент #{}", account_id)
+
+    # ────────────────────── Общий темп отправок ──────────────────────
+
+    def note_account_send(self, account_id: int) -> None:
+        """Отмечает отправку в общем темпе аккаунта. Не ждёт, только пишет.
+
+        Этим пользуется пересылка через очередь: свой темп у неё уже есть, а
+        bulk-отправители должны её учитывать и уступать.
+        """
+        self._last_send_at[int(account_id)] = time.monotonic()
+
+    @asynccontextmanager
+    async def account_send_slot(
+        self, account_id: int, gap: float | None = None
+    ) -> AsyncIterator[None]:
+        """Слот отправки: не чаще одной отправки в ``gap`` на аккаунт.
+
+        Замок сериализует отправителей, пауза разносит их во времени: два
+        отправителя, пришедшие в одну секунду, уйдут друг за другом через
+        ``gap``. Метка ставится после отправки — интервал меряется между
+        концами отправок, с запасом, а не впритык.
+        """
+        if gap is None:
+            gap = ACCOUNT_SEND_GAP
+        lock = self._send_locks.setdefault(int(account_id), asyncio.Lock())
+        async with lock:
+            wait = (
+                self._last_send_at.get(int(account_id), 0.0)
+                + gap
+                - time.monotonic()
+            )
+            if wait > 0:
+                await asyncio.sleep(wait)
+            yield
+            self._last_send_at[int(account_id)] = time.monotonic()
 
     # ─────────────────── Рубильник спамблока (весь аккаунт) ───────────────────
 

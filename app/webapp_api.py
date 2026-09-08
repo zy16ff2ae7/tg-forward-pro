@@ -957,7 +957,14 @@ async def _apply_task_settings(
                 filters[name] = max(floor, _as_int(payload.get(field), default))
         for field in ("typing", "random_pick", "link_preview"):
             if given(field):
-                filters[field] = _as_bool(payload.get(field))
+                if field in payload:
+                    filters[field] = _as_bool(payload.get(field))
+                elif field == "random_pick":
+                    # Новым — наугад: по кругу видно машину. Набор из одного
+                    # сообщения от этого не меняется, явный False — уважается.
+                    filters[field] = True
+                else:
+                    filters[field] = False
         # Бесконечная рассылка — осознанная настройка пользователя, а не
         # скрытое значение «0» в поле кругов. При включении круги не ограничены;
         # паузы и Telegram/service daily cap по-прежнему соблюдаются.
@@ -1022,9 +1029,15 @@ async def _apply_task_settings(
                 0, min(_as_int(payload.get("delay_jitter"), 0), 3600)
             )
     # Дневной лимит — ручка поверх прогрева, у всех отправляющих.
+    # Потолок жёсткий: одной цифрой предохранитель не снимается.
     if kind in ("forward", "broadcast", "poster", "mailing", "clone"):
         if given("daily_cap"):
-            filters["daily_cap"] = max(0, _as_int(payload.get("daily_cap"), 0))
+            from app.telegram_client.forwarder import DAILY_CAP_OVERRIDE_MAX
+
+            filters["daily_cap"] = max(
+                0,
+                min(_as_int(payload.get("daily_cap"), 0), DAILY_CAP_OVERRIDE_MAX),
+            )
     # Письма о проблемах — у всех фоновых задач разом: разовым человек и так
     # смотрит в лицо, а фоновые ломаются тихо. Выключается галочкой.
     if kind in ("forward", "broadcast", "poster", "mailing", "clone",
@@ -1037,14 +1050,15 @@ async def _apply_task_settings(
         if "buttons" in payload or not partial:
             filters["buttons"] = normalize_buttons(payload.get("buttons"))
 
-    # Перевод чужих постов — у пересылки и веера: свои тексты человек пишет
-    # сразу на своём языке, переводить их не надо.
-    if kind in ("forward", "broadcast", "clone"):
+    # Перевод — чужим постам и своим текстам рассылки: один текст на
+    # несколько языков вбивать руками никто не будет, а слать его надо.
+    if kind in ("forward", "broadcast", "clone", "poster", "mailing"):
         if "translate_to" in payload or not partial:
             filters["translate_to"] = normalize_lang(payload.get("translate_to"))
 
-    # Уникализация — там же, где перевод: чужой текст под своё авторство.
-    if kind in ("forward", "broadcast", "clone"):
+    # Уникализация — там же, где перевод: одинаковый текст в сотне чатов —
+    # сильнейший спам-сигнал, и своим текстам она нужнее, чем чужим.
+    if kind in ("forward", "broadcast", "clone", "poster", "mailing"):
         if "uniquify" in payload or not partial:
             filters["uniquify"] = _as_bool(payload.get("uniquify"))
     # Клон: сколько постов истории забрать (0 — только новые, без прошлого).
@@ -3419,6 +3433,8 @@ def _edit_view(
         edit["typing"] = bool(conf.typing)
         edit["random_pick"] = bool(conf.random_pick)
         edit["link_preview"] = bool(conf.link_preview)
+        edit["translate_to"] = conf.translate_to or ""
+        edit["uniquify"] = bool(conf.uniquify)
         # Расписание — как есть, для редактора дат (уже ушедшие — с меткой,
         # чтобы форма не предлагала править прошлое).
         edit["schedule_only"] = bool(conf.schedule_only)
@@ -3448,6 +3464,8 @@ def _edit_view(
         edit["typing"] = bool(conf.typing)
         edit["random_pick"] = bool(conf.random_pick)
         edit["link_preview"] = bool(conf.link_preview)
+        edit["translate_to"] = conf.translate_to or ""
+        edit["uniquify"] = bool(conf.uniquify)
         edit["send_mode"] = "queue"
         # И наоборот: поля расписания с умолчаниями — для переключения режима
         # (редактор дат тех же слотов, что у постинга: отправляет общий воркер).
@@ -3494,8 +3512,8 @@ COMMANDS: list[dict] = [
         "description": "Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.",
         "status": "ready",
         "needs": ["account", "targets", "message"],
-        "optional": ["send_mode", "schedule_only", "scheduled_posts", "buttons", "interval", "start", "end", "gap", "cycle", "repeats", "repeat_forever", "typing", "random_pick", "link_preview", "pin_on_send", "topic", "autodelete_hours", "mention_all", "gap_jitter", "cycle_jitter", "daily_cap", "alerts", "subscribe_links", "join_gap", "daily_join_limit"],
-        "hint": "Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят по очереди. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «без ограничений» — крутить до остановки.",
+        "optional": ["send_mode", "schedule_only", "scheduled_posts", "buttons", "interval", "start", "end", "gap", "cycle", "repeats", "repeat_forever", "typing", "random_pick", "link_preview", "translate_to", "uniquify", "pin_on_send", "topic", "autodelete_hours", "mention_all", "gap_jitter", "cycle_jitter", "daily_cap", "alerts", "subscribe_links", "join_gap", "daily_join_limit"],
+        "hint": "Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят наугад. Спинтакс {a|b} тасует текст. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «без ограничений» — крутить до остановки.",
         "tags": ["ваш текст", "расписание или очередь"],
     },
     {

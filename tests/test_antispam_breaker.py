@@ -47,6 +47,7 @@ from tests.test_task_health import logged
 @pytest.fixture(autouse=True)
 def _reset_manager(clean_manager):
     """Менеджер — синглтон: между тестами забываем клиентов, круги и паузы."""
+    manager._last_send_at.clear()
 
 
 def _snapshot(rule_id, user_id, account_id, **kwargs) -> RuleSnapshot:

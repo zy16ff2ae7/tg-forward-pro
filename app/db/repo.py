@@ -2647,9 +2647,12 @@ async def bump_send_count(session: AsyncSession, account_id: int, count: int = 1
     который пишется в той же сессии.
     """
     today = utcnow().date()
+    # Неделю храним, старше — трём: потолок по живой активности смотрит
+    # на последние семь дней, а строк всё равно единицы на аккаунт.
+    cutoff = today - timedelta(days=6)
     await session.execute(
         delete(SendCounter).where(
-            SendCounter.account_id == account_id, SendCounter.day < today
+            SendCounter.account_id == account_id, SendCounter.day < cutoff
         )
     )
     try:
@@ -2668,6 +2671,19 @@ async def bump_send_count(session: AsyncSession, account_id: int, count: int = 1
     row.count = int(row.count or 0) + max(1, int(count))
     await session.flush()
     return int(row.count)
+
+
+async def send_count_since(
+    session: AsyncSession, account_id: int, *, days: int = 7
+) -> int:
+    """Сколько аккаунт отправил за последние дни (UTC, включая сегодня)."""
+    since = utcnow().date() - timedelta(days=max(1, days) - 1)
+    result = await session.execute(
+        select(func.coalesce(func.sum(SendCounter.count), 0)).where(
+            SendCounter.account_id == account_id, SendCounter.day >= since
+        )
+    )
+    return int(result.scalar() or 0)
 
 
 async def send_count_today(session: AsyncSession, account_id: int) -> int:
