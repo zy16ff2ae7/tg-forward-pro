@@ -300,7 +300,9 @@ async def test_broadcast_stops_at_cap_mid_round(create_user, create_account):
     from types import SimpleNamespace as NS
 
     snapshot = _snapshot(rule_id, user_id, account_id, "broadcast")
-    snapshot.filters = FilterConfig.from_dict({"targets": [-2, -3], "daily_cap": 2})
+    snapshot.filters = FilterConfig.from_dict(
+        {"targets": [-2, -3], "daily_cap": 2, "gap_jitter": 0}
+    )
     client = FanClient()
     await jobs._broadcast(client, NS(id=7, message="пост", media=None), snapshot)
 
@@ -327,3 +329,110 @@ async def test_streaming_autosubscribe_dedups_attempts(create_user, create_accou
     await jobs._autosubscribe(client, message, snapshot)
 
     assert client.tried == ["somechannel"]
+
+
+# ─────────────────────── очеловечивание темпа ───────────────────────
+
+
+async def _created_mailing_edit(client, auth_headers, create_account, extra):
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    response = await client.post(
+        "/api/tasks",
+        json={
+            "command": "mailing",
+            "account_id": account_id,
+            "targets": ["@a"],
+            "message": "раз",
+            "gap": 70,
+            **extra,
+        },
+        headers=auth_headers,
+    )
+    assert response.status == 201, await response.text()
+    return (await response.json())["task"]["edit"]
+
+
+async def test_window_defaults_to_daytime(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Без окна — день 09:00–22:00: ночная рассылка это жалобы."""
+    edit = await _created_mailing_edit(client, auth_headers, create_account, {})
+    assert (edit["start"], edit["end"]) == ("09:00", "22:00")
+
+
+async def test_jitter_defaults_live(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Без разброса — живой: одинаковые паузы выдают робота."""
+    from app.db import repo as repo_module
+    from app.db.database import SessionLocal
+
+    edit = await _created_mailing_edit(client, auth_headers, create_account, {})
+    async with SessionLocal() as session:
+        rules = await repo_module.list_rules(session, TEST_USER_ID)
+        filters = rules[-1].filters
+    assert (filters["gap_jitter"], filters["cycle_jitter"]) == (10, 60)
+    assert edit["start"] == "09:00"
+
+
+async def test_shuffle_flag_roundtrip(
+    client, auth_headers, create_account, login_open, resolved_chats
+):
+    """Галочка тасования сохраняется и видна в правке."""
+    edit = await _created_mailing_edit(
+        client, auth_headers, create_account, {"shuffle_chats": True}
+    )
+    assert edit["shuffle_chats"] is True
+
+
+async def test_shuffle_changes_order_across_cycles(
+    create_user, create_account, no_pauses
+):
+    """Тасование: круги идут разным порядком, но все чаты на месте."""
+    targets = [-(1000 + n) for n in range(10)]
+    await make_mailing(
+        create_user, create_account, targets=targets, texts=["раз"],
+        shuffle_chats=True,
+    )
+    from app.telegram_client.manager import manager as manager_singleton
+
+    account_id = manager_singleton._mailing_rules[0].account_id
+    client = FakeClient()
+    manager._clients[account_id] = client
+    for _ in range(20):
+        await manager._mailing_tick()
+
+    first, second = client.recipients[:10], client.recipients[10:20]
+    assert sorted(first) == sorted(targets)
+    assert sorted(second) == sorted(targets)
+    assert first != second
+
+
+async def test_typing_waits_random_span(create_user, create_account, monkeypatch):
+    """«Печатает» — 1.5–4 секунды наугад, а не метроном."""
+    import asyncio
+
+    from app.telegram_client import jobs
+
+    rule_id, user_id, account_id = await make_mailing(
+        create_user, create_account, targets=[-1001], texts=["раз"], typing=True
+    )
+    async with session_scope() as session:
+        from app.db.models import Rule
+
+        db_rule = await session.get(Rule, rule_id)
+        snapshot = _snapshot(
+            db_rule.id, user_id, account_id, "mailing",
+        )
+        snapshot.filters = FilterConfig.from_dict(db_rule.filters)
+    sleeps: list[float] = []
+
+    async def recorder(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", recorder)
+    await jobs.mailing_send(FakeClient(), snapshot, jobs.own_text_item("раз"), -1001)
+
+    assert len(sleeps) == 1
+    assert 1.5 <= sleeps[0] <= 4.0

@@ -243,6 +243,8 @@ async def make_poster(
             "interval_seconds": 60,
             "window_start": "00:00",
             "window_end": "23:59",
+            "gap_jitter": 0,
+            "cycle_jitter": 0,
             **settings,
         }
 

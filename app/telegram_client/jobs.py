@@ -444,8 +444,8 @@ def window_allows(config: Any, *, now: float | None = None) -> bool:
     Окно одно на всех: постер ждёт его кругами, рассылка — тиком, пересылка —
     задержкой. Часы — хозяина задачи (``window_tz``), а не сервера.
     """
-    start = hhmm_to_sec(getattr(config, "window_start", "00:00"))
-    end = hhmm_to_sec(getattr(config, "window_end", "23:59"))
+    start = hhmm_to_sec(getattr(config, "window_start", "09:00"))
+    end = hhmm_to_sec(getattr(config, "window_end", "22:00"))
     now_sec = window_now_sec(window_tz_minutes(getattr(config, "window_tz", None)), now)
     return in_window(now_sec, start, end)
 
@@ -458,8 +458,8 @@ def quiet_wait_seconds(config: Any, *, now: float | None = None) -> int:
     """
     tz = window_tz_minutes(getattr(config, "window_tz", None))
     now_sec = window_now_sec(tz, now)
-    start = hhmm_to_sec(getattr(config, "window_start", "00:00"))
-    end = hhmm_to_sec(getattr(config, "window_end", "23:59"))
+    start = hhmm_to_sec(getattr(config, "window_start", "09:00"))
+    end = hhmm_to_sec(getattr(config, "window_end", "22:00"))
     if in_window(now_sec, start, end):
         return 0
     if start <= end:
@@ -519,7 +519,9 @@ class MailingMessageGone(RuntimeError):
 
 
 # Сколько «печатать» перед отправкой, когда режим «печатает» включён
-MAILING_TYPING_SECONDS = 2
+# «Печатает» — живым разбросом, а не метрономом ровно в 2 секунды.
+MAILING_TYPING_MIN_SECONDS = 1.5
+MAILING_TYPING_MAX_SECONDS = 4.0
 
 
 async def load_mailing_library(
@@ -690,7 +692,11 @@ async def mailing_send(client: Any, rule: RuleSnapshot, item: Any, target_id: in
             # «Печатает» видно в чате — так рассылка не выглядит ботом.
             # Пауза внутри блока: вышли из него — индикатор погас.
             async with client.action(target_id, "typing"):
-                await asyncio.sleep(MAILING_TYPING_SECONDS)
+                await asyncio.sleep(
+                random.uniform(
+                    MAILING_TYPING_MIN_SECONDS, MAILING_TYPING_MAX_SECONDS
+                )
+            )
                 sent = await _send()
         else:
             sent = await _send()

@@ -45,14 +45,15 @@ def default_filters() -> dict:
         # Темп — как у человека, а не у спам-бота: десятки одинаковых сообщений
         # в минуту — прямой путь под спамблок, см. MAILING_MIN_GAP.
         "gap_seconds": 60,      # пауза между получателями
-        "gap_jitter": 0,        # к паузе между получателями добавляем 0..N секунд
+        "gap_jitter": 10,       # к паузе между получателями добавляем 0..N секунд
         "cycle_seconds": 600,   # пауза перед следующим кругом рассылки
-        "cycle_jitter": 0,      # к паузе между кругами добавляем 0..N секунд
+        "cycle_jitter": 60,     # к паузе между кругами добавляем 0..N секунд
         "repeats": 0,           # сколько кругов сделать (0 — без лимита)
         "repeat_forever": False, # пользователь явно включил бесконечный режим
         "typing": False,        # показывать «печатает» перед отправкой
         "link_preview": False,  # оставлять блок предпросмотра ссылки
         "random_pick": True,    # брать из набора случайное сообщение, а не по кругу
+        "shuffle_chats": False, # тасовать порядок чатов каждый круг
         "library_ids": [],      # id сохранённых сообщений (таблица saved_messages)
     }
 
@@ -128,8 +129,8 @@ class FilterConfig:
     # ── Настройки авто-постера (планировщик собственных сообщений) ──
     messages: list[str] = field(default_factory=list)  # тексты сообщений (по одному в строке)
     interval_seconds: int = 120  # интервал между отправками
-    window_start: str = "00:00"  # начало окна ЧЧ:ММ
-    window_end: str = "23:59"  # конец окна ЧЧ:ММ
+    window_start: str = "09:00"  # начало окна ЧЧ:ММ
+    window_end: str = "22:00"  # конец окна ЧЧ:ММ
     # Чьи это часы: смещение хозяина задачи от UTC в минутах (Москва — 180).
     # None — часы сервера, как у задач, созданных до появления настройки
     # (см. jobs.window_now_sec).
@@ -141,9 +142,9 @@ class FilterConfig:
     scheduled_posts: list = field(default_factory=list)
     # ── Рассылка по чатам (kind="mailing") ──
     gap_seconds: int = 60  # пауза между получателями
-    gap_jitter: int = 0  # случайная добавка к паузе между получателями
+    gap_jitter: int = 10  # случайная добавка к паузе между получателями
     cycle_seconds: int = 600  # пауза перед следующим кругом
-    cycle_jitter: int = 0  # случайная добавка к паузе между кругами
+    cycle_jitter: int = 60  # случайная добавка к паузе между кругами
     # Кругов по умолчанию нет предела: настройка не задана — значит рассылка
     # крутится, пока её не остановят. Число кругов приходит из кабинета явно.
     repeats: int = 0  # сколько кругов (0 — без лимита)
@@ -151,6 +152,7 @@ class FilterConfig:
     typing: bool = False  # показывать «печатает»
     link_preview: bool = False  # оставлять предпросмотр ссылки
     random_pick: bool = True  # случайное сообщение из набора
+    shuffle_chats: bool = False  # тасовать порядок чатов каждый круг
     library_ids: list[int] = field(default_factory=list)  # id из saved_messages
     # Закреплять каждое отправленное сообщение (нужны права в приёмнике).
     pin_on_send: bool = False
@@ -241,6 +243,7 @@ class FilterConfig:
             "typing": self.typing,
             "link_preview": self.link_preview,
             "random_pick": self.random_pick,
+            "shuffle_chats": self.shuffle_chats,
             "library_ids": self.library_ids,
             "pin_on_send": self.pin_on_send,
             "autodelete_hours": self.autodelete_hours,

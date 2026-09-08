@@ -64,12 +64,16 @@ def test_window_uses_owner_clock():
     assert jobs.quiet_wait_seconds(filters, now=MIDNIGHT + 10 * HOUR + 30 * 60) == 81000
 
 
-def test_default_window_is_always_open():
-    """Окно по умолчанию (весь день) никого не держит."""
+def test_default_window_is_daytime():
+    """Окно по умолчанию — день: ночью тихо, днём открыто."""
     filters = FilterConfig()
-    for hour in (0, 3, 12, 23):
+    assert (filters.window_start, filters.window_end) == ("09:00", "22:00")
+    for hour in (9, 12, 21):
         assert jobs.quiet_wait_seconds(filters, now=MIDNIGHT + hour * HOUR) == 0
         assert jobs.window_allows(filters, now=MIDNIGHT + hour * HOUR)
+    for hour in (0, 3, 23):
+        assert jobs.quiet_wait_seconds(filters, now=MIDNIGHT + hour * HOUR) > 0
+        assert not jobs.window_allows(filters, now=MIDNIGHT + hour * HOUR)
 
 
 def test_window_allows_mirrors_wait():

@@ -1606,6 +1606,10 @@ class ClientManager:
                 # перечитывается на каждом тике — значит правка записи доходит и
                 # до тех чатов круга, которые ещё не получили пост.
                 st["queue"] = list(chats)
+                if getattr(rule.filters, "shuffle_chats", False):
+                    # Очередь живёт в состоянии до конца круга — тасовать
+                    # можно честным случайным: позиция не поплывёт.
+                    random.shuffle(st["queue"])
                 st["step"] = st["idx"]
                 st["idx"] = (st["idx"] + 1) % len(items)
 
@@ -1899,6 +1903,11 @@ class ClientManager:
                     st["not_before"] = tomorrow_ts()
                     continue
             recipients = mailing_recipients(rule)
+            if getattr(rule.filters, "shuffle_chats", False) and len(recipients) > 1:
+                # Порядок тасуем, но стабильно внутри круга: сид — номер
+                # круга, иначе позиция указывала бы каждый тик в новый чат.
+                order = random.Random(f"shuffle:{rule.id}:{st.get('cycle', 0)}")
+                order.shuffle(recipients)
             if not recipients:
                 continue
             # not_before — пауза после FloodWait или сбоя; due — плановое время
@@ -2052,10 +2061,10 @@ class ClientManager:
         if streaks[target_id] >= 3:
             streaks.pop(target_id, None)
             recipients = mailing_recipients(rule)
-            if recipients:
+            if recipients and "pos" in state:
                 state["pos"] = (state["pos"] + 1) % len(recipients)
                 if state["pos"] == 0:
-                    state["cycle"] += 1
+                    state["cycle"] = state.get("cycle", 0) + 1
             await record_batch(
                 rule, failed=[f"{target_id}: не принимает 3 раза подряд — пропускаем"]
             )

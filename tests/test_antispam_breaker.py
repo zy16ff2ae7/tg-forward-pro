@@ -266,7 +266,8 @@ async def test_broadcast_waits_between_chats(create_user, create_account, monkey
     rule = await _db_rule(create_user, create_account, kind="broadcast", with_trial=True)
     snapshot = _snapshot(
         rule.id, rule.user_id, rule.account_id, kind="broadcast",
-        filters=FilterConfig(targets=[-2, -3]), target_id=-1,
+        filters=FilterConfig(targets=[-2, -3], gap_jitter=0),
+        target_id=-1,
     )
     monkeypatch.setattr(jobs, "BROADCAST_CHAT_GAP", 5.0)
     sleeps: list[float] = []

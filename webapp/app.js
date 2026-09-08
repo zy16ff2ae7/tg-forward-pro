@@ -234,13 +234,18 @@ const FIELD_SPEC = {
   gap_jitter: {
     label: 'Разброс паузы между чатами (сек)',
     control: 'number',
-    placeholder: '0',
+    placeholder: '10',
     note: '0 — пауза всегда одинаковая, роботов видно',
+  },
+  shuffle_chats: {
+    label: 'Тасовать порядок чатов каждый круг',
+    control: 'check',
+    note: 'один и тот же порядок обхода — машинный след',
   },
   cycle_jitter: {
     label: 'Разброс паузы между кругами (сек)',
     control: 'number',
-    placeholder: '0',
+    placeholder: '60',
     note: 'только очередь: круги ходят с плавающим перерывом',
   },
   daily_cap: {
@@ -618,7 +623,7 @@ const DEMO_COMMAND_GROUPS = [
 const DEMO_COMMANDS = [
   { id: 'sender', group: 'own', kind: 'poster', kinds: ['poster', 'mailing'], emoji: '📤', title: 'Постинг и рассылка', status: 'ready',
     needs: ['account', 'targets', 'message'],
-    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'translate_to', 'uniquify', 'pin_on_send', 'topic', 'autodelete_hours', 'mention_all', 'gap_jitter', 'cycle_jitter', 'daily_cap', 'alerts', 'subscribe_links', 'join_gap', 'daily_join_limit'],
+    optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'translate_to', 'uniquify', 'pin_on_send', 'topic', 'autodelete_hours', 'mention_all', 'gap_jitter', 'cycle_jitter', 'shuffle_chats', 'daily_cap', 'alerts', 'subscribe_links', 'join_gap', 'daily_join_limit'],
     description: 'Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.',
     hint: 'Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят наугад. Спинтакс {a|b} тасует текст. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «кругов 0» — крутить без конца.',
     tags: ['ваш текст', 'расписание или очередь'] },
@@ -4852,7 +4857,7 @@ function applyTaskPrefill(prefill) {
     'banned_words', 'max_warns', 'mute_hours', 'topic', 'autodelete_hours',
     'delay_jitter', 'gap_jitter', 'cycle_jitter', 'daily_cap', 'subscribe_links', 'join_gap', 'join_limit', 'daily_join_limit']
     .forEach((key) => setValue(key, prefill[key]));
-  ['typing', 'random_pick', 'link_preview', 'repeat_forever', 'schedule_only', 'uniquify', 'alerts', 'block_links',
+  ['typing', 'random_pick', 'link_preview', 'repeat_forever', 'schedule_only', 'uniquify', 'shuffle_chats', 'alerts', 'block_links',
     'require_username', 'exclude_admins', 'only_premium', 'only_with_photo', 'active_only',
     'ignore_bots', 'ignore_archived', 'ignore_muted', 'pin_on_send', 'mention_all']
     .forEach((key) => {
@@ -4925,7 +4930,7 @@ function applyTaskPrefill(prefill) {
    переключения режима обратно. */
 const SEND_MODE_FIELDS = {
   schedule: ['schedule_only', 'interval', 'start', 'end', 'translate_to', 'uniquify'],
-  queue: ['gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'translate_to', 'uniquify', 'cycle_jitter', 'subscribe_links', 'join_gap', 'daily_join_limit'],
+  queue: ['gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'translate_to', 'uniquify', 'cycle_jitter', 'shuffle_chats', 'subscribe_links', 'join_gap', 'daily_join_limit'],
 };
 
 /* ─────────────── Редактор дат постинга ─────────────── */

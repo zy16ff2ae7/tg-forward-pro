@@ -34,8 +34,10 @@ from tests.helpers import TEST_USER_ID
 
 
 def config(**overrides) -> FilterConfig:
-    """Настройки рассылки: defaults как в FilterConfig, поверх — правки теста."""
-    return FilterConfig.from_dict({"kind": "mailing", **overrides})
+    """Настройки рассылки: точный темп без разброса, поверх — правки теста."""
+    pinned = {"kind": "mailing", "gap_jitter": 0, "cycle_jitter": 0}
+    pinned.update(overrides)
+    return FilterConfig.from_dict(pinned)
 
 
 def test_gap_is_never_shorter_than_a_second():
@@ -197,7 +199,14 @@ async def make_mailing(
         )
         session.add(rule)
         await session.flush()
-        rule.filters = {"targets": list(targets[1:]), **settings}
+        rule.filters = {
+            "targets": list(targets[1:]),
+            "window_start": "00:00",
+            "window_end": "23:59",
+            "gap_jitter": 0,
+            "cycle_jitter": 0,
+            **settings,
+        }
         for text in texts:
             await repo.add_saved_message(session, user_id=user_id, text=text)
 

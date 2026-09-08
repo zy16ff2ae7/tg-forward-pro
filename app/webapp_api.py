@@ -911,9 +911,9 @@ async def _apply_task_settings(
         if given("interval"):
             filters["interval_seconds"] = max(1, _as_int(payload.get("interval"), 2)) * 60
         if given("start"):
-            filters["window_start"] = str(payload.get("start") or "00:00")[:5]
+            filters["window_start"] = str(payload.get("start") or "09:00")[:5]
         if given("end"):
-            filters["window_end"] = str(payload.get("end") or "23:59")[:5]
+            filters["window_end"] = str(payload.get("end") or "22:00")[:5]
         # Чьи часы у окна: смещение кабинета от UTC (его знает браузер человека).
         # Без него окно считалось по часам сервера — а он стоит в UTC, и
         # московское «окно 10:00–20:00» работало 13:00–23:00 по Москве.
@@ -921,7 +921,13 @@ async def _apply_task_settings(
             filters["window_tz"] = window_tz_minutes(payload.get("tz"))
         if given("gap_jitter"):
             filters["gap_jitter"] = max(
-                0, min(_as_int(payload.get("gap_jitter"), 0), 3600)
+                0, min(_as_int(payload.get("gap_jitter"), 10), 3600)
+            )
+        if given("shuffle_chats"):
+            filters["shuffle_chats"] = (
+                _as_bool(payload.get("shuffle_chats"))
+                if "shuffle_chats" in payload
+                else False
             )
         # Расписание по датам вместо кругов: слоты проверяет normalize,
         # мусор отклоняется понятной ошибкой, а не чинится молча.
@@ -948,14 +954,14 @@ async def _apply_task_settings(
 
         for field, name, default, floor in (
             ("gap", "gap_seconds", 60, MAILING_MIN_GAP),
-            ("gap_jitter", "gap_jitter", 0, 0),
+            ("gap_jitter", "gap_jitter", 10, 0),
             ("cycle", "cycle_seconds", 600, MAILING_MIN_CYCLE),
-            ("cycle_jitter", "cycle_jitter", 0, 0),
+            ("cycle_jitter", "cycle_jitter", 60, 0),
             ("repeats", "repeats", 1, 0),
         ):
             if given(field):
                 filters[name] = max(floor, _as_int(payload.get(field), default))
-        for field in ("typing", "random_pick", "link_preview"):
+        for field in ("typing", "random_pick", "link_preview", "shuffle_chats"):
             if given(field):
                 if field in payload:
                     filters[field] = _as_bool(payload.get(field))
@@ -996,13 +1002,13 @@ async def _apply_task_settings(
                 0, min(_as_int(payload.get("daily_join_limit"), JOIN_DEFAULT_DAILY), 1000)
             )
 
-    # Утреннее окно: постер и рассылка уже разобрали его в своих ветках
-    # выше, остальным публикующим — тем же правилом и с теми же умолчаниями.
-    if kind in ("forward", "broadcast", "clone"):
+    # Утреннее окно: постер разобрал его в своей ветке выше, остальным
+    # публикующим — тем же правилом и с теми же умолчаниями.
+    if kind in ("forward", "broadcast", "clone", "mailing"):
         if given("start"):
-            filters["window_start"] = str(payload.get("start") or "00:00")[:5]
+            filters["window_start"] = str(payload.get("start") or "09:00")[:5]
         if given("end"):
-            filters["window_end"] = str(payload.get("end") or "23:59")[:5]
+            filters["window_end"] = str(payload.get("end") or "22:00")[:5]
         if given("tz"):
             filters["window_tz"] = window_tz_minutes(payload.get("tz"))
     # Закреп, ветка и часы жизни — у всех, кто публикует в чужие чаты.
@@ -3435,6 +3441,7 @@ def _edit_view(
         edit["link_preview"] = bool(conf.link_preview)
         edit["translate_to"] = conf.translate_to or ""
         edit["uniquify"] = bool(conf.uniquify)
+        edit["shuffle_chats"] = bool(conf.shuffle_chats)
         # Расписание — как есть, для редактора дат (уже ушедшие — с меткой,
         # чтобы форма не предлагала править прошлое).
         edit["schedule_only"] = bool(conf.schedule_only)
@@ -3466,6 +3473,7 @@ def _edit_view(
         edit["link_preview"] = bool(conf.link_preview)
         edit["translate_to"] = conf.translate_to or ""
         edit["uniquify"] = bool(conf.uniquify)
+        edit["shuffle_chats"] = bool(conf.shuffle_chats)
         edit["send_mode"] = "queue"
         # И наоборот: поля расписания с умолчаниями — для переключения режима
         # (редактор дат тех же слотов, что у постинга: отправляет общий воркер).
@@ -3512,7 +3520,7 @@ COMMANDS: list[dict] = [
         "description": "Ваши сообщения по чатам: по расписанию — каждые N минут в окне времени, по очереди — чат, пауза, следующий. Текст здесь или из библиотеки.",
         "status": "ready",
         "needs": ["account", "targets", "message"],
-        "optional": ["send_mode", "schedule_only", "scheduled_posts", "buttons", "interval", "start", "end", "gap", "cycle", "repeats", "repeat_forever", "typing", "random_pick", "link_preview", "translate_to", "uniquify", "pin_on_send", "topic", "autodelete_hours", "mention_all", "gap_jitter", "cycle_jitter", "daily_cap", "alerts", "subscribe_links", "join_gap", "daily_join_limit"],
+        "optional": ["send_mode", "schedule_only", "scheduled_posts", "buttons", "interval", "start", "end", "gap", "cycle", "repeats", "repeat_forever", "typing", "random_pick", "link_preview", "translate_to", "uniquify", "pin_on_send", "topic", "autodelete_hours", "mention_all", "gap_jitter", "cycle_jitter", "shuffle_chats", "daily_cap", "alerts", "subscribe_links", "join_gap", "daily_join_limit"],
         "hint": "Чаты отмечайте кнопкой «выбрать» — хоть все сразу. Текст наберите здесь либо возьмите из библиотеки: переносы строк сохраняются, пустая строка делит текст на сообщения — уходят наугад. Спинтакс {a|b} тасует текст. Расписание: интервал в минутах, окно — ЧЧ:ММ по вашим часам. Очередь: паузы в секундах, «без ограничений» — крутить до остановки.",
         "tags": ["ваш текст", "расписание или очередь"],
     },
