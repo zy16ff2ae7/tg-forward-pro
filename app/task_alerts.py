@@ -84,21 +84,3 @@ async def alert_pause_started(user_id: int, phone: str, until_text: str) -> None
         )
     except Exception as exc:  # noqa: BLE001 — алерт не должен ронять доставку
         logger.warning("Не удалось отправить письмо о паузе аккаунта: {}", exc)
-
-
-async def alert_account_dead(user_id: int, phone: str, reason: str) -> None:
-    """Пишет, что сессия аккаунта мертва и он выведен из работы. Не падает никогда."""
-    try:
-        if _bot is None or not user_id:
-            return
-        from app.bot.keyboards import cabinet_button
-
-        await _bot.send_message(
-            user_id,
-            f"🔌 <b>Аккаунт отключён: {escape(phone)}</b>\n"
-            f"{escape(reason)}\n"
-            "Подключите его заново в «👤 Аккаунты».",
-            reply_markup=cabinet_button(),
-        )
-    except Exception as exc:  # noqa: BLE001 — алерт не должен ронять доставку
-        logger.warning("Не удалось отправить письмо о мёртвом аккаунте: {}", exc)

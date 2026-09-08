@@ -104,6 +104,9 @@ class TelegramAccount(Base):
     # сообщение до самого повторного входа. Удачный вход метку снимает — о
     # следующем таком случае надо сказать снова.
     error_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Когда аккаунт выключили с причиной (см. set_account_error). Нужна сторожу:
+    # «умерли сегодня» — это волна заморозок, а «умерли когда-то» — фон.
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="accounts")
     rules: Mapped[list["Rule"]] = relationship(

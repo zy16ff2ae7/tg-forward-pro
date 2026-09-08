@@ -558,7 +558,7 @@ async def submit_password(user_id: int, password: str) -> LoginStep:
 
     try:
         session_string = await manager.sign_in_password(
-            str(password), session_string, creds
+            str(password), session_string, creds, fingerprint_seed=phone
         )
     except Exception as exc:  # noqa: BLE001 — пароль не подошёл, вход не рушим
         logger.info("Вход #{}: пароль 2FA не подошёл ({})", user_id, type(exc).__name__)

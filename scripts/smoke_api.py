@@ -2507,7 +2507,9 @@ async def check_account_login(cab: Cabinet, rep: Report) -> None:
             raise PhoneCodeInvalidError(request=None)
         raise SessionPasswordNeededError(request=None)
 
-    async def sign_in_password(_password: str, _session: str, _creds: Any = None) -> str:
+    async def sign_in_password(
+        _password: str, _session: str, _creds: Any = None, **_kwargs: Any
+    ) -> str:
         return "smoke-session-after-2fa"
 
     async def check_session(
@@ -3070,7 +3072,7 @@ async def check_dead_session(cab: Cabinet, rep: Report) -> None:
 
     client = DeadClient()
     with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
-        _new_client=lambda session_string="", creds=None: client
+        _new_client=lambda session_string="", creds=None, **kwargs: client
     ):
         started = await manager.start_account(row, "1AaBb-dead-session")
 
@@ -3164,7 +3166,7 @@ async def check_account_revive(cab: Cabinet, rep: Report) -> None:
 
     client = FlakyClient()
     with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
-        _new_client=lambda session_string="", creds=None: client
+        _new_client=lambda session_string="", creds=None, **kwargs: client
     ):
         # Первый заход обрывается — так аккаунт и оказывался вне работы.
         status, body = await cab.post(f"/api/accounts/{revive_id}/retry")

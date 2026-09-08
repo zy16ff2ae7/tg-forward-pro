@@ -123,6 +123,7 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "error_notified_at": "DATETIME",
         "api_id": "INTEGER",
         "api_hash_encrypted": "TEXT",
+        "disabled_at": "DATETIME",
     },
 }
 

@@ -117,7 +117,7 @@ def gateway(monkeypatch):
         calls.setdefault("code", []).append(creds)
         return SIGNED
 
-    async def sign_in_password(password, session_string, creds=None):
+    async def sign_in_password(password, session_string, creds=None, fingerprint_seed=None):
         calls.setdefault("password", []).append(creds)
         return SIGNED
 

@@ -19,6 +19,9 @@
 """
 from __future__ import annotations
 
+import hashlib
+import secrets
+
 from telethon.errors import (
     AuthKeyDuplicatedError,
     PeerFloodError,
@@ -87,3 +90,40 @@ def dead_session_kind(exc: BaseException) -> str | None:
     if isinstance(exc, DEAD_SESSION_REVOKED):
         return "revoked"
     return None
+# Отпечатки устройства: у каждого аккаунта свой. Раньше все клиенты сервиса
+# представлялись одинаково (MacBook Pro/macOS/1.0) — одинаковый api_id + IP +
+# отпечаток у десятков номеров, и Telegram кластеризует их как одну ферму:
+# спам одного пользователя бросает тень на всех. Поэтому рабочий клиент
+# аккаунта берёт отпечаток из пула по его номеру телефона: у разных номеров —
+# разные, у одного номера — один и тот же при каждом перезапуске. Только
+# десктопы: сервис и так ходит с серверных IP, мобильные отпечатки оттуда
+# выглядели бы ещё подозрительнее.
+DEVICE_FINGERPRINTS: tuple[dict[str, str], ...] = (
+    {"device_model": "PC 64bit", "system_version": "Windows 11", "app_version": "5.12.3"},
+    {"device_model": "PC 64bit", "system_version": "Windows 10", "app_version": "5.10.7"},
+    {"device_model": "Desktop", "system_version": "Ubuntu 24.04", "app_version": "5.12.3"},
+    {"device_model": "Desktop", "system_version": "Ubuntu 22.04", "app_version": "5.9.1"},
+    {"device_model": "Desktop", "system_version": "Debian 12", "app_version": "5.11.2"},
+    {"device_model": "MacBook Pro", "system_version": "macOS 15", "app_version": "5.12.3"},
+    {"device_model": "MacBook Air", "system_version": "macOS 14", "app_version": "5.10.0"},
+    {"device_model": "PC 64bit", "system_version": "Fedora 41", "app_version": "5.11.0"},
+    {"device_model": "Desktop", "system_version": "Arch Linux", "app_version": "5.12.1"},
+    {"device_model": "PC 64bit", "system_version": "Windows 11", "app_version": "4.16.8"},
+)
+
+
+def device_fingerprint(seed: str) -> dict[str, str]:
+    """Отпечаток аккаунта по строке-сиду (обычно номер телефона).
+
+    Выбор детерминированный: один сид — один отпечаток навсегда, хранить в
+    базе нечего. Возвращаем копию: словарь уходит в конструктор клиента, и
+    чужое изменение пула нам не нужно.
+    """
+    digest = hashlib.sha256(str(seed or "").encode()).digest()
+    pick = int.from_bytes(digest[:4], "big") % len(DEVICE_FINGERPRINTS)
+    return dict(DEVICE_FINGERPRINTS[pick])
+
+
+def random_fingerprint() -> dict[str, str]:
+    """Случайный отпечаток — когда сида ещё нет (QR-вход до сканирования)."""
+    return dict(secrets.choice(DEVICE_FINGERPRINTS))

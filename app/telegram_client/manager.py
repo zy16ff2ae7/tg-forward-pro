@@ -31,7 +31,12 @@ from app.db.database import SessionLocal, session_scope
 from app.db.models import TelegramAccount
 from app.db import repo
 from app.security import decrypt_session
-from app.telegram_client.antispam import PEER_FLOOD_PAUSE_HOURS, dead_session_kind
+from app.telegram_client.antispam import (
+    PEER_FLOOD_PAUSE_HOURS,
+    dead_session_kind,
+    device_fingerprint,
+    random_fingerprint,
+)
 from app.telegram_client.filters import FilterConfig
 from app.telegram_client.forwarder import (
     deliver,
@@ -354,17 +359,32 @@ class ClientManager:
             raise TelegramApiCredentialsMissing(PUBLIC_LOGIN_UNAVAILABLE)
 
     def _new_client(
-        self, session_string: str = "", creds: LoginCreds | None = None
+        self,
+        session_string: str = "",
+        creds: LoginCreds | None = None,
+        *,
+        fingerprint_seed: str | None = None,
     ) -> TelegramClient:
+        """Клиент с отпечатком устройства: своим у каждого аккаунта.
+
+        ``fingerprint_seed`` — обычно номер телефона: один номер — один
+        отпечаток при каждом перезапуске. Без сида (QR-вход до сканирования)
+        отпечаток случайный: сессия к нему не привязана, а рабочим клиент
+        станет уже с постоянным.
+        """
         self._ensure_mtproto_ready()
+        if fingerprint_seed:
+            fingerprint = device_fingerprint(fingerprint_seed)
+        else:
+            fingerprint = random_fingerprint()
         return TelegramClient(
             StringSession(session_string),
             creds.api_id if creds else settings.api_id,
             creds.api_hash if creds else settings.api_hash,
             proxy=_proxy_dict(settings.proxy),
-            device_model="MacBook Pro",
-            system_version="macOS",
-            app_version="1.0",
+            device_model=fingerprint["device_model"],
+            system_version=fingerprint["system_version"],
+            app_version=fingerprint["app_version"],
             connection_retries=5,
             request_retries=5,
         )
@@ -391,7 +411,7 @@ class ClientManager:
         станет доступен. Тип доставки пишется и в журнал: иначе «код не
         пришёл» гадается вслепую.
         """
-        client = self._new_client(creds=creds)
+        client = self._new_client(creds=creds, fingerprint_seed=phone)
         await client.connect()
         try:
             result = await client.send_code_request(phone)
@@ -423,7 +443,9 @@ class ClientManager:
         ``PhoneCodeExpiredError`` наружу не глотаем: попытка целиком протухла
         и вызывающий должен начать вход заново.
         """
-        client = self._new_client(session_string, creds)
+        client = self._new_client(
+            session_string, creds, fingerprint_seed=phone
+        )
         await client.connect()
         try:
             result = await client(
@@ -461,7 +483,9 @@ class ClientManager:
         подойдёт та же, что пришла: ключ авторизации и DC при вводе кода не
         меняются, а SRP-обмен идёт по тому же ключу.
         """
-        client = self._new_client(session_string, creds)
+        client = self._new_client(
+            session_string, creds, fingerprint_seed=phone
+        )
         await client.connect()
         try:
             await client.sign_in(
@@ -472,10 +496,16 @@ class ClientManager:
             await client.disconnect()
 
     async def sign_in_password(
-        self, password: str, session_string: str, creds: LoginCreds | None = None
+        self,
+        password: str,
+        session_string: str,
+        creds: LoginCreds | None = None,
+        fingerprint_seed: str | None = None,
     ) -> str:
         """Вводит облачный пароль (2FA). Возвращает итоговую сессию."""
-        client = self._new_client(session_string, creds)
+        client = self._new_client(
+            session_string, creds, fingerprint_seed=fingerprint_seed
+        )
         await client.connect()
         try:
             await client.sign_in(password=password)
@@ -543,7 +573,9 @@ class ClientManager:
         Ключи берёт из строки аккаунта: у своих ключей своя сессия, и
         поднимать её сервисными бессмысленно.
         """
-        client = self._new_client(session_string, creds_from_account(account))
+        client = self._new_client(
+            session_string, creds_from_account(account), fingerprint_seed=account.phone
+        )
         setattr(client, "_account_id", account.id)
         client.add_event_handler(
             self._on_new_message,
@@ -717,23 +749,14 @@ class ClientManager:
         отключается, а подъём заново его пропускает (см. HOPELESS_ERRORS).
         """
         logger.error("Аккаунт #{}: {}", account_id, message)
-        notify_user_id = 0
-        phone = ""
         try:
             async with session_scope() as session:
                 db_account = await session.get(TelegramAccount, int(account_id))
                 if db_account is not None:
                     await repo.set_account_error(session, db_account, message)
-                    notify_user_id = db_account.user_id
-                    phone = db_account.phone or ""
         except Exception as exc:  # noqa: BLE001 — гашение важнее журнала
             logger.warning("Аккаунт #{}: причину не записали: {}", account_id, exc)
         await self.stop_account(int(account_id))
-        from app.task_alerts import alert_account_dead
-
-        await alert_account_dead(
-            notify_user_id, phone or f"#{account_id}", message
-        )
 
     def pause_refusal(self, account_id: int) -> str | None:
         """Аккаунт на паузе после спамблока: текст отказа для ручных запусков.

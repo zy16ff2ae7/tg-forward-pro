@@ -1169,7 +1169,35 @@ async def set_account_error(
         # Аккаунт вернулся в работу: про следующее выпадение надо будет сказать
         # снова, иначе человек узнает о нём только из кабинета.
         account.error_notified_at = None
+        account.disabled_at = None
+    else:
+        account.disabled_at = utcnow()
     await session.flush()
+
+
+async def count_disabled_since(
+    session: AsyncSession, errors: Sequence[str], hours: int = 24
+) -> int:
+    """Сколько аккаунтов выключили с этими причинами за последние часы.
+
+    Причины передаёт вызывающий: безнадёжные тексты живут в менеджере, а репо
+    про менеджер не знает. Сторожу это число нужно, чтобы отличить волну
+    заморозок от фона.
+    """
+    if not errors:
+        return 0
+    since = utcnow() - timedelta(hours=max(1, hours))
+    result = await session.execute(
+        select(func.count())
+        .select_from(TelegramAccount)
+        .where(
+            TelegramAccount.is_active.is_(False),
+            TelegramAccount.last_error.in_(list(errors)),
+            TelegramAccount.disabled_at.is_not(None),
+            TelegramAccount.disabled_at >= since,
+        )
+    )
+    return int(result.scalar() or 0)
 
 
 async def note_account_trouble(

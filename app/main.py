@@ -25,7 +25,7 @@ from app.errors import http_error_middleware, on_bot_error, security_headers_mid
 from app.fsperms import harden_runtime_files
 from app.logging_setup import setup_logging
 from app.payments import crypto, yookassa
-from app.telegram_client.manager import manager
+from app.telegram_client.manager import HOPELESS_ERRORS, manager
 
 # Как часто фоновый цикл проверяет платежи и подписки
 BACKGROUND_INTERVAL_SECONDS = 300
@@ -428,13 +428,14 @@ def _watch_due(kind: str) -> bool:
 
 
 async def notify_watchdog(bot: Bot) -> None:
-    """Сторож сервиса: всплеск ошибок или аккаунты не в сети — владельцу.
+    """Сторож сервиса: всплеск ошибок, тишина или мор — владельцу.
 
     Пассивный /api/health хорош для мониторинга, но мониторинг смотрит
     человек — когда вспомнит. Сторож пишет сам: ошибок за пять минут больше
-    порога (с топом текстов — что именно горит) или активных аккаунтов
-    вне сети больше порога. По каждому виду — кулдаун: авария длиной в час
-    стоит одно письмо, а не двенадцать.
+    порога (с топом текстов — что именно горит), активных аккаунтов
+    вне сети больше порога или за сутки безнадёжно умерло больше порога.
+    По каждому виду — кулдаун: авария длиной в час стоит одно письмо,
+    а не двенадцать.
     """
     if not settings.admin_ids:
         return
@@ -443,6 +444,9 @@ async def notify_watchdog(bot: Bot) -> None:
         errors = await repo.count_forward_errors_since(session, window_min)
         top = await repo.top_forward_errors(session, window_min) if errors else []
         expected = set(await repo.active_account_ids(session))
+        deaths = await repo.count_disabled_since(
+            session, HOPELESS_ERRORS, hours=24
+        )
     online = set(manager.online_ids())
     offline = len(expected - online)
 
@@ -458,6 +462,13 @@ async def notify_watchdog(bot: Bot) -> None:
             alerts.append(
                 f"📴 <b>Аккаунтов не в сети: {offline}.</b>\n\n"
                 "Проверьте сессии — задачи на них стоят."
+            )
+    if settings.watch_deaths > 0 and deaths >= settings.watch_deaths:
+        if _watch_due("deaths"):
+            alerts.append(
+                f"💀 <b>За сутки умерло аккаунтов: {deaths}.</b>\n\n"
+                "Похоже на волну заморозок: сессии не чинятся повторным "
+                "входом по старой схеме. Проверьте, что изменилось."
             )
     for admin_id in settings.admin_ids:
         for text in alerts:

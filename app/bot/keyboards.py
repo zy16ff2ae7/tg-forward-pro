@@ -431,8 +431,12 @@ def bank_menu(banked_days: int, active_days: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def login_choice_kb() -> InlineKeyboardMarkup:
-    """Выбор, как входить: код на номер или скан QR-кода."""
+def login_choice_kb(*, keys_added: bool = False) -> InlineKeyboardMarkup:
+    """Выбор, как входить: код на номер или скан QR-кода.
+
+    Свои ключи API — необязательная строка: вход через своё приложение
+    (my.telegram.org/apps) не делит лимиты с чужими аккаунтами сервиса.
+    """
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="📱 По номеру", callback_data="acc:method:phone")
@@ -440,6 +444,8 @@ def login_choice_kb() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="📷 По QR-коду", callback_data="acc:method:qr")
     )
+    keys_label = "🔑 Свои ключи API ✅" if keys_added else "🔑 Свои ключи API"
+    builder.row(InlineKeyboardButton(text=keys_label, callback_data="acc:keys"))
     builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="nav:cancel"))
     return builder.as_markup()
 

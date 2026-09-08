@@ -126,6 +126,9 @@ class Settings:
     watch_errors: int = 20
     # Аккаунтов не в сети больше порога — письмо владельцу. 0 — не сторожить.
     watch_offline: int = 3
+    # Аккаунтов умерло безнадёжно за сутки больше порога — письмо владельцу.
+    # Это волна заморозок, а не фон. 0 — не сторожить.
+    watch_deaths: int = 3
     # Пауза между письмами сторожа одного вида. Без неё авария длиной в час
     # стоила бы двенадцать писем.
     watch_cooldown_min: int = 60
@@ -602,6 +605,7 @@ def load_settings() -> Settings:
         ),
         watch_errors=max(0, _get_int("WATCH_ERRORS", 20)),
         watch_offline=max(0, _get_int("WATCH_OFFLINE", 3)),
+        watch_deaths=max(0, _get_int("WATCH_DEATHS", 3)),
         watch_cooldown_min=max(1, _get_int("WATCH_COOLDOWN_MIN", 60)),
         bonus_channel=_get("BONUS_CHANNEL"),
         bonus_days=max(0, _get_int("BONUS_DAYS", 3)),

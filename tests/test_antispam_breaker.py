@@ -477,21 +477,6 @@ async def test_peer_flood_sends_one_safe_mode_letter(
     assert "Безопасный режим" in text and "UTC" in text
 
 
-async def test_dead_account_sends_letter(create_user, create_account):
-    """Мёртвый аккаунт не молча гаснет: причина уходит в личку."""
-    user_id = await create_user()
-    account_id = await create_account(user_id)
-    bot = FakeBot()
-    set_alert_bot(bot)
-
-    await manager.kill_dead_account(account_id, "сессия отозвана")
-
-    assert len(bot.sent) == 1
-    chat_id, text = bot.sent[0]
-    assert chat_id == user_id
-    assert "+79000000000" in text and "сессия отозвана" in text
-
-
 def test_rule_card_names_the_pause():
     """Карточка задачи говорит «пауза после спамблока», а не «работает ✅»."""
     rule = Rule(

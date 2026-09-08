@@ -101,3 +101,24 @@ async def test_nobody_to_write_to(monkeypatch):
     bot = FakeBot()
     await notify_watchdog(bot)  # type: ignore[arg-type]
     assert bot.dms == []
+
+
+async def test_death_wave_alerts(monkeypatch, create_user, create_account):
+    """Три смерти за сутки — письмо про волну, а не тишина."""
+    from app.db import repo
+    from app.db.database import session_scope
+    from app.db.models import TelegramAccount
+    from app.telegram_client.manager import SESSION_REVOKED
+
+    await _admin(monkeypatch, watch_errors=1000, watch_offline=1000, watch_deaths=3)
+    user_id = await create_user()
+    for _ in range(3):
+        account_id = await create_account(user_id)
+        async with session_scope() as session:
+            account = await session.get(TelegramAccount, account_id)
+            await repo.set_account_error(session, account, SESSION_REVOKED)
+    monkeypatch.setattr(manager, "online_ids", lambda: iter([]))
+    bot = FakeBot()
+    await notify_watchdog(bot)  # type: ignore[arg-type]
+    assert len(bot.dms) == 1
+    assert "умерло аккаунтов: 3" in bot.dms[0][1]
