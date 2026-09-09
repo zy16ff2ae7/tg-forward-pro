@@ -9,7 +9,6 @@ from telethon.errors import FloodWaitError
 
 from app import account_profile
 from app.errors import AppError, ValidationError
-from app.telegram_client.manager import manager
 from tests.helpers import TEST_USER_ID
 
 
@@ -55,27 +54,8 @@ async def test_profile_reads_without_modifying():
     assert type(client.await_args.args[0]).__name__ == 'GetFullUserRequest'
 
 
-async def test_endpoints_enforce_ownership(client, auth_headers, create_user, create_account, monkeypatch):
-    other = await create_user()
-    account = await create_account(other)
-    change = AsyncMock()
-    monkeypatch.setattr(manager, 'update_account_profile', change)
-    for suffix in ('profile', 'diagnostics'):
-        assert (await client.get(f'/api/accounts/{account}/{suffix}')).status == 401
-        assert (await client.get(f'/api/accounts/{account}/{suffix}', headers=auth_headers)).status == 404
-    response = await client.patch(f'/api/accounts/{account}/profile', headers=auth_headers, json={'first_name':'Anna'})
-    assert response.status == 404
-    change.assert_not_awaited()
-
-
-async def test_profile_patch_and_diagnostics(client, auth_headers, create_account, monkeypatch):
+async def test_manual_profile_editor_removed(client, auth_headers, create_account):
     await client.get('/api/me', headers=auth_headers)
     account = await create_account(TEST_USER_ID)
-    change = AsyncMock(return_value={'applied':['about']})
-    monkeypatch.setattr(manager, 'update_account_profile', change)
-    response = await client.patch(f'/api/accounts/{account}/profile', headers=auth_headers, json={'about':'About'})
-    assert response.status == 200
-    change.assert_awaited_once_with(account, {'about':'About'})
-    response = await client.get(f'/api/accounts/{account}/diagnostics', headers=auth_headers)
-    assert response.status == 200
-    assert (await response.json())['tasks'] == []
+    assert (await client.get(f'/api/accounts/{account}/profile', headers=auth_headers)).status == 404
+    assert (await client.patch(f'/api/accounts/{account}/profile', headers=auth_headers, json={'about':'x'})).status == 404

@@ -21,7 +21,7 @@ from aiogram.types import BufferedInputFile, LabeledPrice
 from aiohttp import web
 from loguru import logger
 
-from app import account_profile, join_queue, accounts_login, bonus, exports, paylink, promocode, referral, webapp_build
+from app import warmup, warmup_plan, join_queue, accounts_login, bonus, exports, paylink, promocode, referral, webapp_build
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
@@ -1134,6 +1134,8 @@ async def create_task(request: web.Request) -> web.Response:
         # старый клиент прислал только аккаунт/источник/приёмник — это пересылка
         command, kind = COMMANDS_BY_ID["copy_channel"], "forward"
 
+    if kind == "warmup":
+        return await _create_warmup(request, payload)
     account_id = _as_int(payload.get("account_id"), 0)
     source = str(payload.get("source") or "").strip()
     target = str(payload.get("target") or "").strip()
@@ -1477,6 +1479,8 @@ async def update_task(request: web.Request) -> web.Response:
         rule = await repo.get_rule(session, task_id, user_id)
         if rule is None:
             return _json({"error": "Задача не найдена"}, status=404)
+        if rule.kind == "warmup":
+            return _json({"error": "План автопрогрева уже зафиксирован. Можно поставить его на паузу или создать новый после архивации"}, status=409)
         if join_queue.running(rule.id):
             return _json({"error": "Сначала остановите очередь вступлений, затем измените настройки"}, status=409)
         kind = rule.kind or "forward"
@@ -2693,7 +2697,77 @@ async def list_accounts(request: web.Request) -> web.Response:
     )
 
 
-async def _profile_account(request):
+@routes.get("/api/warmup/preset")
+@require_auth
+async def warmup_preset(request):
+    return _json({"days": 7, "daily_joins": 3, "gap_minutes": 60, "gift_budget": 0,
+                  "avatar_url": "/app/assets/warmup/avatar.png", "story_url": "/app/assets/warmup/story.png",
+                  "bios": list(warmup_plan.BIOS), "captions": list(warmup_plan.CAPTIONS)})
+
+
+@routes.post("/api/warmup")
+@require_auth
+@rate_limit(10, 60)
+async def create_warmup(request):
+    return await _create_warmup(request, await _login_body(request))
+
+
+async def _create_warmup(request, payload):
+    _require_account_login()
+    if not isinstance(payload, dict):
+        raise ValidationError("Нужен JSON-объект")
+    user_id = request[USER_ID_KEY]
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    async with warmup.create_lock(user_id), SessionLocal() as session:
+        existing = list(await repo.list_rules(session, user_id, include_archived=True))
+        previous = [r for r in existing if r.kind == "warmup" and
+                    (r.filters or {}).get("warmup", {}).get("request_key") == payload.get("request_key")]
+        if previous:
+            if any((r.filters or {}).get("warmup_digest") != digest for r in previous):
+                return _json({"error": "Этот запуск уже сохранён с другими настройками. Откройте новый сценарий"}, status=409)
+            return _json({"tasks": [_task_view(r) for r in previous], "replayed": True}, status=200)
+        config = warmup_plan.normalize(payload, now=time.time())
+        accounts = []
+        for account_id in config["account_ids"]:
+            account = await repo.get_account(session, account_id, user_id)
+            if account is None:
+                return _json({"error": "Один из аккаунтов не найден"}, status=404)
+            accounts.append(account)
+        plans = [{"account_id": a.id, "phone": a.phone, "steps": warmup_plan.build(config, a.id)} for a in accounts]
+        if request.query.get("preview") == "1":
+            return _json({"preview": {"days": config["days"], "gift_budget_total": len(accounts) * config["gift_budget"],
+                "accounts": [{**p, "steps": warmup_plan.public_steps(p["steps"])} for p in plans],
+                "note": "Заполняются только пустые поля. Истории: " + ("контактам" if config["story_privacy"] == "contacts" else "видны всем") + ". Ограничения Telegram останавливают действия."}})
+        occupied = {r.account_id for r in existing if r.kind == "warmup" and not r.archived and warmup.report(r)["state"] != "done"}
+        if occupied.intersection(config["account_ids"]):
+            return _json({"error": "На одном из аккаунтов уже есть незавершённый автопрогрев. Продолжите его или уберите в архив"}, status=409)
+        if not await repo.has_active_subscription(session, user_id):
+            count = sum(not r.archived for r in existing)
+            if count + len(accounts) > settings.max_rules_free:
+                return _json({"error": "Для выбранного числа сценариев нужен абонемент", "need_subscription": True}, status=402)
+        created = []
+        for plan in plans:
+            rule = await repo.add_rule(session, user_id, plan["account_id"], 0, "", 0, "")
+            rule.kind = "warmup"
+            rule.filters = {"warmup": config, "warmup_steps": plan["steps"], "warmup_digest": digest}
+            created.append(rule)
+        await session.commit()
+    await manager.refresh_rules()
+    return _json({"tasks": [_task_view(r) for r in created]}, status=201)
+
+
+@routes.post(r"/api/warmup/{task_id:\d+}/skip")
+@require_auth
+async def skip_warmup_step(request):
+    async with SessionLocal() as session:
+        rule = await repo.get_rule(session, int(request.match_info["task_id"]), request[USER_ID_KEY])
+    if rule is None or rule.kind != "warmup":
+        return _json({"error": "Сценарий не найден"}, status=404)
+    await warmup.skip_uncertain(rule)
+    return _json({"ok": True})
+
+
+async def _owned_account(request):
     account_id = int(request.match_info["account_id"])
     async with SessionLocal() as session:
         account = await repo.get_account(session, account_id, request[USER_ID_KEY])
@@ -2703,27 +2777,10 @@ async def _profile_account(request):
     return account
 
 
-@routes.get(r"/api/accounts/{account_id:\d+}/profile")
-@require_auth
-@rate_limit(15, 60)
-async def get_account_profile(request):
-    account = await _profile_account(request)
-    return _json(await account_profile.read_profile(manager.profile_client(account.id)))
-
-
-@routes.patch(r"/api/accounts/{account_id:\d+}/profile")
-@require_auth
-@rate_limit(5, 60)
-async def patch_account_profile(request):
-    account = await _profile_account(request)
-    changes = account_profile.validate_changes(await _login_body(request))
-    return _json(await manager.update_account_profile(account.id, changes))
-
-
 @routes.get(r"/api/accounts/{account_id:\d+}/diagnostics")
 @require_auth
 async def account_diagnostics(request):
-    account = await _profile_account(request)
+    account = await _owned_account(request)
     async with SessionLocal() as session:
         rules = [r for r in await repo.list_rules(session, request[USER_ID_KEY]) if r.account_id == account.id]
         health = await repo.task_health(session, [r.id for r in rules])
@@ -3441,6 +3498,11 @@ def _task_view(
         "oneshot": kind in ONE_SHOT_KINDS,
         "created_at": rule.created_at.isoformat() if rule.created_at else None,
     }
+    if kind == "warmup":
+        automation = warmup.report(rule)
+        view.update(warmup=automation, progress={"done": automation["done"], "total": automation["total"]},
+                    health=_health_view(health, {}), edit=None, targets_count=len((rule.filters or {}).get("warmup", {}).get("targets", [])))
+        return view
     # Авто-постер: выносим расписание, чтобы в карточке задачи было видно,
     # как часто и в каком окне он шлёт (delay в секундах неинформативен).
     conf = FilterConfig.from_dict(rule.filters or {})
@@ -3891,6 +3953,13 @@ COMMANDS: list[dict] = [
         ],
         "hint": "Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Режим «участники» листает состав чата, «авторы» — писавших, «комментарии» — обсуждавших посты: самые вовлечённые. «Просмотреть» — сколько перебрать, «собрать» — сколько сохранить: фильтры отсеивают, и смотреть приходится больше. Запускается сразу, результат — кнопкой «Результаты». Собранных можно позвать в свой чат кнопкой «Пригласить» — пачками по 20.",
         "tags": ["список участников", "фильтры и режимы", "запуск вручную"],
+    },
+    {
+        "id": "warmup", "group": "audience", "kind": "warmup", "emoji": "🌱",
+        "title": "Автопрогрев", "description": "Сценарий для Telegram-аккаунтов: оформление, чаты, истории и подарки по дням.",
+        "status": "ready", "needs": ["account"], "optional": [],
+        "hint": "Выберите аккаунты и действия, проверьте план и запустите. Работает по расписанию, даже когда кабинет закрыт.",
+        "tags": ["сценарий по дням", "несколько аккаунтов", "автоматически"],
     },
     {
         "id": "autosubscribe",

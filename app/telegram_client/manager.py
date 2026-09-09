@@ -669,6 +669,8 @@ class ClientManager:
         return True
 
     async def stop_account(self, account_id: int) -> None:
+        from app import warmup
+        await warmup.cancel_inactive(account_id=account_id)
         from app import join_queue
         await join_queue.stop_account(account_id)
         async with self._lock:
@@ -1040,6 +1042,8 @@ class ClientManager:
             self._revive_task = None
         from app import join_queue
         await join_queue.cancel_inactive(set())
+        from app import warmup
+        await warmup.cancel_inactive(set())
         await delivery_queue.stop()
         for account_id in list(self._clients):
             await self.stop_account(account_id)
@@ -1499,6 +1503,8 @@ class ClientManager:
 
         from app import join_queue
         await join_queue.cancel_inactive({r.id for r in rules if not r.archived})
+        from app import warmup
+        await warmup.cancel_inactive({r.id for r in rules if not r.archived})
         fresh: dict[tuple[int, int], list[RuleSnapshot]] = {}
         floating: dict[int, list[RuleSnapshot]] = {}
         by_id: dict[int, RuleSnapshot] = {}
@@ -2639,6 +2645,8 @@ class ClientManager:
                 try:
                     await asyncio.sleep(interval)
                     await self.refresh_rules()
+                    from app import warmup
+                    await warmup.tick(self)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001

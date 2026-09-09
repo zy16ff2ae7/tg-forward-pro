@@ -551,26 +551,50 @@
        Вход проходит здесь целиком. Раньше кнопка «Добавить аккаунт» умела
        единственное — открыть чат с ботом, и человек уходил из кабинета на
        середине пути. Кнопка «Продолжить в боте» осталась как запасной путь. -->
-  <div class="sheet" id="profileSheet" role="dialog" aria-modal="true" aria-labelledby="profileTitle">
-    <div class="sheet__backdrop" data-close></div>
-    <div class="sheet__panel">
-      <div class="sheet__head"><div class="sheet__title" id="profileTitle">Профиль аккаунта</div>
+  <div class="sheet" id="warmupSheet" role="dialog" aria-modal="true" aria-labelledby="warmupTitle">
+    <div class="sheet__backdrop" data-close></div><div class="sheet__panel">
+      <div class="sheet__head"><div class="sheet__title" id="warmupTitle">🌱 Автопрогрев</div>
         <button class="icon-btn" data-close aria-label="Закрыть">×</button></div>
-      <p id="profileStatus" role="status" aria-live="polite"></p>
-      <form id="profileForm" class="form" hidden>
-        <label class="field">Имя<input class="input" id="profileFirst" maxlength="64" required></label>
-        <label class="field">Фамилия<input class="input" id="profileLast" maxlength="64"></label>
-        <label class="field">О себе<textarea class="input" id="profileAbout" maxlength="70" rows="3"></textarea></label>
-        <fieldset><legend>Дата рождения</legend><div class="profile__birthday">
-          <label class="field">День<input class="input" id="profileDay" type="number" min="1" max="31"></label>
-          <label class="field">Месяц<input class="input" id="profileMonth" type="number" min="1" max="12"></label>
-          <label class="field">Год<input class="input" id="profileYear" type="number" min="1876" max="2100"></label>
-        </div><p class="field__note">Год необязателен. Чтобы убрать дату, очистите все три поля. Видимость даты задаётся в Telegram.</p></fieldset>
-        <label class="field">Фото профиля<input id="profilePhoto" type="file" accept="image/jpeg,image/png">
-          <span class="field__note">JPEG/PNG до 512 КБ, от 160 до 4096 пикселей. Новое фото станет основным.</span></label>
-        <p class="field__note">Заполнение профиля не снимает ограничения Telegram.</p>
-        <button class="btn btn--primary btn--block" id="profileSave" type="submit">Проверить изменения</button>
+      <p class="field__note">Один сценарий — оформление Telegram-аккаунта и действия по дням. Работает, даже когда кабинет закрыт.</p>
+      <p id="warmupStatus" role="status" aria-live="polite"></p>
+      <form id="warmupForm" class="form">
+        <fieldset class="warmup__accounts"><legend>С каких аккаунтов выполнять</legend><div id="warmupAccounts"></div></fieldset>
+        <div class="warmup__row">
+          <label class="field">Длительность, дней<input id="warmupDays" type="number" min="1" max="30" value="7" required></label>
+          <label class="field">Начало<input id="warmupStart" type="datetime-local" required></label>
+        </div>
+        <fieldset><legend>Подготовка аккаунта</legend>
+          <label class="warmup__check"><input id="warmupAvatar" type="checkbox" checked> Поставить аватарку, если её нет</label>
+          <label class="warmup__check"><input id="warmupBio" type="checkbox" checked> Заполнить пустое описание</label>
+          <div class="warmup__preset"><img src="assets/warmup/avatar.png" alt="Абстрактная аватарка сценария"><p>Нейтральная аватарка и короткое описание. Уже заполненные поля останутся прежними.</p></div>
+          <label class="field">Своё описание — необязательно<input id="warmupAbout" maxlength="70" placeholder="Пусто — описание из сценария"></label>
+          <label class="field">Дата рождения — необязательно<input id="warmupBirthday" type="date"><span class="field__note">Укажите свою дату, если её нужно заполнить. Случайную дату сценарий не придумывает.</span></label>
+        </fieldset>
+        <fieldset><legend>Вступления в чаты</legend>
+          <label class="field">Выбранные чаты<textarea id="warmupTargets" rows="3" placeholder="@chatname&#10;https://t.me/+invite"></textarea><span class="field__note">Одна ссылка в строке. Без списка этот этап пропускается.</span></label>
+          <div class="warmup__row">
+            <label class="field">Вступлений в сутки<input id="warmupJoins" type="number" min="1" max="10" value="3" required></label>
+            <label class="field">Интервал, минут<input id="warmupGap" type="number" min="30" max="120" value="60" required></label>
+          </div>
+        </fieldset>
+        <fieldset><legend>Истории</legend>
+          <label class="warmup__check"><input id="warmupStories" type="checkbox" checked> Публиковать одну историю в день</label>
+          <label class="field">Кто увидит<select id="warmupPrivacy"><option value="contacts">Мои контакты</option><option value="everyone">Все</option></select></label>
+          <details class="warmup__materials"><summary>Посмотреть материалы сценария</summary><img src="assets/warmup/story.png" alt="Абстрактный пейзаж для историй"><div id="warmupCaptions"></div></details>
+          <p class="field__note">Истории живут 24 часа. Если Telegram не разрешает их публиковать, в плане появится причина пропуска.</p>
+        </fieldset>
+        <fieldset><legend>Подарок себе</legend>
+          <label class="warmup__check"><input id="warmupGift" type="checkbox"> Один платный подарок в конце сценария</label>
+          <label class="field">Максимум Stars с каждого аккаунта<input id="warmupBudget" type="number" min="0" max="1000" value="0"><span class="field__note">По умолчанию траты выключены. При включении выбирается самый дешёвый доступный обычный подарок в пределах лимита; без платного улучшения.</span></label>
+        </fieldset>
+        <p class="field__note">Автопрогрев не гарантирует снятие спамблока. Ограничения Telegram останавливают действия.</p>
+        <button class="btn btn--primary btn--block" type="submit" id="warmupReview">Проверить сценарий</button>
       </form>
+      <div id="warmupPreview" hidden></div>
+      <div id="warmupLaunchActions" hidden>
+        <button class="btn btn--primary btn--block" id="warmupLaunch">Запустить сценарий</button>
+        <button class="btn btn--ghost btn--block" id="warmupBack">Изменить настройки</button>
+      </div>
     </div>
   </div>
   <div class="sheet" id="diagnosticsSheet" role="dialog" aria-modal="true" aria-labelledby="diagnosticsTitle">

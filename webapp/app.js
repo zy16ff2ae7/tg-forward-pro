@@ -284,6 +284,7 @@ const KIND_ICO = {
   mailing: 'ico--teal',
   parser: 'ico--violet',
   autosubscribe: 'ico--teal',
+  warmup: 'ico--teal',
   checks: 'ico--amber',
   dialogs: 'ico--blue',
   baiting: 'ico--violet',
@@ -303,6 +304,7 @@ const KIND_ICON = {
   mailing: 'i-mail',
   parser: 'i-radar',
   autosubscribe: 'i-user-plus',
+  warmup: 'i-spark',
   checks: 'i-receipt',
   dialogs: 'i-chat',
   baiting: 'i-filter',
@@ -345,6 +347,7 @@ const SMART_WORDS = {
   sender: ['пост', 'публик', 'по расписан', 'кажд', 'таймер', 'автопост', 'интервал',
     'рассыл', 'разосл', 'по чатам', 'отправ', 'прогрев', 'спам', 'реклам', 'всем', 'очередь'],
   parser: ['парс', 'собра', 'участник', 'аудитор', 'база', 'юзер', 'подписчик'],
+  warmup: ['прогрев', 'аккаунт', 'истории', 'аватар'],
   autosubscribe: ['подпис', 'вступ', 'войти', 'инвайт', 'присоедин'],
   checks: ['чек', 'подар', 'gift', 'ловец', 'халяв', 'промо'],
   dialogs: ['личк', 'диалог', 'входящ', 'сообщен мне', 'уведомл', 'дм'],
@@ -626,6 +629,8 @@ const DEMO_COMMAND_GROUPS = [
 ];
 
 const DEMO_COMMANDS = [
+  {id:'warmup', group:'audience', kind:'warmup', emoji:'🌱', title:'Автопрогрев', status:'ready', needs:['account'], optional:[],
+    description:'Оформление аккаунтов, чаты и истории по расписанию.', tags:['сценарий по дням','автоматически']},
   { id: 'sender', group: 'own', kind: 'poster', kinds: ['poster', 'mailing'], emoji: '📤', title: 'Постинг и рассылка', status: 'ready',
     needs: ['account', 'targets', 'message'],
     optional: ['send_mode', 'schedule_only', 'scheduled_posts', 'buttons', 'interval', 'start', 'end', 'gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'translate_to', 'uniquify', 'pin_on_send', 'topic', 'autodelete_hours', 'mention_all', 'gap_jitter', 'cycle_jitter', 'shuffle_chats', 'daily_cap', 'alerts', 'subscribe_links', 'join_gap', 'daily_join_limit'],
@@ -1417,6 +1422,31 @@ function demoApi(path, options = {}) {
   const method = (options.method || 'GET').toUpperCase();
   const clean = path.split('?')[0];
   const query = new URLSearchParams(path.split('?')[1] || '');
+  if (clean === '/api/warmup' && method === 'POST') {
+    const body = JSON.parse(options.body || '{}');
+    if (!body.account_ids?.length) throw new Error('Выберите аккаунт');
+    const labels = {avatar:'Аватарка', bio:'Описание', birthday:'Дата рождения', join:'Вступление', story:'История', gift:'Подарок себе'};
+    const accounts = body.account_ids.map(id => {
+      const steps = [], start = new Date(body.start_at).getTime();
+      const add = (kind, delta, values = {}) => steps.push({id:steps.length + 1, kind, label:labels[kind], at:new Date(start + delta * 60000).toISOString(), status:'pending', ...values});
+      if (body.avatar) add('avatar', 0);
+      if (body.bio) add('bio', 5, {text:body.about || 'Заметки, идеи и немного вдохновения.'});
+      if (body.birthday) add('birthday', 10, {birthday:body.birthday});
+      const targets = [...body.targets];
+      for (let day = 0; day < body.days; day++) {
+        for (let n = 0; n < body.daily_joins && targets.length; n++) add('join', day * 1440 + 30 + n * body.gap_minutes, {target:targets.shift()});
+        if (body.stories) add('story', day * 1440 + 30 + body.daily_joins * body.gap_minutes, {text:WARMUP_CAPTIONS[day % WARMUP_CAPTIONS.length]});
+      }
+      if (body.paid_gift && body.gift_budget) add('gift', (body.days - 1) * 1440 + 1380, {budget:body.gift_budget});
+      return {account_id:id, phone:DEMO_ACCOUNTS.find(a => a.id === id)?.phone || String(id), steps};
+    });
+    if (query.get('preview') === '1') return {preview:{days:body.days, accounts, gift_budget_total:body.gift_budget * accounts.length, note:'Демо: действия в Telegram не выполняются.'}};
+    const tasks = accounts.map(account => ({id:Date.now() + account.account_id, title:'Автопрогрев', kind:'warmup', enabled:true, archived:false, account_id:account.account_id,
+      account_online:true, progress:{done:0,total:account.steps.length}, health:{}, created_at:new Date().toISOString(),
+      warmup:{state:'scheduled', days:body.days, done:0, total:account.steps.length, steps:account.steps, next_at:account.steps[0]?.at, next_action:account.steps[0]?.label}}));
+    DEMO_STATE.tasks.push(...tasks);
+    return {tasks};
+  }
   if (clean === '/api/tasks' && method === 'POST' && query.get('preview') === '1') {
     const body = JSON.parse(options.body || '{}');
     const legacy = ['poster', 'mailing'].includes(body.command);
@@ -1580,18 +1610,6 @@ function demoApi(path, options = {}) {
   if (clean === '/api/me') return demoMe();
   if (clean === '/api/commands') return { commands: DEMO_COMMANDS, groups: DEMO_COMMAND_GROUPS };
   if (clean === '/api/accounts') return demoAccounts();
-  const profileMatch = clean.match(/^\/api\/accounts\/(\d+)\/profile$/);
-  if (profileMatch) {
-    const id = profileMatch[1];
-    demoProfiles[id] ||= {first_name:'Анна', last_name:'', about:'Личный профиль', birthday:null, has_photo:false};
-    if (method === 'PATCH') {
-      const changes = JSON.parse(options.body || '{}');
-      Object.assign(demoProfiles[id], changes);
-      if (changes.photo) { demoProfiles[id].has_photo = true; delete demoProfiles[id].photo; }
-      return {applied:Object.keys(changes)};
-    }
-    return {...demoProfiles[id]};
-  }
   if (/^\/api\/accounts\/\d+\/diagnostics$/.test(clean)) return {online:true, last_error:null, service_pause_until:null, note:'Демонстрация: данные Telegram не запрашиваются.', tasks:[]};
   if (clean.startsWith('/api/accounts/login/')) return demoLogin(clean, options);
   const retryMatch = clean.match(/^\/api\/accounts\/(\d+)\/retry$/);
@@ -2880,6 +2898,8 @@ function subscriptionStopped() {
 
 function taskBadge(task) {
   if (task.archived) return { kind: 'done', label: 'завершена' };
+  if (task.warmup?.state === 'review') return {kind:'error', label:'проверьте шаг'};
+  if (task.warmup?.state === 'done') return {kind:'done', label:'завершён'};
   if (!task.enabled) return { kind: 'paused', label: 'пауза' };
   // Кончившийся абонемент — впереди «нет связи»: пересылка выключена целиком,
   // и связь с аккаунтом тут уже ничего не меняет. Иначе карточка писала
@@ -2893,6 +2913,7 @@ function taskBadge(task) {
   if (task.schedule_only) return { kind: 'plan', label: task.scheduled_pending ? 'по расписанию' : 'расписание выполнено' };
   if (task.health && task.health.failing) return { kind: 'error', label: 'сбой' };
   if (task.join_queue && task.join_queue.state) return {kind: task.join_queue.state === 'running' ? 'live' : 'plan', label: {running:'вступает', stopped:'остановлена', done:'обработана'}[task.join_queue.state] || 'очередь'};
+  if (task.warmup) return {kind:task.warmup.state === 'done' ? 'done' : task.warmup.state === 'review' ? 'error' : 'plan', label:{done:'завершён', review:'нужна проверка', running:'выполняется', scheduled:'по плану', paused:'пауза'}[task.warmup.state] || 'сценарий'};
   if (task.oneshot) return { kind: 'plan', label: 'по кнопке' };
   return { kind: 'live', label: 'включена' };
 }
@@ -3150,6 +3171,10 @@ function taskActionsHtml(task) {
     acts.push(`<button class="btn" data-action="unarchive" data-id="${task.id}">${icon('i-refresh')} Из архива</button>`);
   } else {
     acts.push(taskPauseButton(task));
+    if (task.warmup) {
+      acts.push(`<button class="btn" data-action="warmup-plan" data-id="${task.id}">План и прогресс</button>`);
+      if (task.warmup.can_skip) acts.push(`<button class="btn" data-action="warmup-skip" data-id="${task.id}">Пропустить проблемный шаг</button>`);
+    }
     // «Настроить» — вместо «удалить и создать заново»: у пересозданной задачи
     // обнулялись счётчики, а у рассылки терялось место в круге.
     if (task.edit) {
@@ -3204,6 +3229,7 @@ function taskCardHtml(task, options) {
       </div>
       ${taskProgressHtml(task)}
       ${joinQueueHtml(task.join_queue)}
+      ${warmupSummaryHtml(task.warmup)}
       ${taskAlertHtml(task)}
       ${actions}
     </div>`;
@@ -3250,7 +3276,7 @@ function renderTasks(tasks) {
   }
 
   holder.innerHTML = tasks.map(taskCardHtml).join('');
-  if (tasks.some(t => t.join_queue?.state === 'running')) scheduleJoinRefresh();
+  if (tasks.some(t => t.join_queue?.state === 'running' || (t.enabled && t.warmup && t.warmup.state !== 'done'))) scheduleJoinRefresh();
 }
 
 const ACTION_MESSAGES = {
@@ -3286,6 +3312,11 @@ async function refreshAllTaskLists() {
 
 async function taskAction(action, id, button) {
   try {
+    if (action === 'warmup-plan') { openWarmupPlan(id); return; }
+    if (action === 'warmup-skip') {
+      if (!await confirmAction('Проверьте результат шага в Telegram. Пропустить его без повтора?', {title:'Пропустить шаг', label:'Пропустить'})) return;
+      await withLoading(button, () => api(`/api/warmup/${id}/skip`, {method:'POST'}));
+    }
     if (action === 'edit') {
       openTaskEdit(id);
       return;
@@ -4173,7 +4204,7 @@ function accountHtml(account) {
         </div>
         <div class="account__meta"><span>${esc(taskLine)}</span>${seen ? `<span>${esc(seen)}</span>` : ''}</div>
         <div class="account__tools">
-          <button class="btn btn--sm" data-action="profile-account" data-id="${account.id}">Профиль</button>
+          <button class="btn btn--sm" data-action="warmup-account" data-id="${account.id}">🌱 Автопрогрев</button>
           <button class="btn btn--sm" data-action="join-account" data-id="${account.id}">Вступить в чаты</button>
           <button class="btn btn--sm" data-action="diagnose-account" data-id="${account.id}">Диагностика</button>
         </div>
@@ -4182,17 +4213,14 @@ function accountHtml(account) {
       </div>`;
 }
 
-const demoProfiles = {};
-let profileEditing = null;
-let profileGeneration = 0;
 let joinRefreshTimer = null;
 function scheduleJoinRefresh() {
   clearTimeout(joinRefreshTimer);
   joinRefreshTimer = setTimeout(async () => {
     try { await refreshAllTaskLists(); } finally {
-      if (Object.values(state.tasksByStatus).some(rows => rows.some(t => t.join_queue?.state === 'running'))) scheduleJoinRefresh();
+      if (Object.values(state.tasksByStatus).some(rows => rows.some(t => t.join_queue?.state === 'running' || (t.enabled && t.warmup && t.warmup.state !== 'done')))) scheduleJoinRefresh();
     }
-  }, 5000);
+  }, Object.values(state.tasksByStatus).some(rows => rows.some(t => t.join_queue?.state === 'running')) ? 5000 : 30000);
 }
 function joinQueueHtml(queue) {
   if (!queue || !queue.state) return '';
@@ -4207,71 +4235,97 @@ function joinQueueHtml(queue) {
     ${Object.entries(queue.items || {}).map(([chat, item]) => `<p>${esc(chat)} — ${esc(names[item.status] || item.status)}${item.code ? ` · ${esc(item.code)}` : ''}</p>`).join('')}</details>
   </div>`;
 }
-async function openAccountProfile(account) {
-  const generation = ++profileGeneration;
-  profileEditing = null;
-  $('profileForm').hidden = true;
-  $('profileStatus').textContent = 'Загружаем профиль из Telegram…';
-  $('profileTitle').textContent = `Профиль · ${account.phone}`;
-  $('profileSheet').classList.add('is-open');
-  try {
-    const profile = await api(`/api/accounts/${account.id}/profile`);
-    if (generation !== profileGeneration) return;
-    profileEditing = {id: account.id, profile};
-    $('profileFirst').value = profile.first_name;
-    $('profileLast').value = profile.last_name;
-    $('profileAbout').value = profile.about;
-    $('profileDay').value = profile.birthday?.day || '';
-    $('profileMonth').value = profile.birthday?.month || '';
-    $('profileYear').value = profile.birthday?.year || '';
-    $('profilePhoto').value = '';
-    $('profileStatus').textContent = profile.has_photo ? 'Фото уже установлено. Можно выбрать новое.' : 'Фото пока нет.';
-    $('profileForm').hidden = false;
-    $('profileFirst').focus();
-  } catch (error) { if (generation === profileGeneration) $('profileStatus').textContent = error.message; }
+let warmupGeneration = 0;
+let warmupDraft = null;
+const WARMUP_CAPTIONS = ['Пауза тоже часть пути.', 'Пусть сегодня найдётся время для простого.', 'Иногда достаточно замедлиться и посмотреть вокруг.', 'Небольшие шаги тоже ведут вперёд.', 'Хороший момент не обязательно должен быть громким.', 'Побольше воздуха, поменьше спешки.', 'Оставим место для новых идей.'];
+
+function warmupSummaryHtml(plan) {
+  if (!plan) return '';
+  return `<div class="queue__report"><p>${plan.done} из ${plan.total} действий · ${plan.days} дн.</p>
+    ${plan.next_at ? `<p>${esc(plan.next_action)} · ${esc(new Date(plan.next_at).toLocaleString('ru-RU'))}</p>` : ''}
+    ${plan.note ? `<p>${esc(plan.note)}</p>` : ''}
+    ${plan.gift_budget ? `<p>Подарки: потрачено ${plan.spent || 0} из ${plan.gift_budget} Stars</p>` : ''}</div>`;
 }
-async function saveAccountProfile(event) {
+function warmupStepsHtml(steps) {
+  const names = {pending:'запланировано', done:'выполнено', skipped:'пропущено', waiting:'ожидание', running:'выполняется', blocked:'остановлено', uncertain:'нужна проверка'};
+  return `<ol class="warmup__timeline">${steps.map(step => `<li>
+    <strong>${esc(step.label)}</strong> · ${esc(new Date(step.at).toLocaleString('ru-RU'))}
+    <div>${esc(names[step.status] || step.status)}${step.target ? ' · ' + esc(step.target) : ''}</div>
+    ${step.text ? `<p>${esc(step.text)}</p>` : ''}
+    ${step.birthday ? `<p>${step.birthday.day}.${step.birthday.month}${step.birthday.year ? '.' + step.birthday.year : ''}</p>` : ''}
+    ${step.budget ? `<p>Не дороже ${step.budget} Stars, один подарок себе</p>` : ''}
+    ${step.note ? `<p>${esc(step.note)}</p>` : ''}</li>`).join('')}</ol>`;
+}
+function openWarmupPlan(id) {
+  const task = Object.values(state.tasksByStatus).flat().find(t => Number(t.id) === Number(id));
+  if (!task?.warmup) return;
+  $('diagnosticsTitle').textContent = 'План автопрогрева';
+  $('diagnosticsBody').innerHTML = warmupSummaryHtml(task.warmup) + warmupStepsHtml(task.warmup.steps);
+  $('diagnosticsSheet').classList.add('is-open');
+}
+function openWarmupSheet(accountId) {
+  if (!state.accounts.length) { toast('Сначала подключите Telegram-аккаунт'); openLoginSheet(); return; }
+  warmupGeneration += 1;
+  const start = new Date(Date.now() + 5 * 60000);
+  start.setSeconds(0, 0);
+  warmupDraft = {key:window.crypto?.randomUUID ? window.crypto.randomUUID() : `warmup_${Date.now()}_${Math.random().toString(36).slice(2)}`};
+  $('warmupAccounts').innerHTML = state.accounts.map(a => `<label class="warmup__check"><input type="checkbox" value="${a.id}" ${Number(a.id) === Number(accountId || state.accounts[0].id) ? 'checked' : ''}>${esc(a.phone)} · ${a.online ? 'на связи' : 'офлайн'}</label>`).join('');
+  $('warmupForm').reset();
+  $('warmupStart').value = new Date(start.getTime() - start.getTimezoneOffset() * 60000).toISOString().slice(0,16);
+  $('warmupCaptions').innerHTML = WARMUP_CAPTIONS.map(text => `<p>${esc(text)}</p>`).join('');
+  $('warmupForm').hidden = false;
+  $('warmupPreview').hidden = true;
+  $('warmupLaunchActions').hidden = true;
+  $('warmupStatus').textContent = '';
+  $('warmupSheet').classList.add('is-open');
+}
+async function reviewWarmup(event) {
   event.preventDefault();
-  if (!profileEditing) return;
-  const editing = profileEditing;
-  let submitted = false;
-  await withLoading($('profileSave'), async () => {
+  const generation = warmupGeneration;
+  await withLoading($('warmupReview'), async () => {
     try {
-      const body = {};
-      for (const [key, id] of [['first_name','profileFirst'],['last_name','profileLast'],['about','profileAbout']]) {
-        if ($(id).value !== editing.profile[key]) body[key] = $(id).value;
-      }
-      const day = $('profileDay').value, month = $('profileMonth').value, year = $('profileYear').value;
-      if ((day || month || year) && (!day || !month)) throw new Error('Укажите день и месяц рождения');
-      const birthday = day && month ? {day:Number(day), month:Number(month), year:year ? Number(year) : null} : null;
-      if (JSON.stringify(birthday) !== JSON.stringify(editing.profile.birthday)) body.birthday = birthday;
-      const file = $('profilePhoto').files[0];
-      if (file) {
-        if (!['image/jpeg','image/png'].includes(file.type) || file.size > 512 * 1024) throw new Error('Выберите JPEG/PNG до 512 КБ');
-        body.photo = await new Promise((resolve, reject) => {
-          const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]);
-          reader.onerror = () => reject(new Error('Не удалось прочитать фото')); reader.readAsDataURL(file);
-        });
-      }
-      if (!Object.keys(body).length) { toast('Изменений нет'); return; }
-      const labels = {first_name:'Имя', last_name:'Фамилия', about:'О себе', birthday:'Дата рождения', photo:'Фото'};
-      const summary = Object.entries(body).map(([key, value]) => `${labels[key]}: ${key === 'photo' ? file.name : key === 'birthday' ? (value ? `${value.day}.${value.month}${value.year ? '.' + value.year : ''}` : 'убрать') : value || 'очистить'}`).join('\n');
-      if (!await confirmAction(summary, {title:'Сохранить профиль в Telegram?', label:'Сохранить'})) return;
-      submitted = true;
-      await api(`/api/accounts/${editing.id}/profile`, {method:'PATCH', body:JSON.stringify(body)});
-      if (profileEditing !== editing) return;
-      $('profileStatus').textContent = 'Изменения сохранены в Telegram';
-      editing.profile = {...editing.profile, ...body}; delete editing.profile.photo;
-      $('profilePhoto').value = '';
-      toast('Профиль сохранён');
-    } catch (error) {
-      if (profileEditing !== editing) return;
-      $('profileStatus').textContent = error.message + (submitted ? ' Закройте и заново откройте профиль, чтобы проверить сохранённые данные.' : '');
-      if (submitted) { profileEditing = null; $('profileForm').hidden = true; }
-    }
+      const birthday = $('warmupBirthday').value;
+      const [year, month, day] = birthday ? birthday.split('-').map(Number) : [];
+      const payload = {request_key:warmupDraft.key,
+        account_ids:[...$('warmupAccounts').querySelectorAll('input:checked')].map(n => Number(n.value)),
+        days:Number($('warmupDays').value), daily_joins:Number($('warmupJoins').value), gap_minutes:Number($('warmupGap').value),
+        start_at:new Date($('warmupStart').value).toISOString(), avatar:$('warmupAvatar').checked, bio:$('warmupBio').checked,
+        about:$('warmupAbout').value, birthday:birthday ? {day, month, year} : null,
+        targets:$('warmupTargets').value.split(/[\n,;]+/).map(s => s.trim()).filter(Boolean),
+        stories:$('warmupStories').checked, story_privacy:$('warmupPrivacy').value,
+        paid_gift:$('warmupGift').checked, gift_budget:Number($('warmupBudget').value)};
+      const data = await api('/api/warmup?preview=1', {method:'POST', body:JSON.stringify(payload)});
+      if (generation !== warmupGeneration) return;
+      warmupDraft.payload = payload;
+      $('warmupPreview').innerHTML = `<h3>План на ${data.preview.days} дней</h3><p>${esc(data.preview.note)}</p>
+        <p>Максимальные траты: <b>${data.preview.gift_budget_total} Stars</b> на все выбранные аккаунты.</p>
+        ${data.preview.accounts.map((a,i) => `<details ${i === 0 ? 'open' : ''}><summary>${esc(a.phone)} · ${a.steps.length} действий</summary>${warmupStepsHtml(a.steps)}</details>`).join('')}`;
+      $('warmupForm').hidden = true;
+      $('warmupPreview').hidden = false;
+      $('warmupLaunchActions').hidden = false;
+      $('warmupStatus').textContent = 'Проверьте действия, материалы и время перед запуском.';
+      $('warmupSheet').querySelector('.sheet__panel').scrollTop = 0;
+    } catch (error) { if (generation === warmupGeneration) $('warmupStatus').textContent = error.message; }
   });
 }
+async function launchWarmup() {
+  const generation = warmupGeneration;
+  const payload = warmupDraft?.payload;
+  if (!payload) return;
+  await withLoading($('warmupLaunch'), async () => {
+    try {
+      const result = await api('/api/warmup', {method:'POST', body:JSON.stringify(payload)});
+      if (generation !== warmupGeneration) { await refreshAllTaskLists(); return; }
+      closeSheets();
+      toast(`Автопрогрев запланирован: ${result.tasks.length} акк.`);
+      await refreshAllTaskLists();
+      switchTab('tasks');
+    } catch (error) { if (generation === warmupGeneration) $('warmupStatus').textContent = error.message; }
+  });
+}
+
 async function openAccountDiagnostics(account) {
+  $('diagnosticsTitle').textContent = 'Диагностика аккаунта';
   $('diagnosticsSheet').classList.add('is-open');
   $('diagnosticsBody').textContent = 'Загрузка…';
   try {
@@ -5245,6 +5299,7 @@ function renderTaskDraftBar() {
 }
 
 function openTaskSheet(command, prefill, task) {
+  if (command?.kind === 'warmup') { openWarmupSheet(prefill?.account_id); return; }
   if (!state.features.account_login_enabled) {
     toast('Вход аккаунтов пока на настройке');
     switchTab('accounts');
@@ -6245,7 +6300,7 @@ function closePicker() {
 }
 
 function closeSheets() {
-  profileGeneration += 1;
+  warmupGeneration += 1;
   stopLoginResendTimer();
   if ($('confirmSheet') && $('confirmSheet').classList.contains('is-open')) resolveConfirm(false);
   const loginWasOpen = $('loginSheet').classList.contains('is-open');
@@ -7334,7 +7389,7 @@ function bindEvents() {
     if (!button) return;
     const account = state.accounts.find((item) => item.id === Number(button.dataset.id));
     if (button.dataset.action === 'resume-login') openLoginSheet();
-    else if (button.dataset.action === 'profile-account') openAccountProfile(account);
+    else if (button.dataset.action === 'warmup-account') openWarmupSheet(account.id);
     else if (button.dataset.action === 'diagnose-account') openAccountDiagnostics(account);
     else if (button.dataset.action === 'join-account') openTaskSheet(state.commands.find(c => c.id === 'autosubscribe'), {account_id: account.id, join_retries: 0});
     else if (button.dataset.action === 'retry-account') retryAccount(button.dataset.id, button);
@@ -7344,7 +7399,9 @@ function bindEvents() {
       deleteAccount(button.dataset.id, button);
     }
   });
-  $('profileForm').addEventListener('submit', saveAccountProfile);
+  $('warmupForm').addEventListener('submit', reviewWarmup);
+  $('warmupLaunch').addEventListener('click', launchWarmup);
+  $('warmupBack').addEventListener('click', () => { $('warmupForm').hidden = false; $('warmupPreview').hidden = true; $('warmupLaunchActions').hidden = true; });
   $('loginSubmit').addEventListener('click', submitLogin);
   $('loginInput').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {

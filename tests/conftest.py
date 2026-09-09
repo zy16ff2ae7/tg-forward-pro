@@ -49,9 +49,11 @@ async def database():
 @pytest.fixture(autouse=True)
 async def join_queue_per_test(database):
     """Background jobs must finish before their database and event loop disappear."""
-    from app import join_queue
+    from app import join_queue, warmup
     join_queue._rule_locks.clear()
+    warmup._create_locks.clear()
     yield
+    await warmup.cancel_inactive(set())
     await join_queue.cancel_inactive(set())
     join_queue._rule_locks.clear()
 

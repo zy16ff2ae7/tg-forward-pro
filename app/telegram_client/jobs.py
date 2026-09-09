@@ -70,7 +70,7 @@ ONE_SHOT_KINDS: tuple[str, ...] = ("parser", "autosubscribe")
 # Запускаются ТОЛЬКО вручную: у таких задач нет обработчика входящих сообщений,
 # поэтому они не должны попадать в кэш «слушающих» правил. Иначе каждое
 # сообщение в источнике звало бы run_job и писало «Неизвестный тип задачи».
-MANUAL_ONLY_KINDS: tuple[str, ...] = ("parser",)
+MANUAL_ONLY_KINDS: tuple[str, ...] = ("parser", "warmup")
 
 # Живут по расписанию планировщика, а не по входящим сообщениям
 SCHEDULED_KINDS: tuple[str, ...] = ("poster", "mailing")
@@ -91,6 +91,7 @@ KIND_LABELS: dict[str, str] = {
     "checks": "ловец чеков",
     "parser": "парсер аудитории",
     "autosubscribe": "автоподписка",
+    "warmup": "автопрогрев",
     # Постинг и рассылка обе шлют ваш текст по чатам, поэтому в ярлык вынесено
     # отличие: у постинга расписание, у рассылки обход чатов по одному.
     "poster": "постинг по расписанию",
@@ -170,6 +171,8 @@ def task_title(rule: Any) -> str:
     source = getattr(rule, "source_title", None) or str(getattr(rule, "source_id", "") or "")
     target = getattr(rule, "target_title", None) or str(getattr(rule, "target_id", "") or "")
 
+    if kind == "warmup":
+        return f"Автопрогрев · {filters.get('warmup', {}).get('days', 7)} дн."
     if kind == "parser":
         return f"Парсер аудитории: {source}"
     if kind == "autosubscribe":

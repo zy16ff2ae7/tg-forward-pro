@@ -28,6 +28,10 @@ def edit_guard(handler):
     return guarded
 
 
+def busy_account(account_id: int) -> bool:
+    return any(not task.done() and account == account_id for task, account in _jobs.values())
+
+
 def running(rule_id: int) -> bool:
     item = _jobs.get(rule_id)
     return bool(item and not item[0].done())
@@ -79,6 +83,9 @@ def completed_targets() -> set[str]:
 
 
 async def start(manager: Any, rule: Any) -> dict[str, Any]:
+    from app import warmup
+    if warmup.busy_account(rule.account_id):
+        return {"ok": False, "error": "На аккаунте выполняется шаг автопрогрева"}
     if running(rule.id):
         return {"ok": True, "queued": True}
     if any(not task.done() and account_id == rule.account_id for task, account_id in _jobs.values()):
@@ -94,6 +101,8 @@ async def start(manager: Any, rule: Any) -> dict[str, Any]:
         return {"ok": True, "queued": True}
     if any(not task.done() and account_id == rule.account_id for task, account_id in _jobs.values()):
         return {"ok": False, "error": "На этом аккаунте уже идёт очередь вступлений"}
+    if warmup.busy_account(rule.account_id):
+        return {"ok": False, "error": "На аккаунте выполняется шаг автопрогрева"}
     report = view(rule)
     if float(report.get("retry_timestamp") or 0) > time.time():
         return {"ok": False, "error": "Telegram просит подождать до " + str(report.get("retry_at"))}

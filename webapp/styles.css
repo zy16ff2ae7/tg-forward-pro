@@ -3825,11 +3825,28 @@ button, input, select, textarea { -webkit-font-smoothing: antialiased; }
 
 /* Account setup and join progress */
 .account__tools { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
-.profile__birthday { display:grid; grid-template-columns:1fr 1fr 1.4fr; gap:8px; }
-.profile__birthday input { width:100%; min-width:0; }
-#profileForm[hidden] { display:none; }
-#profileForm fieldset { border:0; padding:0; margin:0; min-width:0; }
-#profileStatus { white-space:pre-wrap; }
+.warmup__birthday { display:grid; grid-template-columns:1fr 1fr 1.4fr; gap:8px; }
+.warmup__birthday input { width:100%; min-width:0; }
+#warmupForm[hidden] { display:none; }
+#warmupForm fieldset { border:0; padding:0; margin:0; min-width:0; }
+#warmupStatus { white-space:pre-wrap; }
 .queue__report { padding:12px; font-size:13px; overflow-wrap:anywhere; }
 .queue__report details { max-height:260px; overflow:auto; }
 .queue__report p { margin:6px 0; }
+
+#warmupForm[hidden], #warmupPreview[hidden], #warmupLaunchActions[hidden] { display:none; }
+#warmupForm fieldset { border:1px solid rgba(255,255,255,.1); border-radius:14px; padding:12px; margin:0; min-width:0; }
+#warmupForm legend { font-weight:600; padding:0 6px; }
+.warmup__row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.warmup__row input { min-width:0; width:100%; }
+.warmup__check { display:flex; align-items:center; gap:10px; padding:10px 0; font-size:14px; }
+.warmup__check input { width:20px; height:20px; flex-shrink:0; }
+.warmup__preset { display:flex; align-items:center; gap:12px; font-size:12px; color:var(--muted); margin:10px 0; }
+.warmup__preset img { width:64px; height:64px; object-fit:cover; border-radius:50%; }
+.warmup__materials img { width:120px; border-radius:12px; margin:12px 0; }
+.warmup__materials p { font-size:13px; }
+.warmup__timeline { padding-left:24px; font-size:13px; }
+.warmup__timeline li { margin:12px 0; padding-bottom:8px; border-bottom:1px solid rgba(255,255,255,.08); overflow-wrap:anywhere; }
+.warmup__timeline p { margin:4px 0; color:var(--muted); }
+#warmupPreview details { margin:14px 0; }
+#warmupLaunchActions { display:grid; gap:8px; padding-top:12px; }
