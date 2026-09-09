@@ -89,6 +89,13 @@ ssh "$TARGET_HOST" "mkdir -p $APP_DIR/data $APP_DIR/logs $BACKUP_DIR \
   && chmod 700 $APP_DIR/data $APP_DIR/logs $BACKUP_DIR \
   && find $APP_DIR/data $APP_DIR/logs $BACKUP_DIR -type f -exec chmod 600 {} + 2>/dev/null || true"
 
+# Some rsync implementations reapply source modes to unchanged files even with
+# --chmod. Normalize every public code file, including empty package __init__.py.
+# Keep this explicit allowlist separate from .env, data and logs.
+echo "==> Права чтения файлов приложения"
+ssh "$TARGET_HOST" "find $APP_DIR/app $APP_DIR/webapp $APP_DIR/assets $APP_DIR/scripts $APP_DIR/deploy -type d -exec chmod 755 {} + \
+  && find $APP_DIR/app $APP_DIR/webapp $APP_DIR/assets $APP_DIR/scripts $APP_DIR/deploy -type f -exec chmod a+r {} +"
+
 echo "==> Устанавливаю systemd-юнит"
 ssh "$TARGET_HOST" "cp $APP_DIR/deploy/$SERVICE_NAME.service /etc/systemd/system/ \
   && cp $APP_DIR/deploy/$SERVICE_NAME-backup.service $APP_DIR/deploy/$SERVICE_NAME-backup.timer /etc/systemd/system/ \
