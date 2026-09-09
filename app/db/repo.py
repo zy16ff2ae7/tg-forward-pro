@@ -2446,12 +2446,13 @@ async def task_health(
             "failing": False,
         }
 
-    # Последний сбой каждой задачи: строку выбираем по наибольшему id, а не по
-    # времени, — id растёт монотонно, а две записи одной секунды по времени
-    # неразличимы.
+    # Последний сбой каждой задачи: информационные события (например, старт
+    # шага автопрогрева) не должны превращать здоровую задачу в «сломана».
+    # Строку выбираем по наибольшему id, а не по времени, — id растёт
+    # монотонно, а две записи одной секунды по времени неразличимы.
     newest = (
         select(func.max(ForwardLog.id))
-        .where(ForwardLog.rule_id.in_(ids), ForwardLog.status != "ok")
+        .where(ForwardLog.rule_id.in_(ids), ForwardLog.status == "error")
         .group_by(ForwardLog.rule_id)
     )
     errors = await session.execute(select(ForwardLog).where(ForwardLog.id.in_(newest)))

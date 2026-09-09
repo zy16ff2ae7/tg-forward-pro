@@ -76,7 +76,7 @@ def normalize(body: Any, *, now: float) -> dict:
     gap_minutes = _integer(body, "gap_minutes", 60, 30, 120)
     budget = _integer(body, "gift_budget", 0, 0, 1000)
     toggles = {}
-    for key, default in (("avatar", True), ("bio", True), ("stories", True),
+    for key, default in (("avatar", True), ("bio", True), ("stories", False),
                          ("random_birthday", True), ("paid_gift", False)):
         value = body.get(key, default)
         if type(value) is not bool:
@@ -137,7 +137,10 @@ def build(config: dict, account_id: int) -> list[dict]:
     steps = []
     start = config["start_at"]
     def add(kind: str, at: float, **values: Any) -> None:
-        steps.append({"id": len(steps) + 1, "kind": kind, "due_at": at, "status": "pending", **values})
+        # ``planned_at`` never changes. ``due_at`` may move when Telegram asks
+        # us to wait, so the journal can show both times honestly.
+        steps.append({"id": len(steps) + 1, "kind": kind, "planned_at": at,
+                      "due_at": at, "status": "pending", "attempts": 0, **values})
     if config["avatar"]:
         add("avatar", start)
     if config["bio"]:
@@ -165,6 +168,10 @@ def build(config: dict, account_id: int) -> list[dict]:
 
 def public_steps(steps: list[dict]) -> list[dict]:
     return [{"id": s["id"], "kind": s["kind"], "label": STEP_LABELS[s["kind"]],
-             "at": iso(s["due_at"]), "status": s["status"], "target": s.get("target"),
+             "at": iso(s["due_at"]), "planned_at": iso(s.get("planned_at", s["due_at"])),
+             "started_at": iso(s["started_at"]) if s.get("started_at") else None,
+             "finished_at": iso(s["finished_at"]) if s.get("finished_at") else None,
+             "attempts": int(s.get("attempts") or 0),
+             "status": s["status"], "target": s.get("target"),
              "text": s.get("text"), "birthday": s.get("birthday"), "note": s.get("note"),
              "budget": s.get("budget"), "spent": s.get("spent", 0)} for s in steps]

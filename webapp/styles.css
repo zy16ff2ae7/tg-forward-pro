@@ -3183,6 +3183,7 @@ button, input, select, textarea { -webkit-font-smoothing: antialiased; }
   font-weight: 800;
 }
 .journal-row--ok { color: #7be3b4; }
+.journal-row--info { color: #9ecbff; }
 .journal-row--error { color: #ff9eb0; }
 .journal-row__body { min-width: 0; flex: 1; }
 .journal-row__title { color: #edf1f8; font-size: 12.5px; font-weight: 700; }
@@ -3849,4 +3850,7 @@ button, input, select, textarea { -webkit-font-smoothing: antialiased; }
 .warmup__timeline li { margin:12px 0; padding-bottom:8px; border-bottom:1px solid rgba(255,255,255,.08); overflow-wrap:anywhere; }
 .warmup__timeline p { margin:4px 0; color:var(--muted); }
 #warmupPreview details { margin:14px 0; }
+.warmup-journal { margin-bottom:18px; }
+.warmup-journal > summary { margin:14px 0; font-weight:700; cursor:pointer; }
+.journal__heading { margin:4px 0 10px; }
 #warmupLaunchActions { display:grid; gap:8px; padding-top:12px; }

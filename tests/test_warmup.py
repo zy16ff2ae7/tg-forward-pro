@@ -10,6 +10,7 @@ from telethon.errors import FloodWaitError
 from telethon.tl import types, functions
 
 from app import warmup, warmup_plan
+from app.db import repo
 from app.db.database import session_scope
 from app.db.models import Rule
 from app.errors import AppError, ConflictError, ValidationError
@@ -32,17 +33,20 @@ def test_reject_invalid_plans(values):
         config(**values)
 
 
-def test_default_plan_has_stable_adult_birthday_and_no_paid_actions():
+def test_default_plan_has_stable_adult_birthday_and_optional_actions_off():
     cfg = config()
     plan = warmup_plan.build(cfg, 1)
-    assert [s['kind'] for s in plan] == ['avatar','bio','birthday'] + ['story'] * 7
+    assert [s['kind'] for s in plan] == ['avatar','bio','birthday']
+    assert cfg['stories'] is False
     birthday = next(s['birthday'] for s in plan if s['kind'] == 'birthday')
     assert 24 <= datetime.fromtimestamp(cfg['start_at']).year - birthday['year'] <= 43
     assert warmup_plan.build(cfg, 1)[2]['birthday'] == birthday
     assert warmup_plan.build(cfg, 2)[2]['birthday'] != birthday
-    assert all(s['privacy'] == 'contacts' for s in plan if s['kind'] == 'story')
-    assert len({s['random_id'] for s in plan if s['kind'] == 'story'}) == 7
-    assert 'random_id' not in str(warmup_plan.public_steps(plan))
+    story_plan = warmup_plan.build({**cfg, 'stories': True}, 1)
+    assert all(s['privacy'] == 'contacts' for s in story_plan if s['kind'] == 'story')
+    assert len({s['random_id'] for s in story_plan if s['kind'] == 'story'}) == 7
+    assert 'random_id' not in str(warmup_plan.public_steps(story_plan))
+    assert all(step['planned_at'] == step['due_at'] and step['attempts'] == 0 for step in plan)
 
 
 def test_explicit_birthday_replaces_random_one():
@@ -51,7 +55,7 @@ def test_explicit_birthday_replaces_random_one():
 
 
 def test_story_follows_actual_joins_instead_of_unused_slots():
-    cfg = config(days=1, daily_joins=10, gap_minutes=60, targets=['@one'])
+    cfg = config(days=1, daily_joins=10, gap_minutes=60, targets=['@one'], stories=True)
     plan = warmup_plan.build(cfg, 1)
     joined = next(s for s in plan if s['kind'] == 'join')
     story = next(s for s in plan if s['kind'] == 'story')
@@ -91,7 +95,13 @@ async def test_bulk_preview_ownership_create_replay_and_paused_duplicate(
     assert created.status == 201, await created.text()
     tasks = (await created.json())['tasks']
     assert len(tasks) == 2
-    assert tasks[0]['warmup']['total'] == 10
+    assert tasks[0]['warmup']['total'] == 3
+    journal = await client.get(f"/api/tasks/{tasks[0]['id']}/journal", headers=auth_headers)
+    assert journal.status == 200
+    journal_body = await journal.json()
+    assert journal_body['warmup']['total'] == 3
+    assert journal_body['items'][0]['status'] == 'info'
+    assert 'Сценарий запланирован' in journal_body['items'][0]['error']
     replay = await client.post('/api/warmup', json=body, headers=auth_headers)
     assert replay.status == 200
     assert (await replay.json())['replayed']
@@ -140,8 +150,35 @@ async def test_durable_done_and_no_repetition(create_user, create_account, monke
     manager = fake_manager(monkeypatch)
     await warmup._run_step(manager, rule.id, rule.user_id)
     await warmup._run_step(manager, rule.id, rule.user_id)
-    assert (await stored(rule)).filters['warmup_steps'][0]['status'] == 'done'
+    step = (await stored(rule)).filters['warmup_steps'][0]
+    assert step['status'] == 'done'
+    assert step['attempts'] == 1
+    assert step['started_at'] <= step['finished_at']
+    async with session_scope() as session:
+        events = list(await repo.rule_logs(session, rule.id, rule.user_id))
+    assert [event.status for event in reversed(events)] == ['info', 'ok']
+    assert 'Начато: Описание' in events[-1].error
+    assert 'Выполнено: Описание' in events[0].error
     execute.assert_awaited_once()
+
+
+async def test_resumed_attempt_clears_previous_finished_time(create_user, create_account):
+    rule = await make_rule(
+        create_user,
+        create_account,
+        status='blocked',
+        attempts=1,
+        started_at=100.0,
+        finished_at=200.0,
+        note='Старая ошибка',
+    )
+
+    await warmup._mark(rule, 1, status='running', note='Выполняется снова')
+
+    step = (await stored(rule)).filters['warmup_steps'][0]
+    assert step['attempts'] == 2
+    assert step['started_at'] > 200.0
+    assert 'finished_at' not in step
 
 
 @pytest.mark.parametrize('values', [{'status':'running'}, {'payment_started':True}])

@@ -25,6 +25,7 @@ ASSETS = Path(__file__).resolve().parent.parent / "webapp" / "assets" / "warmup"
 _workers: dict[int, tuple[asyncio.Task, int]] = {}
 _create_locks: dict[int, asyncio.Lock] = {}
 TERMINAL = {"done", "skipped"}
+JOURNAL_STATUSES = {"running", "done", "skipped", "waiting", "blocked", "uncertain"}
 
 
 class Deferred(Exception):
@@ -94,25 +95,57 @@ async def _mark(rule: Rule, step_id: int, *, disable: bool = False, **values: An
             raise ConflictError("Сценарий остановлен — оплата отменена")
         raw = dict(stored.filters or {})
         steps = [dict(s) for s in raw.get("warmup_steps", [])]
+        event = None
+        now = time.time()
         for step in steps:
             if step["id"] == step_id:
+                previous = {key: step.get(key) for key in ("status", "note", "due_at")}
                 step.update(values)
+                status = values.get("status")
+                if status == "running":
+                    step["started_at"] = now
+                    # A manually resumed blocked attempt has its own event in
+                    # ForwardLog.  Keeping the old completion here would make
+                    # the current attempt appear finished before it started.
+                    step.pop("finished_at", None)
+                    step["attempts"] = int(step.get("attempts") or 0) + 1
+                if status in TERMINAL | {"blocked", "uncertain"}:
+                    step["finished_at"] = now
+                step["updated_at"] = now
                 if values.get("status") in TERMINAL:
-                    raw["warmup_last_action"] = time.time()
+                    raw["warmup_last_action"] = now
                     if step["kind"] == "join":
-                        raw["warmup_last_join"] = time.time()
+                        raw["warmup_last_join"] = now
                     if step["kind"] == "story":
-                        raw["warmup_last_story"] = time.time()
+                        raw["warmup_last_story"] = now
+                if status in JOURNAL_STATUSES and any(
+                    previous[key] != step.get(key) for key in previous
+                ):
+                    event = dict(step)
                 break
         raw["warmup_steps"] = steps
         stored.filters = raw
         if disable:
             stored.enabled = False
-        if values.get("status") in TERMINAL | {"blocked", "uncertain"}:
+        if event is not None:
+            status = event["status"]
+            label = warmup_plan.STEP_LABELS.get(event["kind"], event["kind"])
+            target = f" · {event['target']}" if event.get("target") else ""
+            note = str(event.get("note") or "Без пояснения")
+            prefixes = {
+                "running": "▶️ Начато",
+                "done": "✅ Выполнено",
+                "skipped": "⏭ Пропущено",
+                "waiting": "⏳ Перенесено",
+                "blocked": "⛔ Остановлено",
+                "uncertain": "⚠️ Нужна проверка",
+            }
+            if status == "waiting":
+                note += f" · следующая попытка {warmup_plan.iso(float(event['due_at']))}"
             await repo.log_forward(session, rule_id=rule.id, user_id=rule.user_id,
                 source_msg_id=0, target_msg_id=None,
-                status="ok" if values.get("status") in TERMINAL else "error",
-                error=values.get("note"))
+                status="ok" if status == "done" else "error" if status in {"blocked", "uncertain"} else "info",
+                error=f"{prefixes[status]}: {label}{target} — {note}")
         await session.commit()
 
 

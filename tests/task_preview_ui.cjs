@@ -11,6 +11,7 @@ function element(id) {
 const context = vm.createContext({ window: {}, location: { search: '?demo=1' }, URLSearchParams,
   document: { getElementById: element }, console, setTimeout, clearTimeout });
 const source = fs.readFileSync(path.join(__dirname, '../webapp/app.js'), 'utf8');
+const markup = fs.readFileSync(path.join(__dirname, '../webapp/index.html'), 'utf8');
 vm.runInContext(source.replace(/boot\(\);\s*$/, ''), context);
 const run = code => vm.runInContext(code, context);
 (async () => {
@@ -27,6 +28,11 @@ const run = code => vm.runInContext(code, context);
   assert.equal(run("taskBadge({enabled:true, warmup:{state:'scheduled'}}).label"), 'по плану');
   assert.equal(run("taskBadge({enabled:false, warmup:{state:'review'}}).label"), 'проверьте шаг');
   assert(!source.includes('profile-account'));
+  assert.match(markup, /id="warmupStories" type="checkbox">/);
+  assert.doesNotMatch(markup, /id="warmupStories" type="checkbox" checked/);
+  assert.match(run("journalRowHtml({status:'info', error:'Шаг запланирован', created_at:'2026-09-09T10:00:00Z'}, 'warmup')"), /Ход выполнения/);
+  assert.match(run("journalRowHtml({status:'ok', error:'Описание заполнено', created_at:'2026-09-09T10:00:00Z'}, 'warmup')"), /Описание заполнено/);
+  assert.match(run("warmupStepsHtml([{label:'История',status:'waiting',planned_at:'2026-09-09T10:00:00Z',at:'2026-09-09T11:00:00Z',attempts:1,note:'Premium required'}])"), /Следующая попытка/);
   const count = run('DEMO_STATE.tasks.length');
   const review = run("reviewTaskBeforeStart({command:'mailing', targets:['@test'], message:'Текст'})");
   await new Promise(setImmediate);

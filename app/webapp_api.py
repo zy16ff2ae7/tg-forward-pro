@@ -1906,7 +1906,7 @@ async def stop_join_task(request):
 @routes.get(r"/api/tasks/{task_id:\d+}/journal")
 @require_auth
 async def task_journal(request: web.Request) -> web.Response:
-    """Последние отправки задачи: успехи и честные ошибки поштучно."""
+    """Последние действия задачи и подробный план автопрогрева."""
     user_id = request[USER_ID_KEY]
     task_id = int(request.match_info["task_id"])
     limit = max(1, min(_as_int(request.query.get("limit"), 50), 100))
@@ -1925,6 +1925,9 @@ async def task_journal(request: web.Request) -> web.Response:
 
     return _json({
         "kind": rule.kind,
+        # This makes a new warmup journal useful before the first action and
+        # exposes the original, actual and deferred times from durable state.
+        "warmup": warmup.report(rule) if rule.kind == "warmup" else None,
         "total": total,
         "offset": offset,
         "has_more": offset + len(rows) < total,
@@ -2701,6 +2704,7 @@ async def list_accounts(request: web.Request) -> web.Response:
 @require_auth
 async def warmup_preset(request):
     return _json({"days": 7, "daily_joins": 3, "gap_minutes": 60, "gift_budget": 0,
+                  "stories": False,
                   "avatar_url": "/app/assets/warmup/avatar.png", "story_url": "/app/assets/warmup/story.png",
                   "bios": list(warmup_plan.BIOS), "captions": list(warmup_plan.CAPTIONS)})
 
@@ -2735,9 +2739,13 @@ async def _create_warmup(request, payload):
             accounts.append(account)
         plans = [{"account_id": a.id, "phone": a.phone, "steps": warmup_plan.build(config, a.id)} for a in accounts]
         if request.query.get("preview") == "1":
+            story_note = (
+                "Истории включены как отдельная опция; перед каждой публикацией Telegram проверяет доступность. "
+                if config["stories"] else "Истории выключены. "
+            )
             return _json({"preview": {"days": config["days"], "gift_budget_total": len(accounts) * config["gift_budget"],
                 "accounts": [{**p, "steps": warmup_plan.public_steps(p["steps"])} for p in plans],
-                "note": "Заполняются только пустые поля. Истории: " + ("контактам" if config["story_privacy"] == "contacts" else "видны всем") + ". Ограничения Telegram останавливают действия."}})
+                "note": "Заполняются только пустые поля. " + story_note + "Ограничения Telegram останавливают действия."}})
         occupied = {r.account_id for r in existing if r.kind == "warmup" and not r.archived and warmup.report(r)["state"] != "done"}
         if occupied.intersection(config["account_ids"]):
             return _json({"error": "На одном из аккаунтов уже есть незавершённый автопрогрев. Продолжите его или уберите в архив"}, status=409)
@@ -2750,6 +2758,19 @@ async def _create_warmup(request, payload):
             rule = await repo.add_rule(session, user_id, plan["account_id"], 0, "", 0, "")
             rule.kind = "warmup"
             rule.filters = {"warmup": config, "warmup_steps": plan["steps"], "warmup_digest": digest}
+            await repo.log_forward(
+                session,
+                rule_id=rule.id,
+                user_id=user_id,
+                source_msg_id=0,
+                target_msg_id=None,
+                status="info",
+                error=(
+                    f"📅 Сценарий запланирован: {len(plan['steps'])} действий, "
+                    f"старт {warmup_plan.iso(config['start_at'])}; "
+                    f"истории {'включены' if config['stories'] else 'выключены'}"
+                ),
+            )
             created.append(rule)
         await session.commit()
     await manager.refresh_rules()

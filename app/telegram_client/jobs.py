@@ -2249,7 +2249,7 @@ async def record_pruned_chats(rule: RuleSnapshot, pruned: list[int]) -> None:
             source_msg_id=0,
             target_msg_id=None,
             status="ok",
-            error=f"🧹 Убраны мёртвые чаты ({repo.DEAD_CHAT_STRIKES} сбоя подряд): {chats}",
+            error=f"🧹 Убраны навсегда недоступные чаты: {chats}",
         )
         await session.commit()
 

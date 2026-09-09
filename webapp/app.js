@@ -1428,7 +1428,10 @@ function demoApi(path, options = {}) {
     const labels = {avatar:'Аватарка', bio:'Описание', birthday:'Дата рождения', join:'Вступление', story:'История', gift:'Подарок себе'};
     const accounts = body.account_ids.map(id => {
       const steps = [], start = new Date(body.start_at).getTime();
-      const add = (kind, delta, values = {}) => steps.push({id:steps.length + 1, kind, label:labels[kind], at:new Date(start + delta * 60000).toISOString(), status:'pending', ...values});
+      const add = (kind, delta, values = {}) => {
+        const at = new Date(start + delta * 60000).toISOString();
+        steps.push({id:steps.length + 1, kind, label:labels[kind], at, planned_at:at, attempts:0, status:'pending', ...values});
+      };
       if (body.avatar) add('avatar', 0);
       if (body.bio) add('bio', 5, {text:body.about || 'Заметки, идеи и немного вдохновения.'});
       if (body.birthday || body.random_birthday) {
@@ -1450,6 +1453,7 @@ function demoApi(path, options = {}) {
     if (query.get('preview') === '1') return {preview:{days:body.days, accounts, gift_budget_total:body.gift_budget * accounts.length, note:'Демо: действия в Telegram не выполняются.'}};
     const tasks = accounts.map(account => ({id:Date.now() + account.account_id, title:'Автопрогрев', kind:'warmup', enabled:true, archived:false, account_id:account.account_id,
       account_online:true, progress:{done:0,total:account.steps.length}, health:{}, created_at:new Date().toISOString(),
+      journal:[{id:`warmup-${account.account_id}-planned`, status:'info', error:`📅 Сценарий запланирован: ${account.steps.length} действий`, created_at:new Date().toISOString()}],
       warmup:{state:'scheduled', days:body.days, done:0, total:account.steps.length, steps:account.steps, next_at:account.steps[0]?.at, next_action:account.steps[0]?.label}}));
     DEMO_STATE.tasks.push(...tasks);
     return {tasks};
@@ -1515,7 +1519,7 @@ function demoApi(path, options = {}) {
       return { ok: true, run };
     }
     if (tail === 'journal') {
-      const items = [];
+      const items = [...(task?.journal || [])];
       if (task && task.health && task.health.ok_at) {
         items.push({
           id: `${id}-ok`, status: 'ok', error: null,
@@ -1536,6 +1540,7 @@ function demoApi(path, options = {}) {
       return {
         kind: task ? task.kind : 'forward', total: items.length, offset,
         has_more: offset + page.length < items.length, items: page,
+        warmup: task?.warmup || null,
       };
     }
     if (tail === 'results') {
@@ -3460,15 +3465,20 @@ async function openResults(id) {
   }
 }
 
-function journalRowHtml(item) {
+function journalRowHtml(item, kind = '') {
   const ok = item.status === 'ok';
+  const info = item.status === 'info';
   const when = timeAgo(item.created_at) || String(item.created_at || '').replace('T', ' ').slice(0, 16);
-  const title = ok ? 'Отправлено' : 'Не отправлено';
-  const detail = ok
+  const warmup = kind === 'warmup';
+  const title = warmup
+    ? (ok ? 'Действие выполнено' : info ? 'Ход выполнения' : 'Требует внимания')
+    : (ok ? 'Отправлено' : info ? 'Событие' : 'Не отправлено');
+  const detail = item.error || (ok
     ? `сообщение ${item.source_msg_id || '—'}${item.target_msg_id ? ` → ${item.target_msg_id}` : ''}`
-    : (item.error || 'Telegram отклонил отправку');
-  return `<div class="journal-row journal-row--${ok ? 'ok' : 'error'}">
-    <div class="journal-row__mark" aria-hidden="true">${ok ? '✓' : '!'}</div>
+    : 'Telegram отклонил отправку');
+  const variant = ok ? 'ok' : info ? 'info' : 'error';
+  return `<div class="journal-row journal-row--${variant}">
+    <div class="journal-row__mark" aria-hidden="true">${ok ? '✓' : info ? 'i' : '!'}</div>
     <div class="journal-row__body">
       <div class="journal-row__title">${title}</div>
       <div class="journal-row__detail">${esc(String(detail))}</div>
@@ -3494,13 +3504,23 @@ async function openJournal(id) {
   try {
     const data = await api(`/api/tasks/${id}/journal?limit=${RESULTS_PAGE}`);
     endLoad(body);
+    const timeline = data.warmup
+      ? `<details class="warmup-journal" ${data.items.length ? '' : 'open'}><summary>План и состояние всех действий</summary>${warmupSummaryHtml(data.warmup)}${warmupStepsHtml(data.warmup.steps)}</details>`
+      : '';
     if (!data.items.length) {
-      body.innerHTML = emptyHtml('i-receipt', 'Журнал пока пуст', 'Отправки появятся после первого срабатывания задачи.');
+      body.innerHTML = emptyHtml(
+        'i-receipt',
+        'Событий пока нет',
+        data.warmup ? 'Первое событие появится при запуске ближайшего шага.' : 'Отправки появятся после первого срабатывания задачи.'
+      ) + timeline;
       return;
     }
     state.resultsShown = data.items.length;
     state.resultsTotal = data.total;
-    body.innerHTML = resultsMetaHtml(data.total, data.items.length) + data.items.map(journalRowHtml).join('');
+    body.innerHTML = (data.warmup ? '<h3 class="journal__heading">События выполнения</h3>' : '')
+      + resultsMetaHtml(data.total, data.items.length)
+      + data.items.map(item => journalRowHtml(item, data.kind)).join('')
+      + timeline;
     $('resultsMore').hidden = !data.has_more;
   } catch (error) {
     failLoad(body, error, 'openJournal');
@@ -3516,7 +3536,6 @@ async function loadMoreResults(button) {
   await withLoading(button, async () => {
     try {
       const endpoint = state.resultsMode === 'journal' ? 'journal' : 'results';
-      const row = state.resultsMode === 'journal' ? journalRowHtml : resultRowHtml;
       const data = await api(
         `/api/tasks/${id}/${endpoint}?limit=${RESULTS_PAGE}&offset=${state.resultsShown}`
       );
@@ -3525,7 +3544,10 @@ async function loadMoreResults(button) {
       state.resultsShown += data.items.length;
       state.resultsTotal = data.total;
       if (meta) meta.outerHTML = resultsMetaHtml(data.total, state.resultsShown);
-      body.insertAdjacentHTML('beforeend', data.items.map(row).join(''));
+      const rows = state.resultsMode === 'journal'
+        ? data.items.map(item => journalRowHtml(item, data.kind))
+        : data.items.map(resultRowHtml);
+      body.insertAdjacentHTML('beforeend', rows.join(''));
       $('resultsMore').hidden = !data.has_more;
     } catch (error) {
       toast(error.message || 'Не удалось показать ещё', 'error');
@@ -4256,8 +4278,13 @@ function warmupSummaryHtml(plan) {
 function warmupStepsHtml(steps) {
   const names = {pending:'запланировано', done:'выполнено', skipped:'пропущено', waiting:'ожидание', running:'выполняется', blocked:'остановлено', uncertain:'нужна проверка'};
   return `<ol class="warmup__timeline">${steps.map(step => `<li>
-    <strong>${esc(step.label)}</strong> · ${esc(new Date(step.at).toLocaleString('ru-RU'))}
+    <strong>${esc(step.label)}</strong>
     <div>${esc(names[step.status] || step.status)}${step.target ? ' · ' + esc(step.target) : ''}</div>
+    <p>По плану: ${esc(new Date(step.planned_at || step.at).toLocaleString('ru-RU'))}</p>
+    ${step.at && step.at !== (step.planned_at || step.at) ? `<p>Следующая попытка: ${esc(new Date(step.at).toLocaleString('ru-RU'))}</p>` : ''}
+    ${step.started_at ? `<p>Фактически начато: ${esc(new Date(step.started_at).toLocaleString('ru-RU'))}</p>` : ''}
+    ${step.finished_at ? `<p>Завершено: ${esc(new Date(step.finished_at).toLocaleString('ru-RU'))}</p>` : ''}
+    ${step.attempts ? `<p>Попыток: ${Number(step.attempts)}</p>` : ''}
     ${step.text ? `<p>${esc(step.text)}</p>` : ''}
     ${step.birthday ? `<p>${step.birthday.day}.${step.birthday.month}${step.birthday.year ? '.' + step.birthday.year : ''}</p>` : ''}
     ${step.budget ? `<p>Не дороже ${step.budget} Stars, один подарок себе</p>` : ''}
