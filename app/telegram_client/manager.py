@@ -2276,20 +2276,26 @@ class ClientManager:
             )
 
         if is_hopeless_chat_error(exc):
-            # Безнадёжный получатель держит рассылку: позиция не двигается,
-            # пока чат не примет. Три таких сбоя — и чат уходит сам.
+            # Такой запрет постоянный: повтор не поможет и лишь засорит журнал.
+            # У рассылки главный чат лежит в отдельной колонке, поэтому общий
+            # счётчик страйков удалить его не умеет. Переносим следующий чат на
+            # его место, а единственного получателя останавливаем сразу.
             async with session_scope() as session:
-                pruned, strikes = await repo.register_chat_strikes(
-                    session, rule.id,
-                    failed={target_id: type(exc).__name__},
+                removed, stopped = await repo.remove_mailing_recipient(
+                    session, rule.id, target_id
                 )
-                await session.commit()
-            rule.filters.chat_strikes = strikes
-            if pruned:
-                rule.filters.targets = [
-                    chat_id for chat_id in rule.filters.targets if chat_id not in pruned
-                ]
-                await record_pruned_chats(rule, pruned)
+            if removed:
+                await record_pruned_chats(rule, [target_id])
+                if stopped:
+                    await self._nothing_to_send(
+                        rule,
+                        "рассылка остановлена: аккаунт не может писать в единственный чат "
+                        f"({type(exc).__name__})",
+                    )
+                state["pos"] = None
+                state.get("fail_streaks", {}).pop(target_id, None)
+                await self.refresh_rules()
+                return
         state["not_before"] = time.time() + MAILING_ERROR_PAUSE
 
     async def _mailing_nothing_to_send(self, rule: RuleSnapshot) -> None:

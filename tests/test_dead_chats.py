@@ -1,5 +1,6 @@
 """Мёртвые получатели уходят из задач сами — после трёх безнадёжных сбоев."""
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from sqlalchemy import select
 from telethon.errors import (
@@ -127,7 +128,7 @@ async def test_broadcast_prunes_dead_chat_after_three(create_user, create_accoun
     assert len(notes) == 1 and "-2" in notes[0]
 
 
-async def test_mailing_failure_prunes_and_unsticks(create_user, create_account):
+async def test_mailing_failure_prunes_and_unsticks(create_user, create_account, monkeypatch):
     rule = await _db_rule(create_user, create_account, kind="mailing")
     snapshot = _snapshot(rule, filters=FilterConfig(targets=[-2, -3]))
     async with session_scope() as session:
@@ -135,14 +136,57 @@ async def test_mailing_failure_prunes_and_unsticks(create_user, create_account):
         db_rule.filters = {"targets": [-2, -3]}
         await session.commit()
     state: dict = {}
-    for _ in range(3):
-        await manager._mailing_failed(
-            snapshot, state, -2, ChatWriteForbiddenError(request=None)
-        )
-    assert snapshot.filters.targets == [-3]
+    refresh = AsyncMock()
+    monkeypatch.setattr(manager, "refresh_rules", refresh)
+    await manager._mailing_failed(
+        snapshot, state, -2, ChatWriteForbiddenError(request=None)
+    )
+    refresh.assert_awaited_once()
     async with session_scope() as session:
         db_rule = await session.get(type(rule), rule.id)
         assert db_rule.filters["targets"] == [-3]
+
+
+async def test_mailing_promotes_recipient_when_main_is_banned(
+    create_user, create_account, monkeypatch
+):
+    rule = await _db_rule(create_user, create_account, kind="mailing")
+    main = rule.target_id
+    snapshot = _snapshot(rule, filters=FilterConfig(targets=[-2, -3]))
+    async with session_scope() as session:
+        db_rule = await session.get(type(rule), rule.id)
+        db_rule.filters = {"targets": [-2, -3], "chat_titles": {"-2": "Второй"}}
+    monkeypatch.setattr(manager, "refresh_rules", AsyncMock())
+    await manager._mailing_failed(
+        snapshot, {}, main, ChatWriteForbiddenError(request=None)
+    )
+    async with session_scope() as session:
+        db_rule = await session.get(type(rule), rule.id)
+        assert db_rule.enabled is True
+        assert db_rule.target_id == -2
+        assert db_rule.target_title == "Второй"
+        assert db_rule.filters["targets"] == [-3]
+        assert db_rule.filters["chats_pruned"] == 1
+
+
+async def test_mailing_stops_after_permanent_error_in_only_chat(
+    create_user, create_account, monkeypatch
+):
+    rule = await _db_rule(create_user, create_account, kind="mailing")
+    snapshot = _snapshot(rule, filters=FilterConfig())
+    monkeypatch.setattr(manager, "refresh_rules", AsyncMock())
+    await manager._mailing_failed(
+        snapshot, {}, rule.target_id, ChatWriteForbiddenError(request=None)
+    )
+    async with session_scope() as session:
+        db_rule = await session.get(type(rule), rule.id)
+        assert db_rule.enabled is False
+        assert db_rule.filters["chats_pruned"] == 1
+        notes = list((await session.scalars(
+            select(ForwardLog.error).where(ForwardLog.rule_id == rule.id)
+            .order_by(ForwardLog.id)
+        )).all())
+    assert "рассылка остановлена" in notes[-1]
 
 
 async def test_mailing_transient_failure_keeps_chat(create_user, create_account):
