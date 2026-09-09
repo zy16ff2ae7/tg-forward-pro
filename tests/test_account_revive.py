@@ -185,11 +185,14 @@ async def test_the_service_comes_back_on_its_own(account_id, mtproto_on, monkeyp
     task = asyncio.create_task(manager._revive_loop())
     try:
         for _ in range(100):
-            if manager.is_online(account_id):
+            # Online is published before the database transaction commits.
+            # Wait for both signals before cancelling the background loop.
+            if manager.is_online(account_id) and await account_state(account_id) == (None, True):
                 break
             await asyncio.sleep(0.02)
     finally:
         task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     assert manager.is_online(account_id) is True, "аккаунт так и остался офлайн"
     assert client.connects == 1

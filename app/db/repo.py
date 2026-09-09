@@ -2311,6 +2311,45 @@ async def clear_mod_strikes(session: AsyncSession, rule_id: int, user_id: int) -
     await session.flush()
 
 
+async def remove_mailing_recipient(
+    session: AsyncSession, rule_id: int, chat_id: int
+) -> tuple[bool, bool]:
+    """Remove a permanently unavailable recipient from a mailing.
+
+    The first recipient lives in ``rules.target_id`` while the rest live in
+    ``filters.targets``. Promote the next recipient when the first one dies;
+    pause the task when no recipient remains. Returns ``(removed, stopped)``.
+    """
+    rule = await session.get(Rule, rule_id)
+    if rule is None or rule.kind != "mailing":
+        return False, False
+    failed = int(chat_id)
+    filters = copy.deepcopy(rule.filters or {})
+    targets = [int(item) for item in (filters.get("targets") or [])]
+    stopped = False
+    if failed == int(rule.target_id or 0):
+        if targets:
+            promoted = targets.pop(0)
+            titles = filters.get("chat_titles") or {}
+            rule.target_id = promoted
+            rule.target_title = str(titles.get(str(promoted)) or promoted)
+        else:
+            rule.enabled = False
+            stopped = True
+    elif failed in targets:
+        targets.remove(failed)
+    else:
+        return False, False
+    filters["targets"] = targets
+    strikes = dict(filters.get("chat_strikes") or {})
+    strikes.pop(str(failed), None)
+    filters["chat_strikes"] = strikes
+    filters["chats_pruned"] = int(filters.get("chats_pruned") or 0) + 1
+    rule.filters = filters
+    await session.flush()
+    return True, stopped
+
+
 async def register_chat_strikes(
     session: AsyncSession,
     rule_id: int,
@@ -2407,12 +2446,13 @@ async def task_health(
             "failing": False,
         }
 
-    # Последний сбой каждой задачи: строку выбираем по наибольшему id, а не по
-    # времени, — id растёт монотонно, а две записи одной секунды по времени
-    # неразличимы.
+    # Последний сбой каждой задачи: информационные события (например, старт
+    # шага автопрогрева) не должны превращать здоровую задачу в «сломана».
+    # Строку выбираем по наибольшему id, а не по времени, — id растёт
+    # монотонно, а две записи одной секунды по времени неразличимы.
     newest = (
         select(func.max(ForwardLog.id))
-        .where(ForwardLog.rule_id.in_(ids), ForwardLog.status != "ok")
+        .where(ForwardLog.rule_id.in_(ids), ForwardLog.status == "error")
         .group_by(ForwardLog.rule_id)
     )
     errors = await session.execute(select(ForwardLog).where(ForwardLog.id.in_(newest)))
@@ -2549,6 +2589,37 @@ async def recent_logs(
         .limit(max(1, min(limit, 100)))
     )
     return result.scalars().all()
+
+
+async def rule_logs(
+    session: AsyncSession,
+    rule_id: int,
+    user_id: int,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+) -> Sequence[ForwardLog]:
+    """Журнал одной задачи с проверкой владельца на уровне запроса."""
+    result = await session.execute(
+        select(ForwardLog)
+        .where(ForwardLog.rule_id == rule_id, ForwardLog.user_id == user_id)
+        .order_by(ForwardLog.id.desc())
+        .offset(max(0, offset))
+        .limit(max(1, min(limit, 100)))
+    )
+    return result.scalars().all()
+
+
+async def count_rule_logs(
+    session: AsyncSession, rule_id: int, user_id: int
+) -> int:
+    """Количество строк журнала одной задачи."""
+    result = await session.execute(
+        select(func.count())
+        .select_from(ForwardLog)
+        .where(ForwardLog.rule_id == rule_id, ForwardLog.user_id == user_id)
+    )
+    return int(result.scalar() or 0)
 
 
 async def trim_forward_logs(

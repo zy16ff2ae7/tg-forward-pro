@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -107,6 +108,39 @@ class DialogsClient:
         raise ValueError("нет такого чата")
 
 
+class SlowDialogsClient(DialogsClient):
+    """Клиент для проверки общего фонового обхода и отсутствия дублей."""
+
+    def __init__(self, dialogs: list[FakeDialog]) -> None:
+        super().__init__(dialogs)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def iter_dialogs(self, limit=None):
+        self.sweeps += 1
+        self.started.set()
+
+        async def gen():
+            await self.release.wait()
+            for dialog in self.dialogs:
+                yield dialog
+
+        return gen()
+
+
+class FailingDialogsClient(DialogsClient):
+    """Клиент, который имитирует сетевую ошибку Telegram."""
+
+    def iter_dialogs(self, limit=None):
+        self.sweeps += 1
+
+        async def gen():
+            raise ConnectionError("network down")
+            yield  # pragma: no cover - делает функцию async generator
+
+        return gen()
+
+
 @pytest.fixture
 def mtproto_on(monkeypatch):
     """Шлюз «настроен»: без этого менеджер честно отвечает пустотой."""
@@ -153,6 +187,50 @@ async def test_lookups_come_in_every_shape_the_cabinet_sends(mtproto_on):
 
     assert set(found) == {"@afisha", "https://t.me/afisha", "-1001", "Афиша Москвы", "афиша"}
     assert {pair[0] for pair in found.values()} == {-1001}
+
+
+async def test_warm_dialogs_uses_one_background_sweep(mtproto_on):
+    """Первый HTTP-прогрев не ждёт Telegram, а polling не плодит обходы."""
+    client = SlowDialogsClient([FakeDialog(-1001, "чат", "chat")])
+    manager._clients[1] = client
+
+    assert await manager.warm_dialogs(1) is False
+    await asyncio.wait_for(client.started.wait(), timeout=1)
+    assert await manager.warm_dialogs(1) is False
+    assert client.sweeps == 1
+    assert manager.dialog_refresh_status(1)["state"] == "loading"
+
+    client.release.set()
+    for _ in range(20):
+        if manager.dialog_refresh_status(1)["state"] == "ready":
+            break
+        await asyncio.sleep(0)
+    assert manager.dialog_refresh_status(1)["state"] == "ready"
+    assert await manager.warm_dialogs(1) is True
+
+
+async def test_warm_dialogs_exposes_retryable_error_without_auto_loop(mtproto_on):
+    """Сбой Telegram — error, а не вечный loading и не бесконечный retry."""
+    client = FailingDialogsClient([])
+    manager._clients[1] = client
+
+    assert await manager.warm_dialogs(1) is False
+    for _ in range(20):
+        if manager.dialog_refresh_status(1)["state"] == "error":
+            break
+        await asyncio.sleep(0)
+    status = manager.dialog_refresh_status(1)
+    assert status["state"] == "error"
+    assert "связаться с Telegram" in status["message"]
+    assert await manager.warm_dialogs(1) is False
+    assert client.sweeps == 1
+
+    manager.retry_dialogs(1)
+    for _ in range(20):
+        if client.sweeps == 2 and manager.dialog_refresh_status(1)["state"] == "error":
+            break
+        await asyncio.sleep(0)
+    assert client.sweeps == 2
 
 
 async def test_dialogs_cache_saves_the_second_sweep(mtproto_on):
@@ -745,6 +823,14 @@ async def test_chats_list_is_not_cut(client, auth_headers, create_account, monke
         return dialogs[:limit] if limit > 0 else list(dialogs)
 
     monkeypatch.setattr(manager, "list_dialogs", fake_list_dialogs)
+    # Новый API сначала проверяет, что аккаунт онлайн, и прогревает кэш чатов
+    # в фоне. Здесь Telegram подменён, поэтому явно подтверждаем оба шага.
+    monkeypatch.setattr(manager, "is_online", lambda _account_id: True)
+
+    async def chats_ready(_account_id: int) -> bool:
+        return True
+
+    monkeypatch.setattr(manager, "warm_dialogs", chats_ready)
 
     response = await client.get(f"/api/chats?account_id={account_id}", headers=auth_headers)
     body = await response.json()
@@ -759,3 +845,87 @@ async def test_chats_list_is_not_cut(client, auth_headers, create_account, monke
         f"/api/chats?account_id={account_id}&q=чат 299", headers=auth_headers
     )
     assert (await tail.json())["total"] == 1
+
+async def test_chats_loading_and_telegram_error_are_distinct(
+    client, auth_headers, create_account, monkeypatch
+):
+    """HTTP отличает промежуточную загрузку от сбоя и даёт явный retry."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "api_id", FAKE_API_ID)
+    monkeypatch.setattr(settings, "api_hash", FAKE_API_HASH)
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    monkeypatch.setattr(manager, "is_online", lambda _account_id: True)
+
+    phase = {"state": "loading"}
+    retry_calls: list[int] = []
+
+    async def chats_not_ready(_account_id: int) -> bool:
+        return False
+
+    def refresh_status(_account_id: int) -> dict:
+        return {"state": phase["state"], "message": "Не удалось связаться с Telegram."}
+
+    def retry_dialogs(account: int) -> None:
+        retry_calls.append(account)
+        phase["state"] = "loading"
+
+    monkeypatch.setattr(manager, "warm_dialogs", chats_not_ready)
+    monkeypatch.setattr(manager, "dialog_refresh_status", refresh_status)
+    monkeypatch.setattr(manager, "retry_dialogs", retry_dialogs)
+
+    loading = await client.get(f"/api/chats?account_id={account_id}", headers=auth_headers)
+    loading_body = await loading.json()
+    assert loading.status == 202
+    assert loading_body["loading"] is True
+    assert "error" not in loading_body
+
+    phase["state"] = "error"
+    failed = await client.get(f"/api/chats?account_id={account_id}", headers=auth_headers)
+    failed_body = await failed.json()
+    assert failed.status == 503
+    assert failed_body["loading"] is False
+    assert failed_body["retryable"] is True
+    assert failed_body["error"] == "Не удалось связаться с Telegram."
+
+    retried = await client.get(
+        f"/api/chats?account_id={account_id}&retry=1", headers=auth_headers
+    )
+    assert retried.status == 202
+    assert retry_calls == [account_id]
+
+async def _ready() -> bool:
+    return True
+
+
+async def test_chats_support_conditional_get(client, auth_headers, create_account, monkeypatch):
+    """Повторный запрос неизменившегося picker-а не сериализует весь список снова."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "api_id", FAKE_API_ID)
+    monkeypatch.setattr(settings, "api_hash", FAKE_API_HASH)
+    await client.get("/api/me", headers=auth_headers)
+    account_id = await create_account(TEST_USER_ID)
+    dialogs = [
+        {"id": -9900 - n, "title": f"чат {n}", "username": "", "is_channel": False, "is_group": True}
+        for n in range(120)
+    ]
+
+    async def fake_list_dialogs(_account_id: int, limit: int = 0, folder_id=None):
+        rows = list(dialogs)
+        return rows[:limit] if limit > 0 else rows
+
+    monkeypatch.setattr(manager, "list_dialogs", fake_list_dialogs)
+    monkeypatch.setattr(manager, "is_online", lambda _account_id: True)
+    monkeypatch.setattr(manager, "warm_dialogs", lambda _account_id: _ready())
+    monkeypatch.setattr(manager, "dialog_cache_token", lambda _account_id: "dialogs-v1")
+
+    first = await client.get(f"/api/chats?account_id={account_id}", headers=auth_headers)
+    assert first.status == 200
+    etag = first.headers.get("ETag")
+    assert etag
+
+    headers = {**auth_headers, "If-None-Match": etag}
+    second = await client.get(f"/api/chats?account_id={account_id}", headers=headers)
+    assert second.status == 304

@@ -2699,3 +2699,1158 @@ body::before {
   .task-draft__actions { width: 100%; }
   .task-draft__actions .btn { flex: 1; }
 }
+
+
+.field__aside--library { align-items: center; flex-wrap: wrap; gap: 8px; }
+.btn--library-select { opacity: .78; }
+.btn--library-select:hover, .btn--library-select:focus-visible { opacity: 1; }
+@media (max-width: 390px) {
+  .field__aside--library .btn { flex: 1 1 auto; }
+  .field__aside--library .btn--library-select { flex-basis: 100%; }
+}
+
+
+.state--loading { min-height: 190px; }
+.state__spinner { width: 28px; height: 28px; margin: 18px auto 0; border: 3px solid rgba(164, 174, 202, .22); border-top-color: #df74d0; border-radius: 50%; animation: state-spin .8s linear infinite; }
+@keyframes state-spin { to { transform: rotate(360deg); } }
+
+.chat-refresh { margin: 0 0 10px; padding: 9px 12px; border: 1px solid rgba(137, 155, 214, .24); border-radius: 12px; color: var(--muted); font-size: 12px; background: rgba(103, 116, 171, .08); }
+.chat-refresh--error { border-color: rgba(239, 137, 137, .38); color: #f0b1b1; background: rgba(180, 71, 93, .10); }
+
+
+/* ────────────────────── Улучшения формы задачи ────────────────────── */
+
+/* Заголовок формы не исчезает при длинной прокрутке: пользователь всегда
+   понимает, какую задачу сейчас настраивает. */
+#taskSheet .sheet__head {
+  position: sticky;
+  top: -16px;
+  z-index: 8;
+  margin: -16px -14px 14px;
+  padding: 14px 14px 12px;
+  background: linear-gradient(180deg, rgba(15, 19, 31, .99) 72%, rgba(15, 19, 31, .88) 86%, transparent);
+  backdrop-filter: blur(12px);
+}
+#taskSheet .sheet__lead { max-width: 680px; margin-bottom: 16px; line-height: 1.55; }
+.task-section-label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 2px 0 -2px;
+  color: #e9edf7;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+}
+.task-section-label::after { content: ''; height: 1px; flex: 1; background: rgba(197, 210, 241, .13); }
+
+/* Необязательные параметры не должны выглядеть как обязательная анкета из
+   двадцати полей. В новой задаче блок закрыт, в редактировании открыт, чтобы
+   существующие настройки были видны сразу. */
+.task-options {
+  margin-top: 4px;
+  border: 1px solid rgba(197, 210, 241, .14);
+  border-radius: 16px;
+  background: linear-gradient(110deg, rgba(255, 255, 255, .045), rgba(154, 120, 255, .035));
+  overflow: hidden;
+}
+.task-options > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 58px;
+  padding: 11px 14px;
+  color: var(--text);
+  cursor: pointer;
+  list-style: none;
+}
+.task-options > summary::-webkit-details-marker { display: none; }
+.task-options > summary span { display: grid; gap: 3px; }
+.task-options > summary b { font-size: 13px; }
+.task-options > summary small { color: var(--muted); font-size: 11.5px; }
+.task-options > summary i { color: var(--muted); font-size: 19px; font-style: normal; transition: transform .18s ease; }
+.task-options[open] > summary { border-bottom: 1px solid rgba(197, 210, 241, .12); background: rgba(240, 108, 173, .045); }
+.task-options[open] > summary i { transform: rotate(180deg); color: #f4a3c9; }
+.task-options__body { display: grid; gap: 12px; padding: 13px; }
+
+.field__label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #cfd7e8;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+.field__label::after { content: ''; flex: 1; height: 1px; background: rgba(197, 210, 241, .07); }
+.field--check .field__label { display: block; color: var(--text); font-size: 13.5px; }
+.field--check .field__label::after { display: none; }
+.field__note { line-height: 1.4; }
+
+/* Подсказки теперь выглядят как объяснение к форме, а не как случайная строка
+   между полями. */
+.task-hint {
+  display: flex;
+  gap: 9px;
+  margin: 2px 0 0;
+  padding: 11px 12px;
+  border: 1px solid rgba(197, 210, 241, .13);
+  border-radius: 13px;
+  color: #aeb9cf;
+  background: rgba(255, 255, 255, .035);
+  line-height: 1.48;
+}
+.task-hint::before { content: 'i'; display: grid; place-items: center; width: 18px; height: 18px; flex: none; border-radius: 50%; color: #111522; background: #b9c5df; font-size: 12px; font-weight: 800; }
+
+.activity-hint {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  padding: 11px 12px;
+  border: 1px solid rgba(124, 208, 218, .24);
+  border-radius: 13px;
+  color: #c7eef0;
+  background: linear-gradient(100deg, rgba(71, 190, 203, .10), rgba(125, 103, 232, .07));
+  line-height: 1.45;
+}
+.activity-hint b { color: #fff; }
+
+/* Действие всегда рядом с нижним краем шторки. Пользователь не теряет кнопку
+   после длинного списка, но она не перекрывает последний текст. */
+.task-submitbar {
+  position: sticky;
+  bottom: -20px;
+  z-index: 7;
+  display: grid;
+  gap: 9px;
+  margin: 3px -14px -20px;
+  padding: 13px 14px calc(20px + env(safe-area-inset-bottom));
+  border-top: 1px solid rgba(197, 210, 241, .14);
+  background: linear-gradient(180deg, rgba(15, 19, 31, .80), rgba(15, 19, 31, .99) 24%);
+  backdrop-filter: blur(14px);
+}
+.task-submitbar__copy { display: grid; gap: 2px; color: #cbd4e5; font-size: 11.5px; line-height: 1.35; }
+.task-submitbar__copy b { color: #f0f3fb; font-size: 12.5px; }
+.task-submitbar__copy span { color: #8794ad; }
+.task-submitbar .btn { min-height: 48px; font-size: 15px; }
+.task-submitbar .error { margin: 0; }
+
+@media (min-width: 700px) {
+  #taskSheet .sheet__head { margin-left: -14px; margin-right: -14px; }
+  .task-submitbar { margin-left: -14px; margin-right: -14px; }
+}
+
+.activity-hint__label { color: #9ae3e6; font-weight: 700; }
+.activity-hint .btn { margin-left: auto; }
+@media (max-width: 390px) { .activity-hint .btn { margin-left: 0; } }
+
+/* ═══════════════════════ Единый визуальный слой кабинета ═══════════════════════
+   Этот слой намеренно лежит в конце файла: все экраны — главная, команды,
+   задачи, чаты, аккаунты, библиотека и шторки — получают один ритм, но их
+   существующая логика и отдельные состояния не меняются. */
+
+:root {
+  --surface-0: #080b14;
+  --surface-1: #101625;
+  --surface-2: #172238;
+  --surface-3: #1d2a43;
+  --ink-soft: #a8b5ca;
+  --ink-faint: #7f8da7;
+  --border-calm: rgba(180, 198, 230, .15);
+  --border-focus: rgba(244, 126, 187, .62);
+}
+
+::selection { color: #fff; background: rgba(240, 108, 173, .45); }
+
+*:focus-visible {
+  outline: 2px solid rgba(245, 160, 200, .92);
+  outline-offset: 3px;
+}
+
+button, input, select, textarea { -webkit-font-smoothing: antialiased; }
+
+/* На основных экранах заголовок теперь читается как начало страницы, а не как
+   ещё одна строка среди карточек. */
+.screen__title {
+  position: relative;
+  padding-bottom: 9px;
+}
+.screen__title::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  bottom: 0;
+  width: 34px;
+  height: 3px;
+  border-radius: 99px;
+  background: linear-gradient(90deg, #f47bb8, rgba(154, 120, 255, .72));
+  box-shadow: 0 0 14px rgba(240, 108, 173, .35);
+}
+.screen__sub { max-width: 650px; }
+
+/* Десктопная навигация не должна выглядеть растянутой полосой во всю ширину
+   браузера, а активный пункт должен считываться с первого взгляда. */
+.nav__item { position: relative; }
+.nav__item.is-active::after {
+  content: '';
+  position: absolute;
+  left: 23%;
+  right: 23%;
+  bottom: 6px;
+  height: 3px;
+  border-radius: 99px;
+  background: var(--accent-grad);
+  box-shadow: 0 0 12px rgba(240, 108, 173, .55);
+}
+.nav__crown button { border: 1px solid rgba(255, 255, 255, .24); }
+
+/* В каталогах сначала читается название, затем объяснение, затем состояние.
+   Чуть большая высота карточки даёт пальцу удобную область нажатия. */
+.card--cmd {
+  min-height: 92px;
+  align-items: flex-start;
+  padding: 14px;
+}
+.card--cmd .cmd__ico { margin-top: 1px; }
+.cmd__title { line-height: 1.28; }
+.cmd__desc { line-height: 1.42; }
+.cmd__foot { min-height: 21px; }
+.cmd__chevron { margin-top: 11px; }
+
+/* Карточка задачи: основной контент и действие разделены воздухом. Состояние
+   не конкурирует с названием, а прогресс не прилипает к краям. */
+.task { padding: 15px; }
+.task__top { align-items: flex-start; }
+.task__title { line-height: 1.32; }
+.task__meta { line-height: 1.42; }
+.task__actions { margin-top: 13px; padding-top: 12px; }
+.task__actions .btn { min-height: 38px; }
+.task__alert { margin-top: 11px; border-radius: 12px; }
+
+/* Аккаунт, библиотека и чат: одинаковые внутренние отступы и более явный
+   интерактивный hover. */
+.account, .lib, .chat { padding: 13px 14px; }
+.account__phone, .lib__title, .chat__title { line-height: 1.35; }
+.account__reason { line-height: 1.45; }
+.lib__use { color: #eaa2c7; }
+.chat__title { font-weight: 650; }
+.chat__sub { color: #94a2bb; }
+.chat__kind { color: #aebbd0; }
+
+/* Пустые и ошибочные состояния — часть интерфейса, а не текстовый провал. */
+.empty, .state {
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  border-radius: 18px;
+}
+.empty__title, .state__title { max-width: 460px; line-height: 1.3; }
+.empty > div:last-child, .state__text { max-width: 460px; line-height: 1.5; }
+.state__retry { min-width: 132px; }
+
+/* У всех шторок одна шапка и один жест прокрутки: заголовок не теряется, а
+   подложка поля остаётся видна при просмотре длинной формы. */
+.sheet__panel { overscroll-behavior: contain; }
+.sheet:not(#taskSheet) .sheet__head {
+  position: sticky;
+  top: -18px;
+  z-index: 8;
+  margin: -18px -18px 14px;
+  padding: 15px 18px 12px;
+  background: linear-gradient(180deg, rgba(23, 29, 49, .99) 72%, rgba(23, 29, 49, .88) 87%, transparent);
+  backdrop-filter: blur(12px);
+}
+.sheet--over .sheet__head { margin-left: -14px; margin-right: -14px; }
+
+/* Клавиатура на телефоне не должна закрывать основной action: у полей чуть
+   больше высота нажатия, у вторичных кнопок — меньше визуальный вес. */
+.field input, .field select, .field textarea { min-height: 46px; }
+.field textarea { min-height: 108px; }
+.btn--pick { min-height: 42px; }
+
+/* Подписка и бонусные блоки: цифра — главный объект, кнопки — второй уровень. */
+.card--sub, .card--bonus { padding: 17px; }
+.sub__value { font-size: 29px; letter-spacing: -.03em; }
+.sub__note, .bonus__note { line-height: 1.48; }
+
+/* Доступное поведение на маленьком экране: не допускаем горизонтального
+   переполнения длинных названий и оставляем touch-target не меньше 42 px. */
+@media (max-width: 520px) {
+  .screen__title { font-size: 26px; }
+  .card--cmd { min-height: 88px; padding: 13px; }
+  .cmd__desc { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .task__top { gap: 9px; }
+  .task__ico { width: 36px; height: 36px; }
+  .badge { padding-left: 8px; padding-right: 8px; }
+  .account__state { font-size: 10px; }
+  .chat-bar__btns .btn { flex: 1 1 calc(50% - 8px); min-height: 42px; }
+  .chat-bar__clear { flex: 0 0 42px !important; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .001ms !important;
+  }
+}
+
+
+/* Поиск: крестик появляется только при тексте и позволяет одним нажатием
+   вернуться к полному списку. */
+.search { padding-right: 8px; }
+.search__clear {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #aab7cc;
+  font-size: 22px;
+  line-height: 1;
+  background: rgba(255,255,255,.06);
+}
+.search__clear:hover { color: #fff; background: rgba(240,108,173,.18); }
+
+/* Вход по 2FA: пароль можно проверить, не стирая его и не покидая flow. */
+.login-input-wrap { position: relative; display: flex; align-items: center; }
+.login-input-wrap #loginInput { padding-right: 82px; }
+.login-input-reveal {
+  position: absolute;
+  right: 10px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  color: #e8aecf;
+  font-size: 11px;
+  background: rgba(240,108,173,.10);
+}
+.login-input-reveal:hover { background: rgba(240,108,173,.20); color: #fff; }
+
+.task-submitbar__copy b.is-warning { color: #ffd38a; }
+
+
+.segmented .seg { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.seg__count {
+  min-width: 20px;
+  padding: 2px 5px;
+  border-radius: 99px;
+  color: #aebbd0;
+  background: rgba(255,255,255,.07);
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.2;
+}
+.seg.is-active .seg__count { color: #fff; background: rgba(255,255,255,.18); }
+
+
+/* Выбор сценария: не просто сетка иконок, а маленькая понятная карточка —
+   название, назначение и состояние. На телефоне две колонки сохраняют
+   читаемость, на широком экране остаются три. */
+.create-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; }
+.create-cell {
+  position: relative;
+  align-items: flex-start;
+  min-height: 142px;
+  padding: 14px;
+  text-align: left;
+  background: linear-gradient(145deg, rgba(28, 39, 64, .92), rgba(14, 19, 32, .94));
+}
+.create-cell .tile__ico { margin-bottom: 2px; }
+.create-cell__body { display: grid; gap: 4px; min-width: 0; width: 100%; }
+.create-cell__name { color: #f2f4fb; font-size: 13px; font-weight: 700; line-height: 1.25; text-align: left; }
+.create-cell__desc {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #a5b2c8;
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: left;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.create-cell__state { margin-top: 3px; font-size: 10px; }
+.create-cell__state .status__dot { width: 5px; height: 5px; }
+.create-cell.is-off { filter: saturate(.55); opacity: .66; }
+.create-cell.is-off .create-cell__state { color: #aab4c7; }
+
+@media (max-width: 520px) {
+  .create-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  .create-cell { min-height: 136px; padding: 12px; }
+  .create-cell__name { font-size: 12.5px; }
+}
+
+.create-lead { margin: -2px 0 15px; max-width: 610px; line-height: 1.5; }
+
+#loginSheet #loginResend:disabled { opacity: .72; cursor: wait; color: #aab8cf; background: rgba(255,255,255,.035); }
+
+.task-account-note.is-online { color: #78dcb4; }
+.task-account-note.is-offline { color: #f2b0bd; }
+
+
+.picker-recent { margin: 4px 0 10px; padding: 10px 11px; border: 1px solid rgba(197,210,241,.12); border-radius: 13px; background: rgba(255,255,255,.03); }
+.picker-recent__title { margin-bottom: 7px; color: #9aa8bf; font-size: 10.5px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.picker-recent__list { display: flex; gap: 7px; overflow-x: auto; scrollbar-width: none; }
+.picker-recent__list::-webkit-scrollbar { display: none; }
+.picker-recent__chip { flex: none; display: inline-flex; align-items: center; gap: 6px; max-width: 210px; padding: 7px 9px; border: 1px solid rgba(197,210,241,.14); border-radius: 999px; color: #cbd5e5; background: rgba(17,22,38,.76); font-size: 11px; }
+.picker-recent__chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-recent__chip b { color: #ee9ec5; font-size: 14px; font-weight: 500; }
+.picker-recent__chip.is-selected { border-color: rgba(240,108,173,.58); background: rgba(240,108,173,.14); }
+
+.task-preview { margin-top: 2px; border: 1px solid rgba(197,210,241,.14); border-radius: 14px; background: rgba(255,255,255,.03); overflow: hidden; }
+.task-preview > summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 13px; color: #dce3f0; cursor: pointer; font-size: 12.5px; font-weight: 700; list-style: none; }
+.task-preview > summary::-webkit-details-marker { display: none; }
+.task-preview > summary i { color: #9daac0; font-size: 18px; font-style: normal; }
+.task-preview[open] > summary { border-bottom: 1px solid rgba(197,210,241,.12); background: rgba(154,120,255,.06); }
+.task-preview__row { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; padding: 8px 13px; border-bottom: 1px solid rgba(197,210,241,.07); font-size: 11.5px; }
+.task-preview__row:last-child { border-bottom: 0; }
+.task-preview__row span { color: #8f9db5; }
+.task-preview__row b { max-width: 68%; overflow: hidden; color: #edf1f8; font-weight: 650; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.task-preview__empty { padding: 12px 13px; color: #8f9db5; font-size: 11.5px; line-height: 1.45; }
+
+/* ─────────────────────── Performance & accessibility pass ─────────────────────
+   Большой список чатов держит в DOM только окно вокруг scroll viewport-а.
+   Остальные строки остаются в виртуальном треке, поэтому скроллбар честно
+   показывает размер полного списка, но браузер не layout-ит тысячи кнопок. */
+.virtual-list {
+  position: relative;
+  max-height: min(62vh, 560px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.virtual-list__track { position: relative; width: 100%; }
+.virtual-list__items { position: absolute; inset: 0 0 auto; width: 100%; }
+.virtual-list__items > .chat {
+  min-height: 76px;
+  box-sizing: border-box;
+}
+#chatList > .virtual-list { margin-top: 2px; }
+#pickerList > .virtual-list { max-height: 46vh; }
+
+.account__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 9px 0 0 48px;
+  color: #92a0b8;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.account__meta span + span::before { content: '·'; margin-right: 12px; color: #59657c; }
+
+/* В длинных карточках secondary-строка переносится, но основной статус и
+   кнопки остаются видимыми. */
+.account__body { overflow-wrap: anywhere; }
+.account__reason { overflow-wrap: anywhere; }
+
+@media (max-width: 390px) {
+  .account__meta { margin-left: 0; }
+  .account__meta span + span::before { margin-right: 6px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .virtual-list, .sheet__panel, .toast, * { scroll-behavior: auto !important; }
+}
+
+/* Журнал доставки: успехи и ошибки различаются формой и цветом, а не только
+   мелкой подписью — это легче читать в тёмной шторке и скринридеру. */
+.journal-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 0;
+  border-bottom: 1px solid rgba(197, 210, 241, .09);
+}
+.journal-row:last-child { border-bottom: 0; }
+.journal-row__mark {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 800;
+}
+.journal-row--ok { color: #7be3b4; }
+.journal-row--info { color: #9ecbff; }
+.journal-row--error { color: #ff9eb0; }
+.journal-row__body { min-width: 0; flex: 1; }
+.journal-row__title { color: #edf1f8; font-size: 12.5px; font-weight: 700; }
+.journal-row__detail { margin-top: 3px; color: #98a6bd; font-size: 11.5px; line-height: 1.4; overflow-wrap: anywhere; }
+.journal-row__time { flex: none; color: #7e8ba2; font-size: 10.5px; white-space: nowrap; }
+
+/* Единый блок настроек отправки: сначала механика запуска, затем параметры,
+   которые одинаковы для расписания и очереди. Это убирает ощущение, что часть
+   возможностей «пропала» при переключении режима. */
+.task-subsection-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 -2px;
+  color: #e9b5d1;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.task-subsection-label::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  background: rgba(240, 108, 173, .18);
+}
+.send-mode-note {
+  margin-top: 9px;
+  color: #9ba8bf;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.task-options__body > .task-subsection-label:not(:first-child) { margin-top: 12px; }
+
+/* ═════════════════════ Вариант 2 · фирменная компактная форма отправки ═════════════════════
+   Компоновка берёт идею второго макета, но использует палитру, радиусы,
+   границы и градиентные акценты уже существующего кабинета. */
+.task-options--compact {
+  margin-top: 5px;
+  border-radius: 19px;
+  border-color: rgba(240, 108, 173, .28);
+  background:
+    radial-gradient(100% 45% at 100% 0%, rgba(154, 120, 255, .11), transparent 70%),
+    linear-gradient(180deg, rgba(24, 32, 54, .92), rgba(12, 17, 30, .94));
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .18), inset 0 1px 0 rgba(255, 255, 255, .045);
+}
+.task-options--compact > summary {
+  min-height: 54px;
+  padding: 10px 14px;
+  border-bottom-color: rgba(240, 108, 173, .16);
+}
+.task-options--compact > summary b { font-size: 14px; }
+.task-options--compact > summary small { color: #a8b4c9; }
+.task-options--compact[open] > summary { background: rgba(240, 108, 173, .055); }
+.task-options--compact .task-options__body { gap: 16px; padding: 14px; }
+.task-options--compact .task-subsection { display: grid; gap: 9px; }
+.task-options--compact .task-subsection-label { margin: 0; color: #f0a8ca; font-size: 10px; letter-spacing: .11em; }
+.task-options--compact .task-subsection-label::after { background: linear-gradient(90deg, rgba(240, 108, 173, .27), rgba(154, 120, 255, .08)); }
+.task-options--compact .task-subsection-fields { display: grid; gap: 9px; }
+
+/* Переключатель и поля расписания — самостоятельная верхняя карточка. */
+.task-options--compact .task-subsection--mode {
+  padding: 11px;
+  border: 1px solid rgba(197, 210, 241, .13);
+  border-radius: 15px;
+  background: rgba(8, 13, 25, .34);
+}
+.task-options--compact .task-subsection--mode .task-subsection-label { padding: 0 1px; }
+.task-options--compact .task-subsection--mode .task-subsection-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+.task-options--compact .task-subsection--mode [data-field="send_mode"],
+.task-options--compact .task-subsection--mode [data-field="schedule_only"],
+.task-options--compact .task-subsection--mode [data-field="scheduled_posts"] { grid-column: 1 / -1; }
+.task-options--compact .task-subsection--mode [data-field="send_mode"] {
+  padding-bottom: 2px;
+}
+.task-options--compact .task-subsection--mode [data-field="send_mode"] .field__label { display: none; }
+.task-options--compact .task-subsection--mode [data-field="send_mode"] .segmented { min-height: 44px; padding: 4px; }
+.task-options--compact .task-subsection--mode [data-field="send_mode"] .seg { min-height: 34px; font-size: 12px; }
+.task-options--compact .task-subsection--mode .field input,
+.task-options--compact .task-subsection--mode .field select { min-height: 44px; }
+.task-options--compact .task-subsection--mode .field__label { font-size: 11px; color: #9ba9c0; }
+.task-options--compact .task-subsection--mode .send-mode-note {
+  margin: 4px 1px 0;
+  padding: 8px 9px;
+  border-left: 2px solid rgba(240, 108, 173, .58);
+  border-radius: 0 8px 8px 0;
+  background: rgba(240, 108, 173, .055);
+  color: #aebbd0;
+  font-size: 11px;
+  line-height: 1.42;
+}
+
+/* Общие параметры — фирменная сетка карточек, не длинный список галочек. */
+.task-options--compact .task-subsection--common .task-subsection-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+}
+.task-options--compact .task-subsection--common .field {
+  min-width: 0;
+  min-height: 62px;
+  padding: 10px;
+  border: 1px solid rgba(197, 210, 241, .13);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, .047), rgba(154, 120, 255, .035));
+}
+.task-options--compact .task-subsection--common .field:hover { border-color: rgba(240, 108, 173, .38); }
+.task-options--compact .task-subsection--common .field__label { font-size: 11.5px; line-height: 1.25; }
+.task-options--compact .task-subsection--common .field__label::after { display: none; }
+.task-options--compact .task-subsection--common .field--check {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-content: center;
+  min-height: 62px;
+  padding: 10px;
+}
+.task-options--compact .task-subsection--common .field--check .field__label { font-size: 12px; }
+.task-options--compact .task-subsection--common .field--check .field__note { grid-column: 1 / -1; padding-left: 0; }
+.task-options--compact .task-subsection--common .field input:not([type="checkbox"]),
+.task-options--compact .task-subsection--common .field select { min-height: 36px; padding: 8px 9px; font-size: 13px; }
+.task-options--compact .task-subsection--common .field__note { font-size: 10px; }
+
+/* Остальные параметры не спорят с общими за внимание. */
+.task-options--compact .task-subsection--other {
+  padding-top: 2px;
+  border-top: 1px solid rgba(197, 210, 241, .09);
+}
+.task-options--compact .task-subsection--other .task-subsection-fields { gap: 10px; }
+
+@media (max-width: 380px) {
+  .task-options--compact .task-subsection--common .task-subsection-fields { grid-template-columns: minmax(0, 1fr); }
+  .task-options--compact .task-subsection--mode .task-subsection-fields { grid-template-columns: minmax(0, 1fr); }
+  .task-options--compact .task-subsection--mode [data-field="send_mode"],
+  .task-options--compact .task-subsection--mode [data-field="schedule_only"],
+  .task-options--compact .task-subsection--mode [data-field="scheduled_posts"] { grid-column: auto; }
+}
+
+/* У постинга второй вариант — это не «закрытый аккордеон», а полноценная
+   карточка настроек. Поэтому блок виден сразу и не маскирует возможности. */
+.task-options--panel {
+  display: block;
+  margin-top: 5px;
+  border-radius: 19px;
+  border-color: rgba(240, 108, 173, .30);
+  background:
+    radial-gradient(100% 45% at 100% 0%, rgba(154, 120, 255, .12), transparent 70%),
+    linear-gradient(180deg, rgba(24, 32, 54, .94), rgba(12, 17, 30, .96));
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .20), inset 0 1px 0 rgba(255, 255, 255, .05);
+}
+.task-options--panel > .task-options__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 55px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(240, 108, 173, .17);
+  background: rgba(240, 108, 173, .055);
+}
+.task-options--panel > .task-options__summary span { display: grid; gap: 3px; }
+.task-options--panel > .task-options__summary b { color: #f5f7fc; font-size: 14px; }
+.task-options--panel > .task-options__summary small { color: #a8b4c9; font-size: 11.5px; }
+.task-options--panel > .task-options__summary i { color: #f4a3c9; font-size: 19px; font-style: normal; transform: rotate(180deg); }
+.task-options--panel > .task-options__body { padding: 14px; }
+
+/* ═════════════════════ ДОЧА GLAM-TECH · visual identity ═════════════════════
+   Здесь не просто «ещё один тёмный блок»: шторка получает собственный язык
+   бренда — глянцевый ультрафиолет, жидкий хром, неоновая фуксия и тонкая
+   технологичная сетка. Логика формы и привычные размеры контролов не меняются. */
+#taskSheet .sheet__panel {
+  --docha-pink: #ff4fa8;
+  --docha-violet: #9b6dff;
+  --docha-cyan: #57e6ef;
+  --docha-chrome: #f8e9f5;
+  position: absolute;
+  overflow-x: hidden;
+  border-top-color: rgba(255, 119, 196, .62);
+  background:
+    radial-gradient(95% 38% at 8% 0%, rgba(255, 54, 159, .20), transparent 67%),
+    radial-gradient(75% 40% at 100% 8%, rgba(87, 230, 239, .11), transparent 64%),
+    radial-gradient(90% 65% at 50% 100%, rgba(117, 57, 214, .12), transparent 72%),
+    linear-gradient(180deg, #171127 0%, #0d0c19 48%, #090b14 100%);
+  box-shadow: 0 -22px 70px rgba(255, 41, 159, .15), 0 -16px 45px rgba(0, 0, 0, .68);
+}
+#taskSheet .sheet__panel::after {
+  content: '';
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  pointer-events: none;
+  opacity: .22;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, .025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, .018) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: linear-gradient(180deg, rgba(0,0,0,.9), transparent 80%);
+}
+#taskSheet .sheet__panel > * { position: relative; z-index: 1; }
+#taskSheet .sheet__panel::before {
+  z-index: 3;
+  background: linear-gradient(90deg, rgba(87, 230, 239, .65), rgba(255, 255, 255, .80) 48%, rgba(255, 79, 168, .85));
+  box-shadow: 0 0 12px rgba(255, 79, 168, .55), 0 0 12px rgba(87, 230, 239, .35);
+}
+#taskSheet .sheet__head {
+  position: sticky;
+  top: -16px;
+  z-index: 8;
+  padding-top: 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, .07);
+  background:
+    linear-gradient(180deg, rgba(18, 13, 34, .98) 66%, rgba(18, 13, 34, .86) 86%, transparent),
+    radial-gradient(55% 100% at 0% 0%, rgba(255, 79, 168, .10), transparent 75%);
+}
+#taskSheet .sheet__title {
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 7px;
+}
+#taskSheet .sheet__title > .ic {
+  width: 22px;
+  height: 22px;
+  margin-top: 8px;
+  padding: 5px;
+  box-sizing: content-box;
+  border-radius: 10px;
+  color: #fff;
+  background: linear-gradient(135deg, #ff4fa8 0%, #9b6dff 58%, #57e6ef 150%);
+  box-shadow: 0 0 20px rgba(255, 79, 168, .32), inset 0 1px 0 rgba(255,255,255,.42);
+}
+.task-title__copy { display: grid; min-width: 0; gap: 2px; }
+.task-title__copy small {
+  color: rgba(87, 230, 239, .80);
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: .16em;
+  line-height: 1.1;
+}
+.task-title__copy strong {
+  overflow: hidden;
+  color: #fff;
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: -.015em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 0 18px rgba(255, 79, 168, .18);
+}
+#taskSheet .sheet__title + .icon-btn {
+  margin-top: 8px;
+  border-color: rgba(255, 255, 255, .12);
+  background: rgba(255, 255, 255, .055);
+  box-shadow: 0 0 18px rgba(255, 79, 168, .08);
+}
+#taskSheet .sheet__lead {
+  position: relative;
+  margin-top: 4px;
+  padding: 11px 13px 11px 15px;
+  border: 1px solid rgba(255, 255, 255, .09);
+  border-left: 2px solid rgba(87, 230, 239, .70);
+  border-radius: 13px;
+  color: #bdc5d7;
+  background: linear-gradient(100deg, rgba(255, 79, 168, .075), rgba(87, 230, 239, .045));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.045);
+}
+#taskSheet .task-section-label,
+#taskSheet .task-subsection-label {
+  color: #f6b9d8;
+  font-weight: 850;
+  letter-spacing: .14em;
+}
+#taskSheet .task-section-label::before,
+#taskSheet .task-subsection-label::before {
+  content: '✦';
+  color: var(--accent);
+  font-size: 12px;
+  text-shadow: 0 0 10px rgba(255, 61, 154, .8);
+}
+#taskSheet .task-section-label::after,
+#taskSheet .task-subsection-label::after {
+  background: linear-gradient(90deg, rgba(255, 79, 168, .36), rgba(87, 230, 239, .06));
+}
+
+/* Глянцевый слой у главной карточки настроек. */
+#taskSheet .task-options--compact {
+  position: relative;
+  isolation: isolate;
+  border-color: rgba(255, 105, 189, .38);
+  background:
+    linear-gradient(135deg, rgba(255,255,255,.06), transparent 22%),
+    radial-gradient(90% 45% at 0% 0%, rgba(255, 79, 168, .13), transparent 70%),
+    radial-gradient(70% 44% at 100% 2%, rgba(87, 230, 239, .10), transparent 70%),
+    linear-gradient(180deg, rgba(24, 20, 48, .92), rgba(10, 14, 27, .96));
+  box-shadow: 0 18px 42px rgba(0,0,0,.25), 0 0 0 1px rgba(155, 109, 255, .10), inset 0 1px 0 rgba(255,255,255,.10);
+}
+#taskSheet .task-options--compact::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  inset: 0 13% auto 13%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #57e6ef 28%, #ff4fa8 70%, transparent);
+  box-shadow: 0 0 15px rgba(255,79,168,.65);
+}
+#taskSheet .task-options--compact > .task-options__summary {
+  border-bottom-color: rgba(255, 255, 255, .09);
+  background: linear-gradient(90deg, rgba(255, 79, 168, .10), rgba(155, 109, 255, .06) 52%, rgba(87, 230, 239, .06));
+}
+#taskSheet .task-options--compact > .task-options__summary b {
+  background: linear-gradient(90deg, #fff 15%, #ffb8da 65%, #aeeef1 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+#taskSheet .task-options--compact > .task-options__summary i { color: #57e6ef; text-shadow: 0 0 9px rgba(87,230,239,.65); }
+#taskSheet .task-options--compact .task-subsection--mode {
+  border-color: rgba(87, 230, 239, .22);
+  background: linear-gradient(135deg, rgba(87,230,239,.07), rgba(255,79,168,.045) 65%, rgba(0,0,0,.12));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 8px 22px rgba(0,0,0,.12);
+}
+#taskSheet .task-options--compact .task-subsection--mode .segmented {
+  border-color: rgba(255, 111, 190, .28);
+  background: rgba(6, 10, 21, .82);
+  box-shadow: inset 0 0 16px rgba(155,109,255,.10);
+}
+#taskSheet .task-options--compact .task-subsection--mode .seg.is-active {
+  background: linear-gradient(115deg, #ff4fa8 0%, #b25cf2 58%, #656dff 100%);
+  box-shadow: 0 0 18px rgba(255,79,168,.34), inset 0 1px 0 rgba(255,255,255,.26);
+}
+#taskSheet .task-options--compact .send-mode-note {
+  border-left-color: #57e6ef;
+  background: linear-gradient(90deg, rgba(87,230,239,.08), transparent);
+  color: #b8d9dd;
+}
+#taskSheet .task-options--compact .task-subsection--common .field {
+  position: relative;
+  overflow: hidden;
+  border-color: rgba(255, 255, 255, .11);
+  background:
+    linear-gradient(135deg, rgba(255,255,255,.065), rgba(255,255,255,.018) 44%, rgba(155,109,255,.045)),
+    rgba(11, 16, 29, .54);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.045), 0 8px 18px rgba(0,0,0,.10);
+}
+#taskSheet .task-options--compact .task-subsection--common .field::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 13px;
+  right: 13px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(255,79,168,.75), rgba(87,230,239,.18), transparent);
+  opacity: .72;
+}
+#taskSheet .task-options--compact .task-subsection--common .field:hover {
+  border-color: rgba(255, 105, 189, .48);
+  box-shadow: 0 0 17px rgba(255,79,168,.10), inset 0 1px 0 rgba(255,255,255,.09);
+}
+#taskSheet .task-options--compact .task-subsection--common .field--check input:checked {
+  background: linear-gradient(135deg, #ff4fa8, #9b6dff 75%);
+  box-shadow: 0 0 14px rgba(255,79,168,.50);
+}
+#taskSheet .task-options--compact .task-subsection--common .field--check input:not(:checked) {
+  border-color: rgba(87,230,239,.34);
+}
+#taskSheet .task-options--compact .task-subsection--other {
+  border-top-color: rgba(87, 230, 239, .14);
+}
+#taskSheet .task-submitbar {
+  border-top-color: rgba(255, 102, 188, .22);
+  background: linear-gradient(180deg, rgba(9, 12, 23, .72), rgba(7, 9, 17, .99) 26%);
+}
+#taskSheet .task-submitbar .btn--primary {
+  position: relative;
+  overflow: hidden;
+  border-color: rgba(255,255,255,.18);
+  background: linear-gradient(115deg, #ff4fa8 0%, #b35bf3 58%, #6674ff 100%);
+  box-shadow: 0 0 24px rgba(255,79,168,.24), inset 0 1px 0 rgba(255,255,255,.30);
+}
+#taskSheet .task-submitbar .btn--primary::after {
+  content: '';
+  position: absolute;
+  top: -40%;
+  left: -18%;
+  width: 24%;
+  height: 180%;
+  transform: rotate(22deg);
+  background: rgba(255,255,255,.25);
+  filter: blur(4px);
+  pointer-events: none;
+}
+#taskSheet .task-submitbar .btn--primary:hover {
+  box-shadow: 0 0 32px rgba(255,79,168,.38), 0 8px 28px rgba(102,116,255,.20), inset 0 1px 0 rgba(255,255,255,.36);
+}
+
+/* Закрытый блок остаётся компактным, но сразу считывается как фирменная
+   глянцевая панель — лишние поля не занимают экран до клика. */
+#taskSheet .task-options--compact {
+  position: relative;
+  isolation: isolate;
+  border-color: rgba(255, 105, 189, .38);
+  background:
+    radial-gradient(85% 70% at 0% 0%, rgba(255, 79, 168, .12), transparent 72%),
+    radial-gradient(70% 60% at 100% 0%, rgba(87, 230, 239, .09), transparent 72%),
+    linear-gradient(180deg, rgba(24, 20, 48, .92), rgba(10, 14, 27, .96));
+  box-shadow: 0 14px 36px rgba(0,0,0,.22), 0 0 0 1px rgba(155,109,255,.10), inset 0 1px 0 rgba(255,255,255,.09);
+}
+#taskSheet .task-options--compact::before {
+  content: '';
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  left: 13%;
+  right: 13%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #57e6ef 28%, #ff4fa8 72%, transparent);
+  box-shadow: 0 0 15px rgba(255,79,168,.60);
+  pointer-events: none;
+}
+#taskSheet .task-options--compact > summary {
+  position: relative;
+  z-index: 1;
+  min-height: 58px;
+  border-bottom-color: rgba(255,255,255,.09);
+  background: linear-gradient(90deg, rgba(255,79,168,.10), rgba(155,109,255,.06) 52%, rgba(87,230,239,.06));
+}
+#taskSheet .task-options--compact > summary b {
+  background: linear-gradient(90deg, #fff 15%, #ffb8da 65%, #aeeef1 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+#taskSheet .task-options--compact > summary small { color: #b5bfd2; }
+#taskSheet .task-options--compact > summary i { color: #57e6ef; text-shadow: 0 0 9px rgba(87,230,239,.65); }
+#taskSheet .task-options--compact[open] > summary { background: linear-gradient(90deg, rgba(255,79,168,.15), rgba(155,109,255,.09) 52%, rgba(87,230,239,.08)); }
+#taskSheet .task-options--compact .task-subsection--mode {
+  border-color: rgba(87,230,239,.23);
+  background: linear-gradient(135deg, rgba(87,230,239,.07), rgba(255,79,168,.045) 65%, rgba(0,0,0,.12));
+}
+#taskSheet .task-options--compact .task-subsection--common .field {
+  border-color: rgba(255,255,255,.11);
+  background: linear-gradient(135deg, rgba(255,255,255,.065), rgba(255,255,255,.018) 44%, rgba(155,109,255,.045)), rgba(11,16,29,.54);
+}
+#taskSheet .task-options--compact .task-subsection--common .field:hover { border-color: rgba(255,105,189,.48); box-shadow: 0 0 17px rgba(255,79,168,.10), inset 0 1px 0 rgba(255,255,255,.09); }
+#taskSheet .task-options--compact .task-subsection--common .field--check input:checked { background: linear-gradient(135deg, #ff4fa8, #9b6dff 75%); box-shadow: 0 0 14px rgba(255,79,168,.50); }
+#taskSheet .task-options--compact .task-subsection--common .field--check input:not(:checked) { border-color: rgba(87,230,239,.34); }
+
+/* ═════════════════════ Фирменная форма ДОЧИ · королева и неоновый город ═════════════════════
+   У формы есть настоящая визуальная опора бренда, а не абстрактные слова:
+   корона, ночной город и розовый свет из фирменного баннера. */
+#taskSheet .sheet__panel {
+  background:
+    linear-gradient(180deg, rgba(7, 3, 11, .10) 0%, rgba(8, 4, 13, .56) 22%, #100c18 34%, #090a11 100%),
+    url("assets/docha-queen.jpg") 50% 0 / 100% 300px no-repeat,
+    radial-gradient(80% 34% at 0% 0%, rgba(255, 37, 143, .20), transparent 72%),
+    radial-gradient(75% 42% at 100% 12%, rgba(76, 141, 255, .10), transparent 72%),
+    linear-gradient(180deg, #17091d 0%, #0b0b13 45%, #08090f 100%);
+  border-top-color: rgba(255, 101, 179, .72);
+  box-shadow: 0 -24px 74px rgba(255, 35, 144, .18), 0 -16px 45px rgba(0, 0, 0, .70);
+}
+#taskSheet .sheet__panel::after {
+  opacity: .12;
+  background-image: linear-gradient(rgba(255,255,255,.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+  background-size: 30px 30px;
+  mask-image: linear-gradient(180deg, transparent 0, rgba(0,0,0,.5) 25%, rgba(0,0,0,.08) 42%, transparent 72%);
+}
+#taskSheet .sheet__head {
+  min-height: 60px;
+  margin-bottom: 10px;
+  padding-top: 20px;
+  background: linear-gradient(180deg, rgba(10, 4, 14, .78) 0%, rgba(10, 4, 14, .24) 86%, transparent 100%);
+  border-bottom: 0;
+}
+#taskSheet .sheet__head::after { content: none; }
+#taskSheet .sheet__title { padding-top: 9px; }
+#taskSheet .task-title__copy small { color: #fff2fb; font-size: 10px; letter-spacing: .18em; text-shadow: 0 0 12px rgba(255,81,166,.65); }
+#taskSheet .task-title__copy strong { font-size: 17px; text-shadow: 0 3px 15px rgba(0,0,0,.62); }
+#taskSheet .sheet__title > .ic { margin-top: 10px; background: linear-gradient(135deg, #ff4fa8, #b44fdb); box-shadow: 0 0 24px rgba(255,79,168,.48), inset 0 1px 0 rgba(255,255,255,.42); }
+#taskSheet .sheet__lead {
+  margin-top: 2px;
+  border: 1px solid rgba(255,255,255,.13);
+  border-left: 2px solid rgba(255,95,177,.76);
+  background: linear-gradient(100deg, rgba(8,6,14,.64), rgba(30,10,31,.45));
+  box-shadow: 0 10px 24px rgba(0,0,0,.20), inset 0 1px 0 rgba(255,255,255,.07);
+  color: #eee3ed;
+}
+/* Режим теперь находится до обязательных полей — он считывается как главный
+   выбор, а «Настройки отправки» остаются ниже закрываемым блоком. */
+#taskSheet #taskFields > .task-subsection--mode {
+  position: relative;
+  margin: 3px 0 4px;
+  padding: 13px;
+  border: 1px solid rgba(255, 103, 180, .42);
+  border-radius: 19px;
+  background:
+    linear-gradient(135deg, rgba(255,255,255,.055), transparent 30%),
+    radial-gradient(80% 80% at 0% 0%, rgba(255, 48, 148, .16), transparent 75%),
+    linear-gradient(180deg, rgba(27, 15, 35, .90), rgba(13, 12, 21, .86));
+  box-shadow: 0 15px 36px rgba(0,0,0,.24), inset 0 1px 0 rgba(255,255,255,.08);
+}
+#taskSheet #taskFields > .task-subsection--mode::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 12%;
+  right: 12%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #ff63ae 35%, #66dfe3 70%, transparent);
+  box-shadow: 0 0 14px rgba(255,76,166,.70);
+}
+#taskSheet #taskFields > .task-subsection--mode .task-subsection-label { color: #ffc0dc; }
+#taskSheet #taskFields > .task-subsection--mode .task-subsection-fields { gap: 10px; }
+#taskSheet #taskFields > .task-subsection--mode [data-field="send_mode"] .field__label { display: none; }
+#taskSheet #taskFields > .task-subsection--mode [data-field="send_mode"] .segmented { min-height: 46px; padding: 4px; border-color: rgba(255,112,185,.36); background: rgba(5,6,12,.74); }
+#taskSheet #taskFields > .task-subsection--mode [data-field="send_mode"] .seg { min-height: 36px; font-size: 12px; }
+#taskSheet #taskFields > .task-subsection--mode [data-field="send_mode"] .seg.is-active { background: linear-gradient(115deg, #ff4fa8 0%, #b550dc 62%, #6578eb 100%); box-shadow: 0 0 20px rgba(255,76,166,.42), inset 0 1px 0 rgba(255,255,255,.26); }
+#taskSheet #taskFields > .task-subsection--mode [data-field="send_mode"],
+#taskSheet #taskFields > .task-subsection--mode [data-field="schedule_only"],
+#taskSheet #taskFields > .task-subsection--mode [data-field="scheduled_posts"] { grid-column: 1 / -1; }
+/* Основные поля — спокойные стеклянные строки поверх фирменного изображения. */
+#taskSheet #taskFields > .task-section-label { margin-top: 7px; }
+#taskSheet #taskFields > .field:not(.field--check) {
+  border-color: rgba(255,255,255,.10);
+  border-radius: 16px;
+  padding: 10px 12px;
+  background: linear-gradient(100deg, rgba(22,13,28,.82), rgba(11,13,20,.72));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.045), 0 9px 22px rgba(0,0,0,.14);
+}
+#taskSheet #taskFields > .field:not(.field--check) .field__label::after { background: linear-gradient(90deg, rgba(255,91,174,.18), transparent); }
+#taskSheet #taskFields > .field:not(.field--check) input,
+#taskSheet #taskFields > .field:not(.field--check) textarea,
+#taskSheet #taskFields > .field:not(.field--check) select { background: rgba(255,255,255,.045); border-color: rgba(255,255,255,.11); }
+/* Закрытая карточка настроек — главный глянцевый акцент ниже основных полей. */
+#taskSheet .task-options--compact {
+  margin-top: 5px;
+  border-color: rgba(255,100,179,.56);
+  background: linear-gradient(135deg, rgba(255,255,255,.06), transparent 28%), linear-gradient(180deg, rgba(33,16,42,.92), rgba(13,11,20,.96));
+  box-shadow: 0 16px 36px rgba(0,0,0,.26), 0 0 0 1px rgba(181,76,215,.12), inset 0 1px 0 rgba(255,255,255,.10);
+}
+#taskSheet .task-options--compact > summary { min-height: 68px; padding: 12px 14px; background: linear-gradient(90deg, rgba(255,74,165,.12), rgba(93,109,220,.08)); }
+#taskSheet .task-options--compact > summary b { font-size: 14px; background: linear-gradient(90deg, #fff, #ffb7d9 68%, #a9e9e9); -webkit-background-clip: text; background-clip: text; color: transparent; }
+#taskSheet .task-options--compact > summary small { color: #c5b5c6; }
+#taskSheet .task-options--compact > summary i { color: #9ee9ea; text-shadow: 0 0 10px rgba(87,230,239,.6); }
+#taskSheet .task-options--compact[open] > summary { background: linear-gradient(90deg, rgba(255,74,165,.18), rgba(93,109,220,.12)); }
+#taskSheet .task-submitbar { border-top-color: rgba(255,98,179,.24); background: linear-gradient(180deg, rgba(8,8,14,.72), rgba(7,8,12,.99) 28%); }
+#taskSheet .task-submitbar .btn--primary { background: linear-gradient(115deg, #ff4fa8 0%, #b34fdd 58%, #6078e9 100%); box-shadow: 0 0 26px rgba(255,77,166,.30), inset 0 1px 0 rgba(255,255,255,.30); }
+
+/* Финальная связка бренда: главная и заставка используют тот же фирменный
+   кадр королевы, что и утверждённая шторка задачи. Так ДОЧА узнаётся сразу,
+   а не только внутри одной формы. */
+.boot__bg { background-image: url("assets/docha-queen.jpg"); background-position: 50% 22%; }
+.hero { --hero-image: url("assets/docha-queen.jpg"); }
+.hero__art { background-position: 50% 22%; }
+
+/* Возврат главного экрана к прежнему оформлению: фирменный кадр королевы
+   оставляем только в утверждённой шторке задачи, а hero кабинета снова
+   использует прежнее кадрирование и не спорит с навигацией. */
+.boot__bg { background-image: url("assets/docha.jpg"); background-position: 78% 30%; }
+.hero { --hero-image: url("assets/docha.jpg"); }
+.hero__art { background-position: 78% 30%; }
+
+/* ═════════════════════ Финальная проверка интерфейса · компактность ═════════════════════
+   Один ритм для всех вкладок: короткая сводка сверху, действие рядом с объектом,
+   подробности — только там, где они действительно нужны. */
+.content { padding-top: 12px; }
+.screen__title { font-size: 23px; letter-spacing: -.025em; }
+.screen__sub { max-width: 650px; margin-bottom: 11px; line-height: 1.42; }
+.section-label { margin-top: 16px; margin-bottom: 8px; font-size: 10px; }
+.cards, .list { gap: 8px; }
+
+/* Каталог команд: название и различие видны сразу, длинное описание не растит
+   карточку до размера отдельной страницы. */
+.card--cmd { min-height: 78px; padding: 10px 11px; gap: 10px; border-radius: 15px; }
+.cmd__ico { width: 38px; height: 38px; border-radius: 11px; }
+.cmd__title { font-size: 14px; }
+.cmd__desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; line-height: 1.3; }
+.cmd__foot { margin-top: 5px; gap: 4px 6px; }
+.cmd__tag { padding: 2px 7px; font-size: 10px; }
+.cmd__chevron { font-size: 18px; }
+.create-cell__desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; line-height: 1.3; }
+
+/* Карточка задачи: заголовок, состояние и прогресс читаются до кнопок. */
+.task { padding: 11px 12px 10px; border-radius: 15px; }
+.task__top { gap: 9px; }
+.task__ico { width: 35px; height: 35px; border-radius: 10px; }
+.task__title { font-size: 13.5px; }
+.task__meta { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; line-height: 1.35; }
+.task__actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 7px; margin-top: 9px; padding-top: 9px; }
+.task__acts { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.task__actions .btn { min-height: 35px; padding: 7px 9px; font-size: 11px; border-radius: 10px; }
+.task__actions > .btn--danger { min-width: 35px; padding: 7px; }
+.task__alert { max-height: 68px; overflow: auto; }
+
+/* Чаты и библиотека — строки, а не большие карточки. Смысл остаётся в заголовке,
+   счётчике и одном действии справа. */
+.chat { min-height: 55px; padding: 8px 10px; gap: 9px; border-radius: 13px; }
+.chat__ico { width: 34px; height: 34px; }
+.chat__title { font-size: 13.5px; }
+.chat__sub { font-size: 11px; }
+.chat__kind { padding: 3px 7px; font-size: 9.5px; }
+.lib { padding: 9px 10px; gap: 9px; border-radius: 13px; }
+.lib__title { font-size: 13px; }
+.lib__text { -webkit-line-clamp: 1; }
+.lib__acts { gap: 7px; }
+.lib__del { width: 31px; height: 31px; display: grid; place-items: center; }
+
+/* Нижние панели не должны перекрывать смысловые кнопки на узких экранах. */
+.chat-bar { left: 8px; right: 8px; padding: 10px; gap: 7px; border-radius: 15px; }
+.chat-bar__btns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.chat-bar__btns .btn { min-height: 36px; padding: 7px 8px; font-size: 10.5px; }
+.chat-bar__clear { margin-left: 0; }
+
+/* Подписка и аккаунты: сначала состояние и главное действие, вспомогательные
+   операции — ниже, одинаковыми компактными кнопками. */
+.account { gap: 7px; padding: 10px 11px; }
+.account__meta { display: flex; flex-wrap: wrap; gap: 4px 10px; line-height: 1.3; }
+.card--sub, .card--bonus { padding: 13px; }
+.sub__actions { gap: 6px; margin-top: 10px; }
+.sub__actions .btn, .bonus__actions .btn { min-height: 38px; padding: 8px 10px; font-size: 11.5px; }
+
+/* На широком экране плотность не превращается в пустоту: две колонки только
+   там, где карточки действительно независимы. На телефоне остаётся одна. */
+@media (min-width: 760px) {
+  .content { max-width: 820px; margin: 0 auto; }
+  #tab-commands .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #tab-accounts .list, #tab-library .list { gap: 9px; }
+  #tab-home .tiles { gap: 10px; }
+}
+@media (max-width: 390px) {
+  .screen__title { font-size: 22px; }
+  .cmd__tag:nth-of-type(n+3) { display: none; }
+  .badge { padding-left: 7px; padding-right: 7px; font-size: 9.5px; }
+  .task__actions { grid-template-columns: minmax(0, 1fr) 35px; }
+  .chat-bar__btns .btn { font-size: 10px; }
+}
+/* Long launch summaries stay readable on a phone. */
+.confirm__text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.confirm__panel { max-height: 90dvh; overflow-y: auto; }
+
+/* Account setup and join progress */
+.account__tools { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+.warmup__birthday { display:grid; grid-template-columns:1fr 1fr 1.4fr; gap:8px; }
+.warmup__birthday input { width:100%; min-width:0; }
+#warmupForm[hidden] { display:none; }
+#warmupForm fieldset { border:0; padding:0; margin:0; min-width:0; }
+#warmupStatus { white-space:pre-wrap; }
+.queue__report { padding:12px; font-size:13px; overflow-wrap:anywhere; }
+.queue__report details { max-height:260px; overflow:auto; }
+.queue__report p { margin:6px 0; }
+
+#warmupForm[hidden], #warmupPreview[hidden], #warmupLaunchActions[hidden] { display:none; }
+#warmupForm fieldset { border:1px solid rgba(255,255,255,.1); border-radius:14px; padding:12px; margin:0; min-width:0; }
+#warmupForm legend { font-weight:600; padding:0 6px; }
+.warmup__row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.warmup__row input { min-width:0; width:100%; }
+.warmup__check { display:flex; align-items:center; gap:10px; padding:10px 0; font-size:14px; }
+.warmup__check input { width:20px; height:20px; flex-shrink:0; }
+.warmup__preset { display:flex; align-items:center; gap:12px; font-size:12px; color:var(--muted); margin:10px 0; }
+.warmup__preset img { width:64px; height:64px; object-fit:cover; border-radius:50%; }
+.warmup__materials img { width:120px; border-radius:12px; margin:12px 0; }
+.warmup__materials p { font-size:13px; }
+.warmup__timeline { padding-left:24px; font-size:13px; }
+.warmup__timeline li { margin:12px 0; padding-bottom:8px; border-bottom:1px solid rgba(255,255,255,.08); overflow-wrap:anywhere; }
+.warmup__timeline p { margin:4px 0; color:var(--muted); }
+#warmupPreview details { margin:14px 0; }
+.warmup-journal { margin-bottom:18px; }
+.warmup-journal > summary { margin:14px 0; font-weight:700; cursor:pointer; }
+.journal__heading { margin:4px 0 10px; }
+#warmupLaunchActions { display:grid; gap:8px; padding-top:12px; }

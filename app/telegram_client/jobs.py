@@ -70,7 +70,7 @@ ONE_SHOT_KINDS: tuple[str, ...] = ("parser", "autosubscribe")
 # Запускаются ТОЛЬКО вручную: у таких задач нет обработчика входящих сообщений,
 # поэтому они не должны попадать в кэш «слушающих» правил. Иначе каждое
 # сообщение в источнике звало бы run_job и писало «Неизвестный тип задачи».
-MANUAL_ONLY_KINDS: tuple[str, ...] = ("parser",)
+MANUAL_ONLY_KINDS: tuple[str, ...] = ("parser", "warmup")
 
 # Живут по расписанию планировщика, а не по входящим сообщениям
 SCHEDULED_KINDS: tuple[str, ...] = ("poster", "mailing")
@@ -91,6 +91,7 @@ KIND_LABELS: dict[str, str] = {
     "checks": "ловец чеков",
     "parser": "парсер аудитории",
     "autosubscribe": "автоподписка",
+    "warmup": "автопрогрев",
     # Постинг и рассылка обе шлют ваш текст по чатам, поэтому в ярлык вынесено
     # отличие: у постинга расписание, у рассылки обход чатов по одному.
     "poster": "постинг по расписанию",
@@ -170,6 +171,8 @@ def task_title(rule: Any) -> str:
     source = getattr(rule, "source_title", None) or str(getattr(rule, "source_id", "") or "")
     target = getattr(rule, "target_title", None) or str(getattr(rule, "target_id", "") or "")
 
+    if kind == "warmup":
+        return f"Автопрогрев · {filters.get('warmup', {}).get('days', 7)} дн."
     if kind == "parser":
         return f"Парсер аудитории: {source}"
     if kind == "autosubscribe":
@@ -1823,13 +1826,24 @@ async def run_autosubscribe(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
             **_join_summary(outcome, 0),
         }
 
+    from app import join_queue
+    if join_queue.active():
+        retries = 0
+    completed = join_queue.completed_targets()
+    unique = [target for target in unique if target not in completed]
     per_run = max(0, int(getattr(conf, "join_limit", 0) or 0))
+    remaining = max(0, len(unique) - per_run) if per_run > 0 else 0
+    if remaining:
+        await join_queue.progress(remaining=remaining)
     if per_run > 0:
         unique = unique[:per_run]
     # Где уже сидим — туда не вступаем: повторный заход по всему списку при
     # каждом запуске — лишняя активность, которую Telegram считает.
     todo, skipped = await _split_already_member(rule.account_id, unique)
     outcome.already += skipped
+    for target in unique:
+        if target not in todo:
+            await join_queue.progress(target, "already")
     if not todo:
         return {"ok": True, **_join_summary(outcome, len(unique))}
     # Дневной лимит: сколько уже вступили сегодня — столько мест занято.
@@ -1865,7 +1879,7 @@ async def run_autosubscribe(client: Any, rule: RuleSnapshot) -> dict[str, Any]:
         }
     if outcome.limited:
         outcome.problems.append(f"дневной лимит вступлений исчерпан ({daily} в сутки)")
-    return {"ok": True, **_join_summary(outcome, len(unique))}
+    return {"ok": True, "remaining": remaining, **_join_summary(outcome, len(unique))}
 
 
 def _join_summary(outcome: JoinOutcome, total: int) -> dict[str, Any]:
@@ -2006,7 +2020,14 @@ async def _join_all(
             )
             return result
         stop_at = room if stop_at is None else min(stop_at, room)
+    from app import join_queue
     for target in targets:
+        if rule is not None and join_queue.active():
+            from app.telegram_client.manager import manager
+            if manager.pause_refusal(rule.account_id):
+                result.paused = True
+                break
+        await join_queue.progress(target)
         if stop_at is not None and result.joined >= stop_at:
             result.limited = True
             break
@@ -2015,10 +2036,11 @@ async def _join_all(
             try:
                 if target.startswith("+") or target.lower().startswith("joinchat/"):
                     invite_hash = target[1:] if target.startswith("+") else target.split("/", 1)[1]
-                    await client(ImportChatInviteRequest(invite_hash))
+                    await client(ImportChatInviteRequest(invite_hash), **({"flood_sleep_threshold": 0} if join_queue.active() else {}))
                 else:
-                    await client(JoinChannelRequest(target))
+                    await client(JoinChannelRequest(target), **({"flood_sleep_threshold": 0} if join_queue.active() else {}))
                 result.joined += 1
+                await join_queue.progress(target, "joined")
                 if rule is not None:
                     await _log_join(rule)
                 break
@@ -2026,6 +2048,8 @@ async def _join_all(
                 attempts -= 1
                 wait = int(getattr(exc, "seconds", 60))
                 if attempts <= 0 or wait > 60:
+                    await join_queue.progress(target, "waiting", code=type(exc).__name__)
+                    await join_queue.flood_wait(wait)
                     raise
                 logger.info("Автоподписка: FloodWait {} сек — ждём и повторяем {}", wait, target)
                 await asyncio.sleep(wait + 1)
@@ -2039,6 +2063,7 @@ async def _join_all(
                         rule.account_id, rule, " (вступления)"
                     )
                 result.paused = True
+                await join_queue.progress(target, "restricted", code="PeerFloodError")
                 result.problems.append(
                     "Telegram ограничил вступления (спамблок) — остаток позже"
                 )
@@ -2050,7 +2075,9 @@ async def _join_all(
                     # «уже участник», «заявка отправлена» — тут нечего исправлять,
                     # и краснеть карточке незачем.
                     result.already += 1
+                    await join_queue.progress(target, "requested" if name == "InviteRequestSentError" else "already")
                 else:
+                    await join_queue.progress(target, "error", code=name)
                     result.problems.append(f"не пустили в {target} ({name})")
                 break
         if result.paused:
@@ -2222,7 +2249,7 @@ async def record_pruned_chats(rule: RuleSnapshot, pruned: list[int]) -> None:
             source_msg_id=0,
             target_msg_id=None,
             status="ok",
-            error=f"🧹 Убраны мёртвые чаты ({repo.DEAD_CHAT_STRIKES} сбоя подряд): {chats}",
+            error=f"🧹 Убраны навсегда недоступные чаты: {chats}",
         )
         await session.commit()
 

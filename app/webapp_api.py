@@ -21,7 +21,7 @@ from aiogram.types import BufferedInputFile, LabeledPrice
 from aiohttp import web
 from loguru import logger
 
-from app import accounts_login, bonus, exports, paylink, promocode, referral, webapp_build
+from app import warmup, warmup_plan, join_queue, accounts_login, bonus, exports, paylink, promocode, referral, webapp_build
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
@@ -121,8 +121,13 @@ def _init_data_from_request(request: web.Request) -> str:
     return request.headers.get("X-Telegram-Init-Data") or ""
 
 
-def _json(data: Any, status: int = 200) -> web.Response:
-    return web.json_response(data, status=status, dumps=_dumps)
+def _json(
+    data: Any,
+    status: int = 200,
+    *,
+    headers: dict[str, str] | None = None,
+) -> web.Response:
+    return web.json_response(data, status=status, dumps=_dumps, headers=headers)
 
 
 def _require_account_login() -> None:
@@ -639,7 +644,7 @@ def _stored_chats(rule) -> list[tuple[int, str]]:
     return [(chat_id, names.get(str(chat_id)) or str(chat_id)) for chat_id in chat_recipients(rule)]
 
 
-async def _own_texts(payload: dict, filters: dict, *, user_id: int, partial: bool) -> None:
+async def _own_texts(payload: dict, filters: dict, *, user_id: int, partial: bool, preview: bool = False) -> None:
     """Что отправляет задача: текст из поля плюс сохранённые посты из библиотеки.
 
     Общее для рассылки и постинга (``OWN_TEXT_KINDS``): свои сообщения у обеих
@@ -685,6 +690,12 @@ async def _own_texts(payload: dict, filters: dict, *, user_id: int, partial: boo
     async with SessionLocal() as session:
         # Удалённые из библиотеки записи отбрасываются сами: их здесь уже нет.
         rows = await repo.saved_messages_by_ids(session, user_id, base)
+        if preview:
+            if len(rows) != len(set(base)):
+                raise ValidationError("Часть сообщений библиотеки недоступна. Выберите сообщения заново.")
+            filters["library_ids"] = [row.id for row in rows if not msgs or not (row.text or "").strip()]
+            filters["messages"] = msgs
+            return
         if not msgs:
             # Текста нет — уйдут выбранные записи. Пустой список означает «вся
             # библиотека»: так его читает планировщик.
@@ -794,6 +805,7 @@ async def _apply_task_settings(
     user_id: int,
     targets: list[str] | None = None,
     partial: bool = False,
+    preview: bool = False,
 ) -> None:
     """Настройки задачи из тела запроса — в filters правила.
 
@@ -907,9 +919,16 @@ async def _apply_task_settings(
         # (см. _own_texts и OWN_TEXT_KINDS). Раньше постинг держал копии текстов
         # в своих настройках: та же опечатка правилась дважды, а правка записи в
         # библиотеке до чатов постинга не доходила вообще.
-        await _own_texts(payload, filters, user_id=user_id, partial=partial)
+        await _own_texts(payload, filters, user_id=user_id, partial=partial, preview=preview)
         if given("interval"):
             filters["interval_seconds"] = max(1, _as_int(payload.get("interval"), 2)) * 60
+        # Эти параметры относятся к самому отправлению, а не к способу запуска.
+        # Постинг и рассылка используют общий mailing_send, поэтому «печатает»,
+        # случайный выбор и предпросмотр ссылок должны работать и в режиме
+        # «по расписанию», а не только в очереди.
+        for field in ("typing", "random_pick", "link_preview"):
+            if given(field):
+                filters[field] = _as_bool(payload.get(field))
         if given("start"):
             filters["window_start"] = str(payload.get("start") or "09:00")[:5]
         if given("end"):
@@ -985,7 +1004,7 @@ async def _apply_task_settings(
                 filters["repeats"] = 1
         elif given("repeats"):
             filters["repeat_forever"] = False
-        await _own_texts(payload, filters, user_id=user_id, partial=partial)
+        await _own_texts(payload, filters, user_id=user_id, partial=partial, preview=preview)
         if "subscribe_links" in payload:
             from app.telegram_client.jobs import explicit_join_target
             filters["subscribe_to"] = [
@@ -1115,6 +1134,8 @@ async def create_task(request: web.Request) -> web.Response:
         # старый клиент прислал только аккаунт/источник/приёмник — это пересылка
         command, kind = COMMANDS_BY_ID["copy_channel"], "forward"
 
+    if kind == "warmup":
+        return await _create_warmup(request, payload)
     account_id = _as_int(payload.get("account_id"), 0)
     source = str(payload.get("source") or "").strip()
     target = str(payload.get("target") or "").strip()
@@ -1319,7 +1340,8 @@ async def create_task(request: web.Request) -> web.Response:
     # Названия всех чатов задачи — рядом с их id: карточка покажет имена, а
     # правка задачи не будет заново обходить диалоги ради того же списка.
     _remember_names(filters, [found_source, found_target, found_user, *chat_pairs])
-    await _apply_task_settings(kind, payload, filters, user_id=user_id, targets=targets)
+    preview = request.query.get("preview") == "1"
+    await _apply_task_settings(kind, payload, filters, user_id=user_id, targets=targets, preview=preview)
     if kind == "forward" and mode == "forward" and int(filters.get("topic_id") or 0):
         # Ветку Telegram умеет только у своих постов: форвард чужого в топик
         # сервер не примет, и отказываем мы сразу — а не молча теряем посты.
@@ -1327,6 +1349,12 @@ async def create_task(request: web.Request) -> web.Response:
             {"error": "Ветка работает только в режиме «копия» — форвард в топик нельзя"},
             status=400,
         )
+
+    if preview:
+        return _json({"preview": await _creation_preview(
+            kind, filters, user_id, account_id, source_title,
+            _split_chats(chat_pairs, source_id if kind == "broadcast" else 0),
+        )})
 
     async with SessionLocal() as session:
         rule = await repo.add_rule(
@@ -1352,7 +1380,7 @@ async def create_task(request: web.Request) -> web.Response:
     # Парсер и автоподписка работают по запросу — запускаем их сразу
     run_result: dict | None = None
     if kind in ONE_SHOT_KINDS:
-        run_result = await manager.run_task_now(rule)
+        run_result = await join_queue.start(manager, rule) if kind == "autosubscribe" else await manager.run_task_now(rule)
 
     async with SessionLocal() as session:
         saved = await repo.get_rule(session, rule_id, user_id)
@@ -1360,8 +1388,72 @@ async def create_task(request: web.Request) -> web.Response:
     return await _task_json(saved, extra={"run": run_result}, status=201)
 
 
+async def _creation_preview(kind, filters, user_id, account_id, source, chats) -> dict:
+    """Read-only summary after the same validation and normalization as creation."""
+    from app.telegram_client.filters import FilterConfig, transform_text
+    from app.telegram_client.jobs import KIND_LABELS
+
+    conf = FilterConfig.from_dict(filters)
+    messages = list(conf.messages or [])
+    posts = 0
+    if kind in OWN_TEXT_KINDS:
+        async with SessionLocal() as session:
+            rows = await repo.saved_messages_by_ids(session, user_id, conf.library_ids or [])
+        messages.extend(row.text for row in rows if (row.text or "").strip())
+        posts = sum(not (row.text or "").strip() for row in rows)
+    slots = [slot for slot in (conf.scheduled_posts or []) if isinstance(slot, dict)]
+    async with SessionLocal() as session:
+        for slot in slots:
+            if slot.get("library_id"):
+                saved = await repo.saved_messages_by_ids(session, user_id, [slot["library_id"]])
+                if not saved:
+                    raise ValidationError("Сообщение из расписания недоступно. Выберите его заново.")
+                if (saved[0].text or "").strip():
+                    messages.append(saved[0].text)
+                else:
+                    posts += 1
+            elif slot.get("text"):
+                messages.append(str(slot["text"]))
+    notes = []
+    if kind not in OWN_TEXT_KINDS:
+        notes.append("Текст зависит от новых сообщений источника; здесь показаны настройки запуска.")
+    if posts:
+        notes.append(f"Сохранённых постов с медиа: {posts}. Их содержимое здесь не загружается.")
+    if conf.translate_to:
+        notes.append("Перевод выполняется при отправке; ниже текст до перевода.")
+    if conf.uniquify or any("{" in text for text in messages):
+        notes.append("Показан пример: случайные варианты текста при отправке могут отличаться.")
+    if kind == "autosubscribe":
+        notes.append(f"Пауза между вступлениями: {conf.join_gap} сек; лимит в сутки: {conf.daily_join_limit or 'по ограничениям аккаунта'}.")
+    if conf.subscribe_to:
+        notes.append(f"Ссылок для вступления: {len(conf.subscribe_to)}. Итоговый список чатов может измениться.")
+    if conf.mention_all:
+        notes.append("Включены упоминания участников чатов.")
+    if conf.buttons:
+        notes.append(f"Кнопок под сообщением: {len(conf.buttons)}.")
+    if not manager.is_online(account_id):
+        notes.append("Аккаунт не подключён: для выполнения задачи восстановите подключение.")
+    until = _pause_iso(account_id)
+    if until:
+        notes.append("На аккаунте действует ограничение Telegram; отправки пока приостановлены.")
+    return {
+        "title": KIND_LABELS.get(kind, kind), "kind": kind, "source": source,
+        "chats": [{"id": chat_id, "title": title} for chat_id, title in chats],
+        "messages": [transform_text(text, conf) for text in messages[:5]],
+        "messages_count": len(messages) + posts,
+        "window_start": conf.window_start, "window_end": conf.window_end,
+        "window_tz": window_tz_minutes(conf.window_tz),
+        "gap_seconds": conf.gap_seconds, "cycle_seconds": conf.cycle_seconds,
+        "interval_min": max(1, conf.interval_seconds // 60),
+        "repeats": conf.repeats, "daily_cap": conf.daily_cap,
+        "scheduled_dates": [slot.get("at") for slot in slots],
+        "schedule_only": conf.schedule_only, "notes": notes,
+    }
+
+
 @routes.patch(r"/api/tasks/{task_id:\d+}")
 @require_auth
+@join_queue.edit_guard
 async def update_task(request: web.Request) -> web.Response:
     """Меняет настройки готовой задачи.
 
@@ -1387,6 +1479,10 @@ async def update_task(request: web.Request) -> web.Response:
         rule = await repo.get_rule(session, task_id, user_id)
         if rule is None:
             return _json({"error": "Задача не найдена"}, status=404)
+        if rule.kind == "warmup":
+            return _json({"error": "План автопрогрева уже зафиксирован. Можно поставить его на паузу или создать новый после архивации"}, status=409)
+        if join_queue.running(rule.id):
+            return _json({"error": "Сначала остановите очередь вступлений, затем измените настройки"}, status=409)
         kind = rule.kind or "forward"
         account_id = rule.account_id
         filters = dict(rule.filters or {})
@@ -1576,6 +1672,8 @@ async def update_task(request: web.Request) -> web.Response:
         rule.target_id, rule.target_title = target_id, target_title
         rule.mode = mode
         rule.kind = kind
+        if join_queue.running(rule.id):
+            return _json({"error": "Очередь уже запущена. Остановите её перед правкой"}, status=409)
         rule.filters = filters
         if kind == "poster":
             # интервал постинга планировщик читает из delay_seconds
@@ -1788,8 +1886,63 @@ async def run_task(request: web.Request) -> web.Response:
 
     _require_account_login()
 
-    result = await manager.run_task_now(rule)
+    result = await join_queue.start(manager, rule) if rule.kind == "autosubscribe" else await manager.run_task_now(rule)
     return _json({"run": result})
+
+
+@routes.post(r"/api/tasks/{task_id:\d+}/stop")
+@require_auth
+async def stop_join_task(request):
+    async with SessionLocal() as session:
+        rule = await repo.get_rule(session, int(request.match_info["task_id"]), request[USER_ID_KEY])
+    if rule is None:
+        return _json({"error": "Задача не найдена"}, status=404)
+    if rule.kind != "autosubscribe":
+        return _json({"error": "Остановка доступна для очереди вступлений"}, status=409)
+    await join_queue.stop(rule.id)
+    return _json({"ok": True})
+
+
+@routes.get(r"/api/tasks/{task_id:\d+}/journal")
+@require_auth
+async def task_journal(request: web.Request) -> web.Response:
+    """Последние действия задачи и подробный план автопрогрева."""
+    user_id = request[USER_ID_KEY]
+    task_id = int(request.match_info["task_id"])
+    limit = max(1, min(_as_int(request.query.get("limit"), 50), 100))
+    offset = max(0, _as_int(request.query.get("offset"), 0))
+
+    async with SessionLocal() as session:
+        rule = await repo.get_rule(session, task_id, user_id)
+        if rule is None:
+            return _json({"error": "Задача не найдена"}, status=404)
+        rows = list(
+            await repo.rule_logs(
+                session, task_id, user_id, limit=limit, offset=offset
+            )
+        )
+        total = await repo.count_rule_logs(session, task_id, user_id)
+
+    return _json({
+        "kind": rule.kind,
+        # This makes a new warmup journal useful before the first action and
+        # exposes the original, actual and deferred times from durable state.
+        "warmup": warmup.report(rule) if rule.kind == "warmup" else None,
+        "total": total,
+        "offset": offset,
+        "has_more": offset + len(rows) < total,
+        "items": [
+            {
+                "id": row.id,
+                "status": row.status,
+                "error": row.error,
+                "source_msg_id": row.source_msg_id,
+                "target_msg_id": row.target_msg_id,
+                "created_at": _utc_iso(row.created_at),
+            }
+            for row in rows
+        ],
+    })
 
 
 @routes.get(r"/api/tasks/{task_id:\d+}/results")
@@ -2320,24 +2473,65 @@ async def list_chats(request: web.Request) -> web.Response:
             }
         )
 
-    if folder_id:
-        dialogs = list(await manager.list_dialogs(account_id, limit=limit, folder_id=folder_id))
-    else:
-        # Старые обёртки manager не знают новый keyword; «Все чаты» им полностью совместим.
-        dialogs = list(await manager.list_dialogs(account_id, limit=limit))
+    # Первый обход Telegram может занять десятки секунд у аккаунта с большой
+    # историей. Не держим HTTP-соединение до таймаута: запускаем один фоновой
+    # прогрев, а кабинет спокойно опросит этот же endpoint ещё раз.
     folders = await manager.list_dialog_folders(account_id)
+    if not manager.is_online(account_id):
+        return _json({
+            "chats": [], "total": 0, "online": False, "loading": False,
+            "folder_id": folder_id, "folders": folders,
+            "note": "Аккаунт не в сети",
+        })
+
+    # Повтор запускается только после явного клика «Повторить». Обычный polling
+    # не должен бесконечно перезапускать полный iter_dialogs после сетевой ошибки.
+    if request.query.get("retry") == "1":
+        retry = getattr(manager, "retry_dialogs", None)
+        if retry is not None:
+            retry(account_id)
+    ready = await manager.warm_dialogs(account_id)
+    if not ready:
+        status_reader = getattr(manager, "dialog_refresh_status", None)
+        refresh_status = status_reader(account_id) if status_reader is not None else {"state": "loading"}
+        if refresh_status.get("state") == "error":
+            return _json({
+                "chats": [],
+                "total": 0,
+                "online": True,
+                "loading": False,
+                "error": refresh_status.get("message") or "Не удалось загрузить чаты из Telegram.",
+                "retryable": True,
+                "folder_id": folder_id,
+                "folders": folders,
+            }, status=503)
+        return _json({
+            "chats": [],
+            "total": 0,
+            "online": True,
+            "loading": True,
+            "folder_id": folder_id,
+            "folders": folders,
+            "loaded": refresh_status.get("loaded", 0),
+            "note": "Загружаем чаты из Telegram…",
+        }, status=202)
+
+    # Один полный список обслуживает и текущую папку, и счётчики всех папок.
+    # Кэш менеджера уже защищает от повторного обхода Telegram, но раньше API
+    # всё равно заново фильтровал список для каждой папки.
+    all_dialogs = list(await manager.list_dialogs(account_id))
+    if folder_id:
+        dialogs = list(await manager.list_dialogs(account_id, folder_id=folder_id))
+    else:
+        dialogs = all_dialogs[:limit] if limit > 0 else all_dialogs
     # Счётчик папки нужен кабинету до поиска: «Работа · 18» не должен
     # превращаться в «Работа · 0» только потому, что в поле набрали слово.
-    folder_counts: dict[int, int] = {int(item["id"]): 0 for item in folders}
-    all_dialogs = dialogs if folder_id == 0 and limit <= 0 else await manager.list_dialogs(account_id)
-    for item in folders:
-        fid = int(item["id"])
-        if fid == 0:
-            folder_counts[fid] = len(all_dialogs)
-        elif folder_id == fid:
-            folder_counts[fid] = len(dialogs)
-        else:
-            folder_counts[fid] = len(await manager.list_dialogs(account_id, folder_id=fid))
+    counter = getattr(manager, "dialog_folder_counts", None)
+    folder_counts = (
+        counter(all_dialogs, folders)
+        if counter is not None
+        else {int(item["id"]): len(all_dialogs) for item in folders}
+    )
     for item in folders:
         item["count"] = folder_counts.get(int(item["id"]), 0)
     if query:
@@ -2350,13 +2544,39 @@ async def list_chats(request: web.Request) -> web.Response:
             if needle in d["title"].lower() or needle in str(d.get("username") or "").lower()
         ]
 
-    return _json({
+    refresh_reader = getattr(manager, "dialog_refresh_status", None)
+    refresh_status = refresh_reader(account_id) if refresh_reader is not None else {"state": "ready"}
+    response = {
         "chats": dialogs,
         "total": len(dialogs),
         "online": manager.is_online(account_id),
         "folder_id": folder_id,
         "folders": folders,
-    })
+    }
+    # Поиск, папка и лимит имеют разные представления одного кэша. ETag всё
+    # равно вычисляется из версии обхода, поэтому условный GET не возвращает
+    # старые данные при смене фильтра.
+    token_reader = getattr(manager, "dialog_cache_token", None)
+    token = token_reader(account_id) if token_reader is not None else ""
+    if token:
+        etag_source = f"{token}|{folder_id}|{query}|{limit}"
+        etag = '"' + hashlib.sha256(etag_source.encode()).hexdigest()[:24] + '"'
+        if request.headers.get("If-None-Match") == etag:
+            return web.Response(status=304, headers={"ETag": etag, "Cache-Control": "private, max-age=30"})
+        response_headers = {"ETag": etag, "Cache-Control": "private, max-age=30"}
+    else:
+        response_headers = {"Cache-Control": "private, max-age=30"}
+    if refresh_status.get("state") == "refreshing":
+        response.update({"refreshing": True, "loaded": refresh_status.get("loaded", 0)})
+    elif refresh_status.get("state") == "stale_error":
+        # Старый список всё ещё полезен: показываем его, но не маскируем сбой
+        # фонового обновления под полностью успешное состояние.
+        response.update({
+            "refreshing": False,
+            "refresh_error": refresh_status.get("message"),
+            "loaded": refresh_status.get("loaded", len(dialogs)),
+        })
+    return _json(response, headers=response_headers)
 
 
 @routes.post("/api/message-preflight")
@@ -2405,9 +2625,25 @@ async def list_accounts(request: web.Request) -> web.Response:
 
     async with SessionLocal() as session:
         accounts = list(await repo.list_accounts(session, user_id))
+        rules = list(await repo.list_rules(session, user_id, include_archived=True))
         until = await repo.subscription_until(session, user_id)
         pending = await repo.get_pending_login(session, user_id)
         banked = await repo.get_subscription(session, user_id)
+
+    task_counts: dict[int, dict[str, int]] = {
+        int(account.id): {"active": 0, "paused": 0, "done": 0}
+        for account in accounts
+    }
+    for rule in rules:
+        counts = task_counts.get(int(rule.account_id))
+        if counts is None:
+            continue
+        if rule.archived:
+            counts["done"] += 1
+        elif rule.enabled:
+            counts["active"] += 1
+        else:
+            counts["paused"] += 1
 
     items = []
     for account in accounts:
@@ -2421,9 +2657,9 @@ async def list_accounts(request: web.Request) -> web.Response:
                 # Мёртвую сессию повтором не оживить — кабинету надо предлагать
                 # не «попробовать снова», а вход по номеру заново.
                 "needs_login": account.last_error in HOPELESS_ERRORS,
-                "created_at": account.created_at.isoformat() if account.created_at else None,
-                # Спамблок виден и здесь, а не только в боте: иначе человек
-                # гадает, почему «на связи», а ничего не уходит.
+                "created_at": _utc_iso(account.created_at),
+                "last_seen_at": _utc_iso(account.last_seen_at),
+                "tasks": task_counts.get(int(account.id), {"active": 0, "paused": 0, "done": 0}),
                 "paused_until": _pause_iso(account.id),
             }
         )
@@ -2462,6 +2698,119 @@ async def list_accounts(request: web.Request) -> web.Response:
             },
         }
     )
+
+
+@routes.get("/api/warmup/preset")
+@require_auth
+async def warmup_preset(request):
+    return _json({"days": 7, "daily_joins": 3, "gap_minutes": 60, "gift_budget": 0,
+                  "stories": False,
+                  "avatar_url": "/app/assets/warmup/avatar.png", "story_url": "/app/assets/warmup/story.png",
+                  "bios": list(warmup_plan.BIOS), "captions": list(warmup_plan.CAPTIONS)})
+
+
+@routes.post("/api/warmup")
+@require_auth
+@rate_limit(10, 60)
+async def create_warmup(request):
+    return await _create_warmup(request, await _login_body(request))
+
+
+async def _create_warmup(request, payload):
+    _require_account_login()
+    if not isinstance(payload, dict):
+        raise ValidationError("Нужен JSON-объект")
+    user_id = request[USER_ID_KEY]
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    async with warmup.create_lock(user_id), SessionLocal() as session:
+        existing = list(await repo.list_rules(session, user_id, include_archived=True))
+        previous = [r for r in existing if r.kind == "warmup" and
+                    (r.filters or {}).get("warmup", {}).get("request_key") == payload.get("request_key")]
+        if previous:
+            if any((r.filters or {}).get("warmup_digest") != digest for r in previous):
+                return _json({"error": "Этот запуск уже сохранён с другими настройками. Откройте новый сценарий"}, status=409)
+            return _json({"tasks": [_task_view(r) for r in previous], "replayed": True}, status=200)
+        config = warmup_plan.normalize(payload, now=time.time())
+        accounts = []
+        for account_id in config["account_ids"]:
+            account = await repo.get_account(session, account_id, user_id)
+            if account is None:
+                return _json({"error": "Один из аккаунтов не найден"}, status=404)
+            accounts.append(account)
+        plans = [{"account_id": a.id, "phone": a.phone, "steps": warmup_plan.build(config, a.id)} for a in accounts]
+        if request.query.get("preview") == "1":
+            story_note = (
+                "Истории включены как отдельная опция; перед каждой публикацией Telegram проверяет доступность. "
+                if config["stories"] else "Истории выключены. "
+            )
+            return _json({"preview": {"days": config["days"], "gift_budget_total": len(accounts) * config["gift_budget"],
+                "accounts": [{**p, "steps": warmup_plan.public_steps(p["steps"])} for p in plans],
+                "note": "Заполняются только пустые поля. " + story_note + "Ограничения Telegram останавливают действия."}})
+        occupied = {r.account_id for r in existing if r.kind == "warmup" and not r.archived and warmup.report(r)["state"] != "done"}
+        if occupied.intersection(config["account_ids"]):
+            return _json({"error": "На одном из аккаунтов уже есть незавершённый автопрогрев. Продолжите его или уберите в архив"}, status=409)
+        if not await repo.has_active_subscription(session, user_id):
+            count = sum(not r.archived for r in existing)
+            if count + len(accounts) > settings.max_rules_free:
+                return _json({"error": "Для выбранного числа сценариев нужен абонемент", "need_subscription": True}, status=402)
+        created = []
+        for plan in plans:
+            rule = await repo.add_rule(session, user_id, plan["account_id"], 0, "", 0, "")
+            rule.kind = "warmup"
+            rule.filters = {"warmup": config, "warmup_steps": plan["steps"], "warmup_digest": digest}
+            await repo.log_forward(
+                session,
+                rule_id=rule.id,
+                user_id=user_id,
+                source_msg_id=0,
+                target_msg_id=None,
+                status="info",
+                error=(
+                    f"📅 Сценарий запланирован: {len(plan['steps'])} действий, "
+                    f"старт {warmup_plan.iso(config['start_at'])}; "
+                    f"истории {'включены' if config['stories'] else 'выключены'}"
+                ),
+            )
+            created.append(rule)
+        await session.commit()
+    await manager.refresh_rules()
+    return _json({"tasks": [_task_view(r) for r in created]}, status=201)
+
+
+@routes.post(r"/api/warmup/{task_id:\d+}/skip")
+@require_auth
+async def skip_warmup_step(request):
+    async with SessionLocal() as session:
+        rule = await repo.get_rule(session, int(request.match_info["task_id"]), request[USER_ID_KEY])
+    if rule is None or rule.kind != "warmup":
+        return _json({"error": "Сценарий не найден"}, status=404)
+    await warmup.skip_uncertain(rule)
+    return _json({"ok": True})
+
+
+async def _owned_account(request):
+    account_id = int(request.match_info["account_id"])
+    async with SessionLocal() as session:
+        account = await repo.get_account(session, account_id, request[USER_ID_KEY])
+    if account is None:
+        from app.errors import NotFoundError
+        raise NotFoundError("Аккаунт не найден")
+    return account
+
+
+@routes.get(r"/api/accounts/{account_id:\d+}/diagnostics")
+@require_auth
+async def account_diagnostics(request):
+    account = await _owned_account(request)
+    async with SessionLocal() as session:
+        rules = [r for r in await repo.list_rules(session, request[USER_ID_KEY]) if r.account_id == account.id]
+        health = await repo.task_health(session, [r.id for r in rules])
+    return _json({"online": manager.is_online(account.id), "last_error": account.last_error,
+                  "service_pause_until": _pause_iso(account.id),
+                  "note": "Пауза сервиса не означает срок снятия ограничения Telegram. Статус аккаунта уточните в @SpamBot.",
+                  "tasks": [{"id": r.id, "title": task_title(r),
+                             "health": _health_view(health.get(r.id), chat_names(r)),
+                             "join_queue": join_queue.view(r) if r.kind == "autosubscribe" else None} for r in rules]})
 
 
 # ─────────────────────────── Подключение аккаунта ─────────────────────────────
@@ -3141,6 +3490,9 @@ def _task_view(
     from app.telegram_client.jobs import (
         KIND_LABELS,
         MAX_PARSER_LIMIT,
+        MAILING_MIN_GAP,
+        MAILING_MIN_CYCLE,
+        MAILING_MAX_GAP,
         chat_recipients,
         task_title,
     )
@@ -3162,10 +3514,16 @@ def _task_view(
         # Включённая задача при отключённом аккаунте ничего не делает. Кабинет
         # обязан показать это метко́й «нет связи», а не бодрым «работает».
         "account_online": manager.is_online(rule.account_id),
+        "paused_until": _pause_iso(rule.account_id),
         # Разовые задачи запускаются кнопкой, а не реагируют на сообщения
         "oneshot": kind in ONE_SHOT_KINDS,
         "created_at": rule.created_at.isoformat() if rule.created_at else None,
     }
+    if kind == "warmup":
+        automation = warmup.report(rule)
+        view.update(warmup=automation, progress={"done": automation["done"], "total": automation["total"]},
+                    health=_health_view(health, {}), edit=None, targets_count=len((rule.filters or {}).get("warmup", {}).get("targets", [])))
+        return view
     # Авто-постер: выносим расписание, чтобы в карточке задачи было видно,
     # как часто и в каком окне он шлёт (delay в секундах неинформативен).
     conf = FilterConfig.from_dict(rule.filters or {})
@@ -3198,7 +3556,7 @@ def _task_view(
         view["pin_on_send"] = bool(conf.pin_on_send)
         view["topic_id"] = int(conf.topic_id or 0)
         view["autodelete_hours"] = float(conf.autodelete_hours or 0.0)
-        view["daily_cap"] = int(conf.daily_cap or 0)
+        view["daily_cap"] = None if conf.daily_cap is None else int(conf.daily_cap)
     if kind in ("mailing", "poster", "broadcast"):
         view["mention_all"] = bool(conf.mention_all)
     if kind in ("broadcast", "poster", "mailing"):
@@ -3258,8 +3616,8 @@ def _task_view(
             # Что уйдёт (счёт живых записей, повисшие ссылки, «вся библиотека») —
             # общим счётом с постингом: свои сообщения обеих задач в библиотеке.
             **_own_texts_state(conf, texts),
-            "gap_seconds": conf.gap_seconds,
-            "cycle_seconds": conf.cycle_seconds,
+            "gap_seconds": max(MAILING_MIN_GAP, min(MAILING_MAX_GAP, int(conf.gap_seconds or 0))),
+            "cycle_seconds": max(MAILING_MIN_CYCLE, min(MAILING_MAX_GAP, int(conf.cycle_seconds or 0))),
             "repeats": conf.repeats,
             "repeat_forever": bool(getattr(conf, "repeat_forever", False) or not conf.repeats),
             "typing": bool(conf.typing),
@@ -3278,6 +3636,9 @@ def _task_view(
         }
         if conf.repeats > 0 and recipients:
             total = recipients * int(conf.repeats)
+    if kind == "autosubscribe":
+        view["join_queue"] = join_queue.view(rule)
+        done = sum(item.get("status") in ("joined", "already", "requested") for item in view["join_queue"].get("items", {}).values())
     view["progress"] = {"done": done, "total": total}
     # Названия чатов задачи — из общего ``app.task_health``: карточка в боте
     # называет чаты в причине сбоя теми же словами, что и кабинет.
@@ -3292,6 +3653,13 @@ def _task_view(
         ]
     view["health"] = _health_view(health, names)
     view["edit"] = _edit_view(rule, kind, conf, chats, names, texts or {})
+    from app.telegram_client.jobs import quiet_wait_seconds
+    view["window_opens_at"] = None
+    if kind in ("forward", "broadcast", "poster", "mailing", "clone") and not (kind == "poster" and conf.schedule_only):
+        now = time.time()
+        wait = quiet_wait_seconds(conf, now=now)
+        if wait:
+            view["window_opens_at"] = datetime.fromtimestamp(now + wait, timezone.utc).isoformat()
     return view
 
 
@@ -3370,7 +3738,7 @@ def _edit_view(
         edit["pin_on_send"] = bool(conf.pin_on_send)
         edit["topic"] = int(conf.topic_id or 0)
         edit["autodelete_hours"] = float(conf.autodelete_hours or 0.0)
-        edit["daily_cap"] = int(conf.daily_cap or 0)
+        edit["daily_cap"] = None if conf.daily_cap is None else int(conf.daily_cap)
     if kind in ("mailing", "poster", "broadcast"):
         edit["mention_all"] = bool(conf.mention_all)
     if kind in ("forward", "clone"):
@@ -3445,8 +3813,11 @@ def _edit_view(
         # Иначе переключение режима в правке показывало бы пустоту.
         edit["gap"] = conf.gap_seconds
         edit["cycle"] = conf.cycle_seconds
-        edit["repeats"] = conf.repeats
-        edit["repeat_forever"] = bool(getattr(conf, "repeat_forever", False) or not conf.repeats)
+        # У постинга расписание само работает до остановки, но это не означает,
+        # что будущая очередь должна включиться бесконечно. При переключении
+        # режима показываем безопасный персональный выбор: один круг.
+        edit["repeats"] = int(conf.repeats or 1)
+        edit["repeat_forever"] = False
         edit["typing"] = bool(conf.typing)
         edit["random_pick"] = bool(conf.random_pick)
         edit["link_preview"] = bool(conf.link_preview)
@@ -3603,6 +3974,13 @@ COMMANDS: list[dict] = [
         ],
         "hint": "Чат-источник отмечайте кнопкой «выбрать» у поля или заранее во вкладке «Чаты». Режим «участники» листает состав чата, «авторы» — писавших, «комментарии» — обсуждавших посты: самые вовлечённые. «Просмотреть» — сколько перебрать, «собрать» — сколько сохранить: фильтры отсеивают, и смотреть приходится больше. Запускается сразу, результат — кнопкой «Результаты». Собранных можно позвать в свой чат кнопкой «Пригласить» — пачками по 20.",
         "tags": ["список участников", "фильтры и режимы", "запуск вручную"],
+    },
+    {
+        "id": "warmup", "group": "audience", "kind": "warmup", "emoji": "🌱",
+        "title": "Автопрогрев", "description": "Сценарий для Telegram-аккаунтов: оформление, чаты, истории и подарки по дням.",
+        "status": "ready", "needs": ["account"], "optional": [],
+        "hint": "Выберите аккаунты и действия, проверьте план и запустите. Работает по расписанию, даже когда кабинет закрыт.",
+        "tags": ["сценарий по дням", "несколько аккаунтов", "автоматически"],
     },
     {
         "id": "autosubscribe",

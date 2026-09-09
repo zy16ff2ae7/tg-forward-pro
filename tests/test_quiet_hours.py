@@ -66,7 +66,7 @@ def test_window_uses_owner_clock():
 
 def test_default_window_is_daytime():
     """Окно по умолчанию — день: ночью тихо, днём открыто."""
-    filters = FilterConfig()
+    filters = FilterConfig(window_tz=0)  # MIDNIGHT is UTC, independent of the test host.
     assert (filters.window_start, filters.window_end) == ("09:00", "22:00")
     for hour in (9, 12, 21):
         assert jobs.quiet_wait_seconds(filters, now=MIDNIGHT + hour * HOUR) == 0

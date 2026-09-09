@@ -165,6 +165,7 @@
         <svg class="ic search__icon" aria-hidden="true"><use href="#i-search"/></svg>
         <input type="text" id="commandSearch" placeholder="Поиск команды"
                autocomplete="off" aria-label="Поиск команды">
+        <button class="search__clear" id="commandSearchClear" type="button" hidden aria-label="Очистить поиск">×</button>
       </div>
       <div class="chips" id="commandTags" role="tablist" aria-label="Группы команд"></div>
       <div id="templateStrip" hidden></div>
@@ -179,6 +180,7 @@
         <svg class="ic search__icon" aria-hidden="true"><use href="#i-search"/></svg>
         <input type="text" id="taskSearch" placeholder="Название, источник или приёмник"
                autocomplete="off" aria-label="Поиск задачи">
+        <button class="search__clear" id="taskSearchClear" type="button" hidden aria-label="Очистить поиск">×</button>
       </div>
       <div class="segmented" id="taskStatus" role="tablist" aria-label="Статус задач">
         <button class="seg is-active" data-status="active" role="tab" aria-selected="true">Активные</button>
@@ -207,6 +209,7 @@
         <svg class="ic search__icon" aria-hidden="true"><use href="#i-search"/></svg>
         <input type="text" id="chatSearch" placeholder="Название, тема или @username"
                autocomplete="off" aria-label="Поиск чата">
+        <button class="search__clear" id="chatSearchClear" type="button" hidden aria-label="Очистить поиск">×</button>
       </div>
       <div class="chips" id="chatTags"></div>
       <div class="folder-chips" id="chatFolders" hidden aria-label="Папки Telegram"></div>
@@ -414,6 +417,7 @@
         <div class="sheet__title">Что создаём?</div>
         <button class="icon-btn" data-close aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
       </div>
+      <div class="sheet__lead create-lead">Выберите, что нужно автоматизировать. Подробные настройки появятся следующим шагом, а запущенную задачу можно изменить позже.</div>
       <div class="create-grid" id="createGrid"></div>
     </div>
   </div>
@@ -436,12 +440,22 @@
           </div>
         </div>
         <div id="taskFields"></div>
-        <div class="hint" id="taskHint"></div>
+        <details class="task-preview" id="taskPreviewDetails">
+          <summary><span>Что произойдёт после запуска</span><i aria-hidden="true">⌄</i></summary>
+          <div id="taskPreview"></div>
+        </details>
+        <div class="hint task-hint" id="taskHint"></div>
         <!-- Лучшее время для постинга: пик активности ленты за 14 дней.
              Рисует maybeRenderActivityHint — только у постинга по расписанию. -->
-        <div class="hint" id="activityHint" hidden></div>
-        <button class="btn btn--primary btn--block" id="taskSubmit">Запустить задачу</button>
-        <div class="error" id="taskError" role="alert"></div>
+        <div class="hint activity-hint" id="activityHint" hidden></div>
+        <div class="task-submitbar">
+          <div class="task-submitbar__copy">
+            <b id="taskSubmitSummary">Проверьте поля перед запуском.</b>
+            <span>После запуска всё можно изменить в настройках задачи.</span>
+          </div>
+          <button class="btn btn--primary btn--block" id="taskSubmit">Запустить задачу</button>
+          <div class="error" id="taskError" role="alert"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -514,9 +528,11 @@
           <svg class="ic search__icon" aria-hidden="true"><use href="#i-search"/></svg>
           <input type="text" id="pickerSearch" placeholder="Название или @username"
                  autocomplete="off" aria-label="Поиск чата">
+          <button class="search__clear" id="pickerSearchClear" type="button" hidden aria-label="Очистить поиск">×</button>
         </div>
         <div class="folder-chips" id="pickerFolders" hidden aria-label="Папки Telegram"></div>
         <div class="sheet__lead" id="pickerLead"></div>
+        <div class="picker-recent" id="pickerRecent" hidden></div>
         <!-- Отметить весь список сразу: постить и рассылать можно в любое число
              чатов, и на сотне чатов «выбрать все» — единственный разумный путь.
              Кнопка знает про поиск: отмечает то, что видно на экране. -->
@@ -535,6 +551,61 @@
        Вход проходит здесь целиком. Раньше кнопка «Добавить аккаунт» умела
        единственное — открыть чат с ботом, и человек уходил из кабинета на
        середине пути. Кнопка «Продолжить в боте» осталась как запасной путь. -->
+  <div class="sheet" id="warmupSheet" role="dialog" aria-modal="true" aria-labelledby="warmupTitle">
+    <div class="sheet__backdrop" data-close></div><div class="sheet__panel">
+      <div class="sheet__head"><div class="sheet__title" id="warmupTitle">🌱 Автопрогрев</div>
+        <button class="icon-btn" data-close aria-label="Закрыть">×</button></div>
+      <p class="field__note">Один сценарий — оформление Telegram-аккаунта и действия по дням. Работает, даже когда кабинет закрыт.</p>
+      <p id="warmupStatus" role="status" aria-live="polite"></p>
+      <form id="warmupForm" class="form">
+        <fieldset class="warmup__accounts"><legend>С каких аккаунтов выполнять</legend><div id="warmupAccounts"></div></fieldset>
+        <div class="warmup__row">
+          <label class="field">Длительность, дней<input id="warmupDays" type="number" min="1" max="30" value="7" required></label>
+          <label class="field">Начало<input id="warmupStart" type="datetime-local" required></label>
+        </div>
+        <fieldset><legend>Подготовка аккаунта</legend>
+          <label class="warmup__check"><input id="warmupAvatar" type="checkbox" checked> Поставить аватарку, если её нет</label>
+          <label class="warmup__check"><input id="warmupBio" type="checkbox" checked> Заполнить пустое описание</label>
+          <div class="warmup__preset"><img src="assets/warmup/avatar.png" alt="Абстрактная аватарка сценария"><p>Нейтральная аватарка и короткое описание. Уже заполненные поля останутся прежними.</p></div>
+          <label class="field">Своё описание — необязательно<input id="warmupAbout" maxlength="70" placeholder="Пусто — описание из сценария"></label>
+          <label class="warmup__check"><input id="warmupRandomBirthday" type="checkbox" checked> Поставить случайную дату рождения, если её нет</label>
+          <label class="field">Своя дата — необязательно<input id="warmupBirthday" type="date"><span class="field__note">Своя дата заменит случайную. Выбранная дата заранее показывается в плане.</span></label>
+        </fieldset>
+        <fieldset><legend>Вступления в чаты</legend>
+          <label class="field">Выбранные чаты<textarea id="warmupTargets" rows="3" placeholder="@chatname&#10;https://t.me/+invite"></textarea><span class="field__note">Одна ссылка в строке. Без списка этот этап пропускается.</span></label>
+          <div class="warmup__row">
+            <label class="field">Вступлений в сутки<input id="warmupJoins" type="number" min="1" max="10" value="3" required></label>
+            <label class="field">Интервал, минут<input id="warmupGap" type="number" min="30" max="120" value="60" required></label>
+          </div>
+        </fieldset>
+        <fieldset><legend>Истории</legend>
+          <label class="warmup__check"><input id="warmupStories" type="checkbox"> Публиковать одну историю в день</label>
+          <label class="field">Кто увидит<select id="warmupPrivacy"><option value="contacts">Мои контакты</option><option value="everyone">Все</option></select></label>
+          <details class="warmup__materials"><summary>Посмотреть материалы сценария</summary><img src="assets/warmup/story.png" alt="Абстрактный пейзаж для историй"><div id="warmupCaptions"></div></details>
+          <p class="field__note">Опция выключена по умолчанию. Telegram сам определяет доступность историй; для аккаунта может потребоваться Premium. Перед публикацией сервис проверит право и запишет результат в журнал.</p>
+        </fieldset>
+        <fieldset><legend>Подарок себе</legend>
+          <label class="warmup__check"><input id="warmupGift" type="checkbox"> Один платный подарок в конце сценария</label>
+          <label class="field">Максимум Stars с каждого аккаунта<input id="warmupBudget" type="number" min="0" max="1000" value="0"><span class="field__note">По умолчанию траты выключены. При включении выбирается самый дешёвый доступный обычный подарок в пределах лимита; без платного улучшения.</span></label>
+        </fieldset>
+        <p class="field__note">Автопрогрев не гарантирует снятие спамблока. Ограничения Telegram останавливают действия.</p>
+        <button class="btn btn--primary btn--block" type="submit" id="warmupReview">Проверить сценарий</button>
+      </form>
+      <div id="warmupPreview" hidden></div>
+      <div id="warmupLaunchActions" hidden>
+        <button class="btn btn--primary btn--block" id="warmupLaunch">Запустить сценарий</button>
+        <button class="btn btn--ghost btn--block" id="warmupBack">Изменить настройки</button>
+      </div>
+    </div>
+  </div>
+  <div class="sheet" id="diagnosticsSheet" role="dialog" aria-modal="true" aria-labelledby="diagnosticsTitle">
+    <div class="sheet__backdrop" data-close></div><div class="sheet__panel">
+      <div class="sheet__head"><div class="sheet__title" id="diagnosticsTitle">Диагностика аккаунта</div>
+        <button class="icon-btn" data-close aria-label="Закрыть">×</button></div>
+      <div id="diagnosticsBody" aria-live="polite"></div>
+      <a class="btn btn--block" href="https://t.me/SpamBot" target="_blank" rel="noopener noreferrer">Открыть @SpamBot</a>
+    </div>
+  </div>
   <div class="sheet" id="loginSheet" role="dialog" aria-modal="true" aria-label="Подключение аккаунта">
     <div class="sheet__backdrop" data-close></div>
     <div class="sheet__panel">
@@ -558,8 +629,11 @@
         <div class="sheet__lead" id="loginLead"></div>
         <label class="field">
           <span id="loginLabel">Номер телефона</span>
-          <input id="loginInput" type="tel" inputmode="tel" autocomplete="off"
-                 placeholder="+79001234567" aria-describedby="loginError">
+          <div class="login-input-wrap">
+            <input id="loginInput" type="tel" inputmode="tel" autocomplete="off"
+                   placeholder="+79001234567" aria-describedby="loginError">
+            <button class="login-input-reveal" id="loginReveal" type="button" hidden aria-label="Показать пароль">показать</button>
+          </div>
           <i class="field__note" id="loginNote"></i>
         </label>
         <button class="btn btn--primary btn--block" id="loginSubmit">Получить код</button>

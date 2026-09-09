@@ -174,6 +174,15 @@ async def test_success_after_error_clears_the_failing_flag(create_user, create_a
     assert health["error"] == "таймаут"
 
 
+async def test_informational_event_is_not_a_task_error(create_user, create_account):
+    """Начало или перенос шага видны в журнале, но не красят задачу красным."""
+    user_id = await create_user()
+    rule_id = await add_rule(user_id, await create_account(user_id))
+    await add_log(rule_id, user_id, status="info", error="Шаг автопрогрева начат")
+
+    assert await health_of(rule_id) == {}
+
+
 async def test_error_without_text_still_has_a_reason(create_user, create_account):
     """Сбой без описания — тоже сбой: карточке нужно что-то показать."""
     user_id = await create_user()

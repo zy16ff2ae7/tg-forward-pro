@@ -40,7 +40,9 @@ echo "==> Синхронизирую файлы в $TARGET_HOST:$APP_DIR"
 # - scripts/gen_initdata.py подписывает валидный initData на любой user_id —
 #   готовый ключ от чужого кабинета при доступе к серверу. Остальные скрипты
 #   (import/export_session, gen_secret) на сервере используются, их оставляем.
-rsync -av --delete \
+# A local umask of 077 must not make Python sources unreadable to tgforward.
+# Private data and .env remain excluded and are restricted separately below.
+rsync -av --delete --chmod=Du=rwx,Dgo=rx,Fu+rw,Fgo+r \
   --exclude '.git' \
   --exclude 'venv' \
   --exclude '__pycache__' \
@@ -86,6 +88,13 @@ ssh "$TARGET_HOST" "mkdir -p $APP_DIR/data $APP_DIR/logs $BACKUP_DIR \
   && chown tgforward:tgforward $APP_DIR/.env && chmod 600 $APP_DIR/.env \
   && chmod 700 $APP_DIR/data $APP_DIR/logs $BACKUP_DIR \
   && find $APP_DIR/data $APP_DIR/logs $BACKUP_DIR -type f -exec chmod 600 {} + 2>/dev/null || true"
+
+# Some rsync implementations reapply source modes to unchanged files even with
+# --chmod. Normalize every public code file, including empty package __init__.py.
+# Keep this explicit allowlist separate from .env, data and logs.
+echo "==> Права чтения файлов приложения"
+ssh "$TARGET_HOST" "find $APP_DIR/app $APP_DIR/webapp $APP_DIR/assets $APP_DIR/scripts $APP_DIR/deploy -type d -exec chmod 755 {} + \
+  && find $APP_DIR/app $APP_DIR/webapp $APP_DIR/assets $APP_DIR/scripts $APP_DIR/deploy -type f -exec chmod a+r {} +"
 
 echo "==> Устанавливаю systemd-юнит"
 ssh "$TARGET_HOST" "cp $APP_DIR/deploy/$SERVICE_NAME.service /etc/systemd/system/ \
