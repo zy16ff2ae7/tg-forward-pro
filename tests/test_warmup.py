@@ -228,6 +228,16 @@ async def test_story_uses_saved_id_and_contacts(create_user, create_account, mon
     assert sent.period == 86400
 
 
+async def test_join_skips_user_or_bot_without_sending_request(create_user, create_account, monkeypatch):
+    from app.telegram_client import jobs
+    rule = await make_rule(create_user, create_account, kind='join', target='MollySitkabot')
+    telegram = SimpleNamespace(get_input_entity=AsyncMock(return_value=types.InputPeerUser(123, 456)))
+    monkeypatch.setattr(jobs, '_join_account_allowance', AsyncMock(return_value=10))
+    with pytest.raises(warmup.Skipped, match='пользователь или бот'):
+        await warmup.execute(fake_manager(monkeypatch, telegram), rule, rule.filters['warmup_steps'][0])
+    telegram.get_input_entity.assert_awaited_once_with('MollySitkabot')
+
+
 def gift_client(*, cost=10, outcome=None):
     return AsyncMock(side_effect=[SimpleNamespace(gifts=[SimpleNamespace(id=1, stars=10)]),
         types.payments.PaymentFormStarGift(123, types.Invoice('XTR',[types.LabeledPrice('gift',cost)])),

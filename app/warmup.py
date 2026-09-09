@@ -162,7 +162,15 @@ async def execute(manager: Any, rule: Rule, step: dict) -> dict:
             invite = target[1:] if target.startswith("+") else target.split("/", 1)[1]
             request = functions.messages.ImportChatInviteRequest(invite)
         else:
-            request = functions.channels.JoinChannelRequest(target)
+            try:
+                peer = await client.get_input_entity(target)
+            except (TypeError, ValueError):
+                raise Skipped("Чат не найден — проверьте ссылку") from None
+            if isinstance(peer, types.InputPeerUser):
+                raise Skipped("Указан пользователь или бот — вступить можно только в канал или группу")
+            if not isinstance(peer, types.InputPeerChannel):
+                raise Skipped("Ссылка ведёт не на публичный канал или группу")
+            request = functions.channels.JoinChannelRequest(peer)
         try:
             await client(request, flood_sleep_threshold=0)
         except RPCError as exc:
