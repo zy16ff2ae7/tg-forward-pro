@@ -1,9 +1,10 @@
 """Explicit, bounded plans for Telegram account setup and scheduled activity."""
 from __future__ import annotations
 
+import hashlib
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from app.account_profile import validate_changes
@@ -40,6 +41,29 @@ def _integer(body: dict, key: str, default: int, low: int, high: int) -> int:
     return value
 
 
+def random_birthday(config: dict, account_id: int) -> dict | None:
+    """Return a stable adult birthday so preview and execution always agree."""
+    if config.get("birthday"):
+        return config["birthday"]
+    if not config.get("random_birthday", False):
+        return None
+    start = datetime.fromtimestamp(config["start_at"], timezone.utc).date()
+
+    def years_before(value: date, years: int) -> date:
+        try:
+            return value.replace(year=value.year - years)
+        except ValueError:  # 29 February in a non-leap target year
+            return value.replace(year=value.year - years, day=28)
+
+    # Every date in this interval represents an age from 24 through 42.
+    earliest = years_before(start, 43) + timedelta(days=1)
+    latest = years_before(start, 24)
+    seed = f"{config['request_key']}:{account_id}:birthday".encode()
+    offset = int.from_bytes(hashlib.sha256(seed).digest()[:8], "big") % ((latest - earliest).days + 1)
+    chosen = earliest + timedelta(days=offset)
+    return {"day": chosen.day, "month": chosen.month, "year": chosen.year}
+
+
 def normalize(body: Any, *, now: float) -> dict:
     if not isinstance(body, dict):
         raise ValidationError("Нужен JSON-объект")
@@ -52,7 +76,8 @@ def normalize(body: Any, *, now: float) -> dict:
     gap_minutes = _integer(body, "gap_minutes", 60, 30, 120)
     budget = _integer(body, "gift_budget", 0, 0, 1000)
     toggles = {}
-    for key, default in (("avatar", True), ("bio", True), ("stories", True), ("paid_gift", False)):
+    for key, default in (("avatar", True), ("bio", True), ("stories", True),
+                         ("random_birthday", True), ("paid_gift", False)):
         value = body.get(key, default)
         if type(value) is not bool:
             raise ValidationError(f"{key}: нужен переключатель")
@@ -99,7 +124,8 @@ def normalize(body: Any, *, now: float) -> dict:
     request_key = body.get("request_key", "")
     if not isinstance(request_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", request_key):
         raise ValidationError("Не удалось определить запуск. Откройте форму заново")
-    if not (toggles["avatar"] or toggles["bio"] or toggles["stories"] or birthday or normalized or budget):
+    if not (toggles["avatar"] or toggles["bio"] or toggles["stories"] or
+            toggles["random_birthday"] or birthday or normalized or budget):
         raise ValidationError("Выберите хотя бы одно действие")
     return {"account_ids": ids, "days": days, "daily_joins": daily_joins, "gap_minutes": gap_minutes,
             "gift_budget": budget, "birthday": birthday, "about": about, "story_privacy": privacy,
@@ -116,17 +142,20 @@ def build(config: dict, account_id: int) -> list[dict]:
         add("avatar", start)
     if config["bio"]:
         add("bio", start + 5 * 60, text=config["about"] or BIOS[account_id % len(BIOS)])
-    if config["birthday"]:
-        add("birthday", start + 10 * 60, birthday=config["birthday"])
+    birthday = random_birthday(config, account_id)
+    if birthday:
+        add("birthday", start + 10 * 60, birthday=birthday)
     targets = list(config["targets"])
     for day in range(config["days"]):
         base = start + day * DAY + 30 * 60
+        joined_today = 0
         for index in range(config["daily_joins"]):
             if not targets:
                 break
             add("join", base + index * config["gap_minutes"] * 60, target=targets.pop(0))
+            joined_today += 1
         if config["stories"]:
-            add("story", base + config["daily_joins"] * config["gap_minutes"] * 60,
+            add("story", base + joined_today * config["gap_minutes"] * 60,
                 text=CAPTIONS[day % len(CAPTIONS)], random_id=secrets.randbits(63) or 1,
                 privacy=config["story_privacy"])
     if config["gift_budget"]:

@@ -1,5 +1,6 @@
 import asyncio
 import time
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -23,20 +24,38 @@ def config(**values):
 
 
 @pytest.mark.parametrize('values', [dict(account_ids=[True]), dict(days=31), dict(gap_minutes=1),
-    dict(paid_gift=True), dict(gift_budget=10), dict(paid_gift='yes'), dict(story_privacy='friends'),
+    dict(paid_gift=True), dict(gift_budget=10), dict(paid_gift='yes'), dict(random_birthday='yes'), dict(story_privacy='friends'),
     dict(targets=['https://example.com']), dict(birthday={'day':30,'month':2}),
-    dict(avatar=False,bio=False,stories=False), dict(days=1,daily_joins=1,targets=['@alpha','@beta'])])
+    dict(avatar=False,bio=False,stories=False,random_birthday=False), dict(days=1,daily_joins=1,targets=['@alpha','@beta'])])
 def test_reject_invalid_plans(values):
     with pytest.raises(ValidationError):
         config(**values)
 
 
-def test_default_plan_has_no_invented_birthday_or_paid_actions():
-    plan = warmup_plan.build(config(), 1)
-    assert [s['kind'] for s in plan] == ['avatar','bio'] + ['story'] * 7
+def test_default_plan_has_stable_adult_birthday_and_no_paid_actions():
+    cfg = config()
+    plan = warmup_plan.build(cfg, 1)
+    assert [s['kind'] for s in plan] == ['avatar','bio','birthday'] + ['story'] * 7
+    birthday = next(s['birthday'] for s in plan if s['kind'] == 'birthday')
+    assert 24 <= datetime.fromtimestamp(cfg['start_at']).year - birthday['year'] <= 43
+    assert warmup_plan.build(cfg, 1)[2]['birthday'] == birthday
+    assert warmup_plan.build(cfg, 2)[2]['birthday'] != birthday
     assert all(s['privacy'] == 'contacts' for s in plan if s['kind'] == 'story')
     assert len({s['random_id'] for s in plan if s['kind'] == 'story'}) == 7
     assert 'random_id' not in str(warmup_plan.public_steps(plan))
+
+
+def test_explicit_birthday_replaces_random_one():
+    cfg = config(birthday={'day':7,'month':8,'year':1994})
+    assert warmup_plan.random_birthday(cfg, 1) == {'day':7,'month':8,'year':1994}
+
+
+def test_story_follows_actual_joins_instead_of_unused_slots():
+    cfg = config(days=1, daily_joins=10, gap_minutes=60, targets=['@one'])
+    plan = warmup_plan.build(cfg, 1)
+    joined = next(s for s in plan if s['kind'] == 'join')
+    story = next(s for s in plan if s['kind'] == 'story')
+    assert story['due_at'] - joined['due_at'] == 3600
 
 
 def test_no_catchup_burst():
@@ -72,7 +91,7 @@ async def test_bulk_preview_ownership_create_replay_and_paused_duplicate(
     assert created.status == 201, await created.text()
     tasks = (await created.json())['tasks']
     assert len(tasks) == 2
-    assert tasks[0]['warmup']['total'] == 9
+    assert tasks[0]['warmup']['total'] == 10
     replay = await client.post('/api/warmup', json=body, headers=auth_headers)
     assert replay.status == 200
     assert (await replay.json())['replayed']

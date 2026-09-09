@@ -568,7 +568,8 @@
           <label class="warmup__check"><input id="warmupBio" type="checkbox" checked> Заполнить пустое описание</label>
           <div class="warmup__preset"><img src="assets/warmup/avatar.png" alt="Абстрактная аватарка сценария"><p>Нейтральная аватарка и короткое описание. Уже заполненные поля останутся прежними.</p></div>
           <label class="field">Своё описание — необязательно<input id="warmupAbout" maxlength="70" placeholder="Пусто — описание из сценария"></label>
-          <label class="field">Дата рождения — необязательно<input id="warmupBirthday" type="date"><span class="field__note">Укажите свою дату, если её нужно заполнить. Случайную дату сценарий не придумывает.</span></label>
+          <label class="warmup__check"><input id="warmupRandomBirthday" type="checkbox" checked> Поставить случайную дату рождения, если её нет</label>
+          <label class="field">Своя дата — необязательно<input id="warmupBirthday" type="date"><span class="field__note">Своя дата заменит случайную. Выбранная дата заранее показывается в плане.</span></label>
         </fieldset>
         <fieldset><legend>Вступления в чаты</legend>
           <label class="field">Выбранные чаты<textarea id="warmupTargets" rows="3" placeholder="@chatname&#10;https://t.me/+invite"></textarea><span class="field__note">Одна ссылка в строке. Без списка этот этап пропускается.</span></label>

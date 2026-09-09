@@ -1431,11 +1431,18 @@ function demoApi(path, options = {}) {
       const add = (kind, delta, values = {}) => steps.push({id:steps.length + 1, kind, label:labels[kind], at:new Date(start + delta * 60000).toISOString(), status:'pending', ...values});
       if (body.avatar) add('avatar', 0);
       if (body.bio) add('bio', 5, {text:body.about || 'Заметки, идеи и немного вдохновения.'});
-      if (body.birthday) add('birthday', 10, {birthday:body.birthday});
+      if (body.birthday || body.random_birthday) {
+        const seed = String(body.request_key || '') + ':' + id;
+        let hash = [...seed].reduce((value, char) => ((value * 31 + char.charCodeAt(0)) >>> 0), 2166136261);
+        const startYear = new Date(body.start_at).getUTCFullYear();
+        const birthday = body.birthday || {day:1 + hash % 28, month:1 + (hash >>> 5) % 12, year:startYear - 24 - (hash >>> 9) % 19};
+        add('birthday', 10, {birthday});
+      }
       const targets = [...body.targets];
       for (let day = 0; day < body.days; day++) {
-        for (let n = 0; n < body.daily_joins && targets.length; n++) add('join', day * 1440 + 30 + n * body.gap_minutes, {target:targets.shift()});
-        if (body.stories) add('story', day * 1440 + 30 + body.daily_joins * body.gap_minutes, {text:WARMUP_CAPTIONS[day % WARMUP_CAPTIONS.length]});
+        let joinedToday = 0;
+        for (let n = 0; n < body.daily_joins && targets.length; n++) { add('join', day * 1440 + 30 + n * body.gap_minutes, {target:targets.shift()}); joinedToday += 1; }
+        if (body.stories) add('story', day * 1440 + 30 + joinedToday * body.gap_minutes, {text:WARMUP_CAPTIONS[day % WARMUP_CAPTIONS.length]});
       }
       if (body.paid_gift && body.gift_budget) add('gift', (body.days - 1) * 1440 + 1380, {budget:body.gift_budget});
       return {account_id:id, phone:DEMO_ACCOUNTS.find(a => a.id === id)?.phone || String(id), steps};
@@ -4291,6 +4298,7 @@ async function reviewWarmup(event) {
         days:Number($('warmupDays').value), daily_joins:Number($('warmupJoins').value), gap_minutes:Number($('warmupGap').value),
         start_at:new Date($('warmupStart').value).toISOString(), avatar:$('warmupAvatar').checked, bio:$('warmupBio').checked,
         about:$('warmupAbout').value, birthday:birthday ? {day, month, year} : null,
+        random_birthday:$('warmupRandomBirthday').checked,
         targets:$('warmupTargets').value.split(/[\n,;]+/).map(s => s.trim()).filter(Boolean),
         stories:$('warmupStories').checked, story_privacy:$('warmupPrivacy').value,
         paid_gift:$('warmupGift').checked, gift_budget:Number($('warmupBudget').value)};
