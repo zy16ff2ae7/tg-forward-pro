@@ -3822,3 +3822,14 @@ button, input, select, textarea { -webkit-font-smoothing: antialiased; }
 /* Long launch summaries stay readable on a phone. */
 .confirm__text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .confirm__panel { max-height: 90dvh; overflow-y: auto; }
+
+/* Account setup and join progress */
+.account__tools { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+.profile__birthday { display:grid; grid-template-columns:1fr 1fr 1.4fr; gap:8px; }
+.profile__birthday input { width:100%; min-width:0; }
+#profileForm[hidden] { display:none; }
+#profileForm fieldset { border:0; padding:0; margin:0; min-width:0; }
+#profileStatus { white-space:pre-wrap; }
+.queue__report { padding:12px; font-size:13px; overflow-wrap:anywhere; }
+.queue__report details { max-height:260px; overflow:auto; }
+.queue__report p { margin:6px 0; }

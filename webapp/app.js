@@ -112,7 +112,7 @@ const FIELD_SPEC = {
     note: 'вступим перед первым кругом; приватные заявки и отсутствие доступа покажем как статус, не как падение',
     control: 'textarea',
   },
-  join_gap: { label: 'Пауза между вступлениями (сек)', control: 'number', placeholder: '60', note: 'минимум 30 — быстрее вступать опасно: заморозка' },
+  join_gap: { label: 'Пауза между вступлениями (сек)', control: 'number', placeholder: '60', note: 'пауза не гарантирует отсутствие ограничений; при отказе Telegram очередь остановится' },
   join_limit: { label: 'Вступать за один запуск', control: 'number', placeholder: '10', note: '0 — во все сразу (рискованно)' },
   daily_join_limit: { label: 'Лимит вступлений в сутки', control: 'number', placeholder: '10', note: 'на задачу; 0 — без лимита (рискованно)' },
   target_user: { label: 'За кем следим', placeholder: '@username или ссылка на профиль' },
@@ -1580,6 +1580,19 @@ function demoApi(path, options = {}) {
   if (clean === '/api/me') return demoMe();
   if (clean === '/api/commands') return { commands: DEMO_COMMANDS, groups: DEMO_COMMAND_GROUPS };
   if (clean === '/api/accounts') return demoAccounts();
+  const profileMatch = clean.match(/^\/api\/accounts\/(\d+)\/profile$/);
+  if (profileMatch) {
+    const id = profileMatch[1];
+    demoProfiles[id] ||= {first_name:'Анна', last_name:'', about:'Личный профиль', birthday:null, has_photo:false};
+    if (method === 'PATCH') {
+      const changes = JSON.parse(options.body || '{}');
+      Object.assign(demoProfiles[id], changes);
+      if (changes.photo) { demoProfiles[id].has_photo = true; delete demoProfiles[id].photo; }
+      return {applied:Object.keys(changes)};
+    }
+    return {...demoProfiles[id]};
+  }
+  if (/^\/api\/accounts\/\d+\/diagnostics$/.test(clean)) return {online:true, last_error:null, service_pause_until:null, note:'Демонстрация: данные Telegram не запрашиваются.', tasks:[]};
   if (clean.startsWith('/api/accounts/login/')) return demoLogin(clean, options);
   const retryMatch = clean.match(/^\/api\/accounts\/(\d+)\/retry$/);
   if (retryMatch) {
@@ -2879,6 +2892,7 @@ function taskBadge(task) {
   if (task.window_opens_at && Date.parse(task.window_opens_at) > Date.now()) return { kind: 'plan', label: 'ждёт окна' };
   if (task.schedule_only) return { kind: 'plan', label: task.scheduled_pending ? 'по расписанию' : 'расписание выполнено' };
   if (task.health && task.health.failing) return { kind: 'error', label: 'сбой' };
+  if (task.join_queue && task.join_queue.state) return {kind: task.join_queue.state === 'running' ? 'live' : 'plan', label: {running:'вступает', stopped:'остановлена', done:'обработана'}[task.join_queue.state] || 'очередь'};
   if (task.oneshot) return { kind: 'plan', label: 'по кнопке' };
   return { kind: 'live', label: 'включена' };
 }
@@ -3116,6 +3130,7 @@ function taskProgressHtml(task) {
    разовых. Вынесена отдельно, потому что нужна и полной карточке, и краткой
    на «Главной» — двух разных реализаций тут быть не должно. */
 function taskPauseButton(task) {
+  if (task.join_queue?.state === 'running') return `<button class="btn" data-action="stop" data-id="${task.id}">${icon('i-pause')} Остановить</button>`;
   if (task.oneshot) {
     return `<button class="btn" data-action="run" data-id="${task.id}">${icon('i-play')} Запустить</button>`;
   }
@@ -3188,6 +3203,7 @@ function taskCardHtml(task, options) {
         <span class="badge badge--${badge.kind}">${badge.label}</span>
       </div>
       ${taskProgressHtml(task)}
+      ${joinQueueHtml(task.join_queue)}
       ${taskAlertHtml(task)}
       ${actions}
     </div>`;
@@ -3234,6 +3250,7 @@ function renderTasks(tasks) {
   }
 
   holder.innerHTML = tasks.map(taskCardHtml).join('');
+  if (tasks.some(t => t.join_queue?.state === 'running')) scheduleJoinRefresh();
 }
 
 const ACTION_MESSAGES = {
@@ -3273,6 +3290,7 @@ async function taskAction(action, id, button) {
       openTaskEdit(id);
       return;
     }
+    if (action === 'stop') await withLoading(button, () => api(`/api/tasks/${id}/stop`, { method: 'POST' }));
     if (action === 'toggle') await withLoading(button, () => api(`/api/tasks/${id}/toggle`, { method: 'POST' }));
     if (action === 'mode') await withLoading(button, () => api(`/api/tasks/${id}/mode`, { method: 'POST' }));
     if (action === 'archive') await withLoading(button, () => api(`/api/tasks/${id}/archive`, { method: 'POST' }));
@@ -3307,6 +3325,7 @@ async function taskAction(action, id, button) {
    журнал задачи, и подсказка больше не единственное место, где он был. */
 function runMessage(run) {
   if (!run) return 'Готово';
+  if (run.queued) { scheduleJoinRefresh(); return 'Очередь запущена. Прогресс — в карточке задачи.'; }
   const done = [];
   if (run.joined) done.push(`вступили в ${run.joined}`);
   if (run.already) done.push(`уже были в ${run.already}`);
@@ -4153,9 +4172,118 @@ function accountHtml(account) {
                   aria-label="Отключить аккаунт ${esc(account.phone)}" title="Отключить аккаунт">${icon('i-trash')}</button>
         </div>
         <div class="account__meta"><span>${esc(taskLine)}</span>${seen ? `<span>${esc(seen)}</span>` : ''}</div>
+        <div class="account__tools">
+          <button class="btn btn--sm" data-action="profile-account" data-id="${account.id}">Профиль</button>
+          <button class="btn btn--sm" data-action="join-account" data-id="${account.id}">Вступить в чаты</button>
+          <button class="btn btn--sm" data-action="diagnose-account" data-id="${account.id}">Диагностика</button>
+        </div>
         ${trouble}
-        ${account.paused_until ? `<div class="account__reason">⏸ Спамблок: отправки стоят до ${esc(fmtPauseUntil(account.paused_until))}. Не запускайте задачи вручную — ограничение спадёт само.</div>` : ''}
+        ${account.paused_until ? `<div class="account__reason">⏸ Пауза сервиса до ${esc(fmtPauseUntil(account.paused_until))} после ограничения Telegram. Это не срок снятия спамблока.</div>` : ''}
       </div>`;
+}
+
+const demoProfiles = {};
+let profileEditing = null;
+let profileGeneration = 0;
+let joinRefreshTimer = null;
+function scheduleJoinRefresh() {
+  clearTimeout(joinRefreshTimer);
+  joinRefreshTimer = setTimeout(async () => {
+    try { await refreshAllTaskLists(); } finally {
+      if (Object.values(state.tasksByStatus).some(rows => rows.some(t => t.join_queue?.state === 'running'))) scheduleJoinRefresh();
+    }
+  }, 5000);
+}
+function joinQueueHtml(queue) {
+  if (!queue || !queue.state) return '';
+  const names = {joined:'вступили', already:'уже участник', requested:'заявка отправлена', waiting:'ожидание Telegram', restricted:'ограничение аккаунта', error:'не удалось'};
+  return `<div class="queue__report">
+    ${queue.current ? `<p>Сейчас: ${esc(queue.current)}</p>` : ''}
+    ${queue.error ? `<p>${esc(queue.error)}</p>` : ''}
+    ${queue.retry_at ? `<p>Повтор не раньше ${esc(fmtPauseUntil(queue.retry_at))}</p>` : ''}
+    ${queue.remaining ? `<p>Осталось минимум ${esc(queue.remaining)} чатов после лимита на запуск. Продолжите кнопкой «Запустить».</p>` : ''}
+    ${queue.limited ? '<p>Достигнут дневной лимит. Продолжите позже кнопкой «Запустить».</p>' : ''}
+    <details><summary>Результаты по чатам (${Object.keys(queue.items || {}).length})</summary>
+    ${Object.entries(queue.items || {}).map(([chat, item]) => `<p>${esc(chat)} — ${esc(names[item.status] || item.status)}${item.code ? ` · ${esc(item.code)}` : ''}</p>`).join('')}</details>
+  </div>`;
+}
+async function openAccountProfile(account) {
+  const generation = ++profileGeneration;
+  profileEditing = null;
+  $('profileForm').hidden = true;
+  $('profileStatus').textContent = 'Загружаем профиль из Telegram…';
+  $('profileTitle').textContent = `Профиль · ${account.phone}`;
+  $('profileSheet').classList.add('is-open');
+  try {
+    const profile = await api(`/api/accounts/${account.id}/profile`);
+    if (generation !== profileGeneration) return;
+    profileEditing = {id: account.id, profile};
+    $('profileFirst').value = profile.first_name;
+    $('profileLast').value = profile.last_name;
+    $('profileAbout').value = profile.about;
+    $('profileDay').value = profile.birthday?.day || '';
+    $('profileMonth').value = profile.birthday?.month || '';
+    $('profileYear').value = profile.birthday?.year || '';
+    $('profilePhoto').value = '';
+    $('profileStatus').textContent = profile.has_photo ? 'Фото уже установлено. Можно выбрать новое.' : 'Фото пока нет.';
+    $('profileForm').hidden = false;
+    $('profileFirst').focus();
+  } catch (error) { if (generation === profileGeneration) $('profileStatus').textContent = error.message; }
+}
+async function saveAccountProfile(event) {
+  event.preventDefault();
+  if (!profileEditing) return;
+  const editing = profileEditing;
+  let submitted = false;
+  await withLoading($('profileSave'), async () => {
+    try {
+      const body = {};
+      for (const [key, id] of [['first_name','profileFirst'],['last_name','profileLast'],['about','profileAbout']]) {
+        if ($(id).value !== editing.profile[key]) body[key] = $(id).value;
+      }
+      const day = $('profileDay').value, month = $('profileMonth').value, year = $('profileYear').value;
+      if ((day || month || year) && (!day || !month)) throw new Error('Укажите день и месяц рождения');
+      const birthday = day && month ? {day:Number(day), month:Number(month), year:year ? Number(year) : null} : null;
+      if (JSON.stringify(birthday) !== JSON.stringify(editing.profile.birthday)) body.birthday = birthday;
+      const file = $('profilePhoto').files[0];
+      if (file) {
+        if (!['image/jpeg','image/png'].includes(file.type) || file.size > 512 * 1024) throw new Error('Выберите JPEG/PNG до 512 КБ');
+        body.photo = await new Promise((resolve, reject) => {
+          const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]);
+          reader.onerror = () => reject(new Error('Не удалось прочитать фото')); reader.readAsDataURL(file);
+        });
+      }
+      if (!Object.keys(body).length) { toast('Изменений нет'); return; }
+      const labels = {first_name:'Имя', last_name:'Фамилия', about:'О себе', birthday:'Дата рождения', photo:'Фото'};
+      const summary = Object.entries(body).map(([key, value]) => `${labels[key]}: ${key === 'photo' ? file.name : key === 'birthday' ? (value ? `${value.day}.${value.month}${value.year ? '.' + value.year : ''}` : 'убрать') : value || 'очистить'}`).join('\n');
+      if (!await confirmAction(summary, {title:'Сохранить профиль в Telegram?', label:'Сохранить'})) return;
+      submitted = true;
+      await api(`/api/accounts/${editing.id}/profile`, {method:'PATCH', body:JSON.stringify(body)});
+      if (profileEditing !== editing) return;
+      $('profileStatus').textContent = 'Изменения сохранены в Telegram';
+      editing.profile = {...editing.profile, ...body}; delete editing.profile.photo;
+      $('profilePhoto').value = '';
+      toast('Профиль сохранён');
+    } catch (error) {
+      if (profileEditing !== editing) return;
+      $('profileStatus').textContent = error.message + (submitted ? ' Закройте и заново откройте профиль, чтобы проверить сохранённые данные.' : '');
+      if (submitted) { profileEditing = null; $('profileForm').hidden = true; }
+    }
+  });
+}
+async function openAccountDiagnostics(account) {
+  $('diagnosticsSheet').classList.add('is-open');
+  $('diagnosticsBody').textContent = 'Загрузка…';
+  try {
+    const data = await api(`/api/accounts/${account.id}/diagnostics`);
+    $('diagnosticsBody').innerHTML = `<p>${data.online ? 'Аккаунт на связи' : 'Аккаунт офлайн'}</p>
+      ${data.last_error ? `<p>${esc(data.last_error)}</p>` : ''}
+      ${data.service_pause_until ? `<p>Пауза сервиса до ${esc(fmtPauseUntil(data.service_pause_until))}</p>` : ''}
+      <p>${esc(data.note)}</p>
+      ${data.tasks.map(task => `<div class="queue__report"><strong>${esc(task.title)}</strong>
+        <p>${task.health.error ? esc(task.health.error) : 'В журнале нет ошибок'}${task.health.error_at ? ' · ' + esc(timeAgo(task.health.error_at)) : ''}</p>
+        ${joinQueueHtml(task.join_queue)}</div>`).join('')}`;
+  } catch (error) { $('diagnosticsBody').textContent = error.message; }
 }
 
 /* ────────────────── Шторка подключения аккаунта ──────────────────────── */
@@ -6117,6 +6245,7 @@ function closePicker() {
 }
 
 function closeSheets() {
+  profileGeneration += 1;
   stopLoginResendTimer();
   if ($('confirmSheet') && $('confirmSheet').classList.contains('is-open')) resolveConfirm(false);
   const loginWasOpen = $('loginSheet').classList.contains('is-open');
@@ -7205,6 +7334,9 @@ function bindEvents() {
     if (!button) return;
     const account = state.accounts.find((item) => item.id === Number(button.dataset.id));
     if (button.dataset.action === 'resume-login') openLoginSheet();
+    else if (button.dataset.action === 'profile-account') openAccountProfile(account);
+    else if (button.dataset.action === 'diagnose-account') openAccountDiagnostics(account);
+    else if (button.dataset.action === 'join-account') openTaskSheet(state.commands.find(c => c.id === 'autosubscribe'), {account_id: account.id, join_retries: 0});
     else if (button.dataset.action === 'retry-account') retryAccount(button.dataset.id, button);
     else if (button.dataset.action === 'relogin-account') {
       openLoginSheet(account ? account.phone : '');
@@ -7212,6 +7344,7 @@ function bindEvents() {
       deleteAccount(button.dataset.id, button);
     }
   });
+  $('profileForm').addEventListener('submit', saveAccountProfile);
   $('loginSubmit').addEventListener('click', submitLogin);
   $('loginInput').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {

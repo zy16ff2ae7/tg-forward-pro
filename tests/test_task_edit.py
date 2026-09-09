@@ -36,7 +36,13 @@ async def make_task(client, auth_headers, account_id: int, **fields) -> dict:
         "/api/tasks", json={"account_id": account_id, **fields}, headers=auth_headers
     )
     assert response.status == 201, await response.text()
-    return (await response.json())["task"]
+    task = (await response.json())["task"]
+    # Settings edits apply after the background join run finishes.
+    from app import join_queue
+    import asyncio
+    if join_queue.running(task["id"]):
+        await asyncio.wait_for(asyncio.shield(join_queue._jobs[task["id"]][0]), 2)
+    return task
 
 
 async def patch_task(client, auth_headers, task_id: int, **fields):

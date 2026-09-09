@@ -311,6 +311,7 @@ class ClientManager:
 
     def __init__(self) -> None:
         self._clients: dict[int, TelegramClient] = {}
+        self._profile_locks: dict[int, asyncio.Lock] = {}
         # (account_id, source_chat_id) -> список правил
         self._rules: dict[tuple[int, int], list[RuleSnapshot]] = {}
         # account_id -> правила, слушающие все чаты аккаунта (например, ЛС)
@@ -668,6 +669,8 @@ class ClientManager:
         return True
 
     async def stop_account(self, account_id: int) -> None:
+        from app import join_queue
+        await join_queue.stop_account(account_id)
         async with self._lock:
             client = self._clients.pop(account_id, None)
             # Чаты остановленного аккаунта — уже не его чаты: следующий вход
@@ -735,6 +738,14 @@ class ClientManager:
             return None
         return until
 
+    async def note_join_wait(self, rule, seconds):
+        """Persist Telegram's wait so another task cannot bypass it."""
+        until = max(time.time() + max(1, seconds), self.sending_paused_until(rule.account_id) or 0)
+        self._send_pause_until[rule.account_id] = until
+        async with session_scope() as session:
+            await repo.set_account_pause(session, rule.account_id, rule.user_id,
+                datetime.fromtimestamp(until, timezone.utc).replace(tzinfo=None), "join_flood_wait")
+
     async def note_peer_flood(
         self, account_id: int, rule: RuleSnapshot | None, detail: str = ""
     ) -> None:
@@ -755,7 +766,7 @@ class ClientManager:
         text = (
             "Telegram ограничил аккаунт за спам (PeerFlood)"
             f"{detail} — отправки на паузе до {when} UTC. "
-            "Не запускайте задачи вручную: ограничение спадёт само."
+            "Это защитная пауза сервиса, не срок снятия ограничения. Проверьте статус в @SpamBot."
         )
         logger.warning("Аккаунт #{}: {}", account_id, text)
         notify_user_id = int(rule.user_id) if rule is not None else 0
@@ -1027,6 +1038,8 @@ class ClientManager:
         if self._revive_task is not None:
             self._revive_task.cancel()
             self._revive_task = None
+        from app import join_queue
+        await join_queue.cancel_inactive(set())
         await delivery_queue.stop()
         for account_id in list(self._clients):
             await self.stop_account(account_id)
@@ -1056,6 +1069,22 @@ class ClientManager:
     def is_online(self, account_id: int) -> bool:
         client = self._clients.get(account_id)
         return bool(client is not None and client.is_connected())
+
+    def profile_client(self, account_id):
+        from app.errors import ConflictError
+        client = self._clients.get(account_id)
+        if client is None or not client.is_connected():
+            raise ConflictError("Аккаунт не в сети — подключите его заново или повторите позже")
+        return client
+
+    async def update_account_profile(self, account_id, changes):
+        from app import account_profile
+        from app.errors import ConflictError
+        lock = self._profile_locks.setdefault(account_id, asyncio.Lock())
+        if lock.locked():
+            raise ConflictError("Изменение профиля уже выполняется")
+        async with lock:
+            return await account_profile.update_profile(self.profile_client(account_id), changes)
 
     def online_ids(self) -> Iterable[int]:
         return [acc_id for acc_id in self._clients if self.is_online(acc_id)]
@@ -1468,6 +1497,8 @@ class ClientManager:
             )
             rules = result.scalars().all()
 
+        from app import join_queue
+        await join_queue.cancel_inactive({r.id for r in rules if not r.archived})
         fresh: dict[tuple[int, int], list[RuleSnapshot]] = {}
         floating: dict[int, list[RuleSnapshot]] = {}
         by_id: dict[int, RuleSnapshot] = {}

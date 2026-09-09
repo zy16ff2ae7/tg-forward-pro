@@ -47,6 +47,16 @@ async def database():
 
 
 @pytest.fixture(autouse=True)
+async def join_queue_per_test(database):
+    """Background jobs must finish before their database and event loop disappear."""
+    from app import join_queue
+    join_queue._rule_locks.clear()
+    yield
+    await join_queue.cancel_inactive(set())
+    join_queue._rule_locks.clear()
+
+
+@pytest.fixture(autouse=True)
 async def delivery_queue_per_test():
     """Очередь доставки одна на процесс, а цикл событий у каждого теста свой.
 

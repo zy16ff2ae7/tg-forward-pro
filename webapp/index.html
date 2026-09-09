@@ -551,6 +551,36 @@
        Вход проходит здесь целиком. Раньше кнопка «Добавить аккаунт» умела
        единственное — открыть чат с ботом, и человек уходил из кабинета на
        середине пути. Кнопка «Продолжить в боте» осталась как запасной путь. -->
+  <div class="sheet" id="profileSheet" role="dialog" aria-modal="true" aria-labelledby="profileTitle">
+    <div class="sheet__backdrop" data-close></div>
+    <div class="sheet__panel">
+      <div class="sheet__head"><div class="sheet__title" id="profileTitle">Профиль аккаунта</div>
+        <button class="icon-btn" data-close aria-label="Закрыть">×</button></div>
+      <p id="profileStatus" role="status" aria-live="polite"></p>
+      <form id="profileForm" class="form" hidden>
+        <label class="field">Имя<input class="input" id="profileFirst" maxlength="64" required></label>
+        <label class="field">Фамилия<input class="input" id="profileLast" maxlength="64"></label>
+        <label class="field">О себе<textarea class="input" id="profileAbout" maxlength="70" rows="3"></textarea></label>
+        <fieldset><legend>Дата рождения</legend><div class="profile__birthday">
+          <label class="field">День<input class="input" id="profileDay" type="number" min="1" max="31"></label>
+          <label class="field">Месяц<input class="input" id="profileMonth" type="number" min="1" max="12"></label>
+          <label class="field">Год<input class="input" id="profileYear" type="number" min="1876" max="2100"></label>
+        </div><p class="field__note">Год необязателен. Чтобы убрать дату, очистите все три поля. Видимость даты задаётся в Telegram.</p></fieldset>
+        <label class="field">Фото профиля<input id="profilePhoto" type="file" accept="image/jpeg,image/png">
+          <span class="field__note">JPEG/PNG до 512 КБ, от 160 до 4096 пикселей. Новое фото станет основным.</span></label>
+        <p class="field__note">Заполнение профиля не снимает ограничения Telegram.</p>
+        <button class="btn btn--primary btn--block" id="profileSave" type="submit">Проверить изменения</button>
+      </form>
+    </div>
+  </div>
+  <div class="sheet" id="diagnosticsSheet" role="dialog" aria-modal="true" aria-labelledby="diagnosticsTitle">
+    <div class="sheet__backdrop" data-close></div><div class="sheet__panel">
+      <div class="sheet__head"><div class="sheet__title" id="diagnosticsTitle">Диагностика аккаунта</div>
+        <button class="icon-btn" data-close aria-label="Закрыть">×</button></div>
+      <div id="diagnosticsBody" aria-live="polite"></div>
+      <a class="btn btn--block" href="https://t.me/SpamBot" target="_blank" rel="noopener noreferrer">Открыть @SpamBot</a>
+    </div>
+  </div>
   <div class="sheet" id="loginSheet" role="dialog" aria-modal="true" aria-label="Подключение аккаунта">
     <div class="sheet__backdrop" data-close></div>
     <div class="sheet__panel">

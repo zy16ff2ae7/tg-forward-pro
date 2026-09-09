@@ -21,7 +21,7 @@ from aiogram.types import BufferedInputFile, LabeledPrice
 from aiohttp import web
 from loguru import logger
 
-from app import accounts_login, bonus, exports, paylink, promocode, referral, webapp_build
+from app import account_profile, join_queue, accounts_login, bonus, exports, paylink, promocode, referral, webapp_build
 from app.config import settings
 from app.db import repo
 from app.db.database import SessionLocal
@@ -1378,7 +1378,7 @@ async def create_task(request: web.Request) -> web.Response:
     # Парсер и автоподписка работают по запросу — запускаем их сразу
     run_result: dict | None = None
     if kind in ONE_SHOT_KINDS:
-        run_result = await manager.run_task_now(rule)
+        run_result = await join_queue.start(manager, rule) if kind == "autosubscribe" else await manager.run_task_now(rule)
 
     async with SessionLocal() as session:
         saved = await repo.get_rule(session, rule_id, user_id)
@@ -1451,6 +1451,7 @@ async def _creation_preview(kind, filters, user_id, account_id, source, chats) -
 
 @routes.patch(r"/api/tasks/{task_id:\d+}")
 @require_auth
+@join_queue.edit_guard
 async def update_task(request: web.Request) -> web.Response:
     """Меняет настройки готовой задачи.
 
@@ -1476,6 +1477,8 @@ async def update_task(request: web.Request) -> web.Response:
         rule = await repo.get_rule(session, task_id, user_id)
         if rule is None:
             return _json({"error": "Задача не найдена"}, status=404)
+        if join_queue.running(rule.id):
+            return _json({"error": "Сначала остановите очередь вступлений, затем измените настройки"}, status=409)
         kind = rule.kind or "forward"
         account_id = rule.account_id
         filters = dict(rule.filters or {})
@@ -1665,6 +1668,8 @@ async def update_task(request: web.Request) -> web.Response:
         rule.target_id, rule.target_title = target_id, target_title
         rule.mode = mode
         rule.kind = kind
+        if join_queue.running(rule.id):
+            return _json({"error": "Очередь уже запущена. Остановите её перед правкой"}, status=409)
         rule.filters = filters
         if kind == "poster":
             # интервал постинга планировщик читает из delay_seconds
@@ -1877,8 +1882,21 @@ async def run_task(request: web.Request) -> web.Response:
 
     _require_account_login()
 
-    result = await manager.run_task_now(rule)
+    result = await join_queue.start(manager, rule) if rule.kind == "autosubscribe" else await manager.run_task_now(rule)
     return _json({"run": result})
+
+
+@routes.post(r"/api/tasks/{task_id:\d+}/stop")
+@require_auth
+async def stop_join_task(request):
+    async with SessionLocal() as session:
+        rule = await repo.get_rule(session, int(request.match_info["task_id"]), request[USER_ID_KEY])
+    if rule is None:
+        return _json({"error": "Задача не найдена"}, status=404)
+    if rule.kind != "autosubscribe":
+        return _json({"error": "Остановка доступна для очереди вступлений"}, status=409)
+    await join_queue.stop(rule.id)
+    return _json({"ok": True})
 
 
 @routes.get(r"/api/tasks/{task_id:\d+}/journal")
@@ -2673,6 +2691,48 @@ async def list_accounts(request: web.Request) -> web.Response:
             },
         }
     )
+
+
+async def _profile_account(request):
+    account_id = int(request.match_info["account_id"])
+    async with SessionLocal() as session:
+        account = await repo.get_account(session, account_id, request[USER_ID_KEY])
+    if account is None:
+        from app.errors import NotFoundError
+        raise NotFoundError("Аккаунт не найден")
+    return account
+
+
+@routes.get(r"/api/accounts/{account_id:\d+}/profile")
+@require_auth
+@rate_limit(15, 60)
+async def get_account_profile(request):
+    account = await _profile_account(request)
+    return _json(await account_profile.read_profile(manager.profile_client(account.id)))
+
+
+@routes.patch(r"/api/accounts/{account_id:\d+}/profile")
+@require_auth
+@rate_limit(5, 60)
+async def patch_account_profile(request):
+    account = await _profile_account(request)
+    changes = account_profile.validate_changes(await _login_body(request))
+    return _json(await manager.update_account_profile(account.id, changes))
+
+
+@routes.get(r"/api/accounts/{account_id:\d+}/diagnostics")
+@require_auth
+async def account_diagnostics(request):
+    account = await _profile_account(request)
+    async with SessionLocal() as session:
+        rules = [r for r in await repo.list_rules(session, request[USER_ID_KEY]) if r.account_id == account.id]
+        health = await repo.task_health(session, [r.id for r in rules])
+    return _json({"online": manager.is_online(account.id), "last_error": account.last_error,
+                  "service_pause_until": _pause_iso(account.id),
+                  "note": "Пауза сервиса не означает срок снятия ограничения Telegram. Статус аккаунта уточните в @SpamBot.",
+                  "tasks": [{"id": r.id, "title": task_title(r),
+                             "health": _health_view(health.get(r.id), chat_names(r)),
+                             "join_queue": join_queue.view(r) if r.kind == "autosubscribe" else None} for r in rules]})
 
 
 # ─────────────────────────── Подключение аккаунта ─────────────────────────────
@@ -3493,6 +3553,9 @@ def _task_view(
         }
         if conf.repeats > 0 and recipients:
             total = recipients * int(conf.repeats)
+    if kind == "autosubscribe":
+        view["join_queue"] = join_queue.view(rule)
+        done = sum(item.get("status") in ("joined", "already", "requested") for item in view["join_queue"].get("items", {}).values())
     view["progress"] = {"done": done, "total": total}
     # Названия чатов задачи — из общего ``app.task_health``: карточка в боте
     # называет чаты в причине сбоя теми же словами, что и кабинет.
