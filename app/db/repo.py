@@ -2551,6 +2551,37 @@ async def recent_logs(
     return result.scalars().all()
 
 
+async def rule_logs(
+    session: AsyncSession,
+    rule_id: int,
+    user_id: int,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+) -> Sequence[ForwardLog]:
+    """Журнал одной задачи с проверкой владельца на уровне запроса."""
+    result = await session.execute(
+        select(ForwardLog)
+        .where(ForwardLog.rule_id == rule_id, ForwardLog.user_id == user_id)
+        .order_by(ForwardLog.id.desc())
+        .offset(max(0, offset))
+        .limit(max(1, min(limit, 100)))
+    )
+    return result.scalars().all()
+
+
+async def count_rule_logs(
+    session: AsyncSession, rule_id: int, user_id: int
+) -> int:
+    """Количество строк журнала одной задачи."""
+    result = await session.execute(
+        select(func.count())
+        .select_from(ForwardLog)
+        .where(ForwardLog.rule_id == rule_id, ForwardLog.user_id == user_id)
+    )
+    return int(result.scalar() or 0)
+
+
 async def trim_forward_logs(
     session: AsyncSession, *, older_than_days: int = FORWARD_LOG_TTL_DAYS
 ) -> int:

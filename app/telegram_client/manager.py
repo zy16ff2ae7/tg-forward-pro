@@ -341,6 +341,17 @@ class ClientManager:
         # см. DIALOGS_CACHE_TTL — без него выбор чатов пачкой означал бы обход
         # диалогов на каждый отмеченный чат.
         self._dialogs_cache: dict[int, tuple[float, list[dict[str, Any]]]] = {}
+        # Долгий первый обход Telegram не должен блокировать HTTP-запрос на 20–30
+        # секунд. Один фоновый обход на аккаунт обслуживает и вкладку «Чаты», и
+        # picker, а повторные запросы ждут тот же Task, а не запускают дубликаты.
+        self._dialogs_loading: dict[int, asyncio.Task] = {}
+        # Последняя ошибка фонового обхода. Не перезапускаем Telegram-запрос на
+        # каждый polling-запрос кабинета: повтор запускается только кнопкой
+        # «Повторить».
+        self._dialogs_errors: dict[int, dict[str, Any]] = {}
+        # Текущий прогресс обхода: total у Telegram заранее неизвестен, но число
+        # уже прочитанных диалогов помогает отличить работу от зависания.
+        self._dialogs_progress: dict[int, int] = {}
         # account_id -> (когда прочитали, Telegram DialogFilter). Папки читаем
         # отдельно: список диалогов живёт своим кэшем и не зависит от поиска.
         self._dialog_folders_cache: dict[int, tuple[float, list[dict[str, Any]]]] = {}
@@ -663,6 +674,11 @@ class ClientManager:
             # должен увидеть свежий список, а не тот, что лежал в кэше.
             self._dialogs_cache.pop(account_id, None)
             self._dialog_folders_cache.pop(account_id, None)
+            self._dialogs_errors.pop(account_id, None)
+            self._dialogs_progress.pop(account_id, None)
+            loading = self._dialogs_loading.pop(account_id, None)
+            if loading is not None:
+                loading.cancel()
         if client is not None:
             try:
                 await client.disconnect()
@@ -1053,30 +1069,39 @@ class ClientManager:
         """
         return delivery_queue.stats()
 
-    async def list_dialogs(
-        self, account_id: int, limit: int = 0, folder_id: int | None = None
-    ) -> list[dict[str, Any]]:
-        """Чаты аккаунта, при необходимости уже отфильтрованные папкой Telegram.
+    def _dialogs_cache_fresh(self, account_id: int) -> bool:
+        cached = self._dialogs_cache.get(account_id)
+        return cached is not None and time.time() - cached[0] < DIALOGS_CACHE_TTL
 
-        Папка не является сущностью приложения: ``folder_id`` читается из
-        ``messages.getDialogFilters`` и превращается здесь в конкретный список
-        диалогов. Это важно для рассылки — планировщик получает обычные chat id,
-        а не хрупкую ссылку на UI-папку, и смешанный выбор «папка + чат» можно
-        дедуплицировать одним и тем же кодом.
+    @staticmethod
+    def _dialog_refresh_error(exc: Exception) -> str:
+        """Понятная причина сбоя без выдачи пользователю traceback Telethon."""
+        if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+            return "Не удалось связаться с Telegram. Проверьте сеть или прокси и повторите."
+        if isinstance(exc, FloodWaitError):
+            return "Telegram временно ограничил запросы. Подождите немного и повторите."
+        return "Telegram не смог загрузить список чатов. Попробуйте повторить загрузку."
+
+    async def _refresh_dialog_cache(self, account_id: int) -> None:
+        """Полностью обновляет список диалогов одного аккаунта.
+
+        Ошибка сохраняется отдельным состоянием. Это важно для кабинета: сбой
+        Telegram не должен выглядеть как бесконечный ``loading`` и не должен
+        запускать новый полный обход на каждый polling-запрос.
         """
-        if not settings.mtproto_ready:
-            return []
         client = self._clients.get(account_id)
         if client is None:
-            return []
-
-        cached = self._dialogs_cache.get(account_id)
-        if cached is not None and time.time() - cached[0] < DIALOGS_CACHE_TTL:
-            result = list(cached[1])
-        else:
-            result = []
-            # Не передаём limit в Telegram: короткий ответ нельзя класть в общий
-            # кэш, иначе после поиска «все чаты» внезапно станут пятью чатами.
+            self._dialogs_errors[account_id] = {
+                "message": "Аккаунт не подключён к Telegram. Перезапустите аккаунт и повторите.",
+                "at": time.time(),
+            }
+            current = asyncio.current_task()
+            if self._dialogs_loading.get(account_id) is current:
+                self._dialogs_loading.pop(account_id, None)
+            return
+        result: list[dict[str, Any]] = []
+        self._dialogs_progress[account_id] = 0
+        try:
             async for dialog in client.iter_dialogs(limit=None):
                 entity = dialog.entity
                 title = getattr(entity, "title", None) or getattr(entity, "first_name", None) or "Без имени"
@@ -1096,7 +1121,113 @@ class ClientManager:
                         "folder_id": int(getattr(dialog, "folder_id", 0) or 0),
                     }
                 )
-            self._dialogs_cache[account_id] = (time.time(), list(result))
+                self._dialogs_progress[account_id] = len(result)
+            self._dialogs_cache[account_id] = (time.time(), result)
+            self._dialogs_errors.pop(account_id, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — Telegram/сеть чинятся повтором
+            self._dialogs_errors[account_id] = {
+                "message": self._dialog_refresh_error(exc),
+                "at": time.time(),
+            }
+            logger.warning("Аккаунт #{}: список чатов не загрузился: {}", account_id, type(exc).__name__)
+        finally:
+            current = asyncio.current_task()
+            if self._dialogs_loading.get(account_id) is current:
+                self._dialogs_loading.pop(account_id, None)
+
+    def _start_dialog_refresh(self, account_id: int) -> asyncio.Task:
+        task = self._dialogs_loading.get(account_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self._refresh_dialog_cache(account_id))
+            self._dialogs_loading[account_id] = task
+        return task
+
+    def dialog_refresh_status(self, account_id: int) -> dict[str, Any]:
+        """Состояние фоновой загрузки для HTTP/UI-слоя."""
+        cached = self._dialogs_cache.get(account_id)
+        if self._dialogs_cache_fresh(account_id):
+            return {"state": "ready", "loaded": len(cached[1]) if cached else 0}
+        task = self._dialogs_loading.get(account_id)
+        loaded = self._dialogs_progress.get(account_id, 0)
+        if task is not None and not task.done():
+            return {
+                "state": "refreshing" if cached is not None else "loading",
+                "loaded": loaded,
+            }
+        error = self._dialogs_errors.get(account_id)
+        if error is not None:
+            return {
+                "state": "stale_error" if cached is not None else "error",
+                "message": error["message"],
+                "loaded": loaded,
+                "at": error["at"],
+            }
+        return {"state": "idle", "loaded": loaded}
+
+    def retry_dialogs(self, account_id: int) -> None:
+        """Явно запускает повтор после ошибки, не плодя параллельные обходы."""
+        task = self._dialogs_loading.get(account_id)
+        if task is not None and not task.done():
+            return
+        self._dialogs_errors.pop(account_id, None)
+        self._start_dialog_refresh(account_id)
+
+    async def warm_dialogs(self, account_id: int) -> bool:
+        """Прогревает кэш в фоне и сообщает, можно ли уже отдавать данные.
+
+        Если есть устаревший кэш, отдаём его сразу и обновляем в фоне
+        (stale-while-revalidate). Если кэша ещё нет, ``False`` означает loading
+        или сохранённую ошибку — точное состояние отдаёт status-метод.
+        """
+        if not settings.mtproto_ready or self._clients.get(account_id) is None:
+            return False
+        cached = self._dialogs_cache.get(account_id)
+        if self._dialogs_cache_fresh(account_id):
+            return True
+        task = self._dialogs_loading.get(account_id)
+        if task is not None and not task.done():
+            return cached is not None
+        if account_id in self._dialogs_errors:
+            return cached is not None
+        self._start_dialog_refresh(account_id)
+        return cached is not None
+
+    async def list_dialogs(
+        self, account_id: int, limit: int = 0, folder_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Чаты аккаунта, при необходимости уже отфильтрованные папкой Telegram.
+
+        Папка не является сущностью приложения: ``folder_id`` читается из
+        ``messages.getDialogFilters`` и превращается здесь в конкретный список
+        диалогов. Это важно для рассылки — планировщик получает обычные chat id,
+        а не хрупкую ссылку на UI-папку, и смешанный выбор «папка + чат» можно
+        дедуплицировать одним и тем же кодом.
+        """
+        if not settings.mtproto_ready:
+            return []
+        client = self._clients.get(account_id)
+        if client is None:
+            return []
+
+        if not self._dialogs_cache_fresh(account_id):
+            cached = self._dialogs_cache.get(account_id)
+            task = self._dialogs_loading.get(account_id)
+            if task is None and account_id not in self._dialogs_errors:
+                task = self._start_dialog_refresh(account_id)
+            # Старый кэш отдаём сразу, пока новый обход идёт. Без кэша
+            # внутренние вызовы (resolve_many/планировщик) по-прежнему ждут
+            # первый полный результат.
+            if cached is None and task is not None:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 — refresh already logged it
+                    logger.debug("Аккаунт #{}: ожидание списка чатов прервано: {}", account_id, type(exc).__name__)
+        cached = self._dialogs_cache.get(account_id)
+        result = list(cached[1]) if cached is not None else []
 
         if folder_id not in (None, 0):
             folders = await self.list_dialog_folders(account_id)
@@ -1106,6 +1237,40 @@ class ClientManager:
             else:
                 result = [row for row in result if _dialog_matches_folder(row, folder)]
         return result[:limit] if limit > 0 else result
+
+    def dialog_cache_token(self, account_id: int) -> str:
+        """Стабильная версия кэша диалогов для ETag.
+
+        Токен меняется только после нового полного обхода Telegram, а не на
+        каждый запрос кабинета. Поэтому поиск и picker могут честно отвечать
+        304 Not Modified, не сериализуя снова тысячи строк.
+        """
+        cached = self._dialogs_cache.get(account_id)
+        if cached is None:
+            return ""
+        return str(int(cached[0] * 1000))
+
+    def dialog_folder_counts(
+        self, dialogs: Sequence[dict[str, Any]], folders: Sequence[dict[str, Any]]
+    ) -> dict[int, int]:
+        """Считает все папки по уже загруженному списку диалогов.
+
+        Раньше API вызывал ``list_dialogs`` заново для каждой папки. Сам список
+        уже находился в минутном кэше, но фильтрация и копирование всё равно
+        повторялись, а мок/старый manager мог снова пойти в Telegram. Один
+        проход здесь даёт те же счётчики без N дополнительных вызовов.
+        """
+        rows = list(dialogs)
+        counts: dict[int, int] = {}
+        for folder in folders:
+            folder_id = int(folder.get("id") or 0)
+            if folder_id == 0:
+                counts[folder_id] = len(rows)
+            else:
+                counts[folder_id] = sum(
+                    1 for row in rows if _dialog_matches_folder(row, folder)
+                )
+        return counts
 
     async def list_dialog_folders(self, account_id: int) -> list[dict[str, Any]]:
         """Возвращает уже существующие папки Telegram, без создания копий в БД."""
@@ -1156,9 +1321,13 @@ class ClientManager:
         if account_id is None:
             self._dialogs_cache.clear()
             self._dialog_folders_cache.clear()
+            self._dialogs_errors.clear()
+            self._dialogs_progress.clear()
         else:
             self._dialogs_cache.pop(account_id, None)
             self._dialog_folders_cache.pop(account_id, None)
+            self._dialogs_errors.pop(account_id, None)
+            self._dialogs_progress.pop(account_id, None)
 
     async def resolve_chat(self, account_id: int, query: str) -> tuple[int, str] | None:
         """Находит чат по @username, ссылке t.me, числовому id или названию.

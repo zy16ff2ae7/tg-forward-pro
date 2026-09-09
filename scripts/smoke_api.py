@@ -2232,8 +2232,12 @@ async def check_chats_and_accounts(cab: Cabinet, rep: Report, account_id: int) -
     async def list_dialogs(_account_id: int, limit: int = 0):
         return dialogs[:limit] if limit > 0 else list(dialogs)
 
+    async def warm_dialogs(_account_id: int):
+        return True
+
     with configured(api_id=SMOKE_API_ID, api_hash=SMOKE_API_HASH), stubbed_gateway(
-        list_dialogs=list_dialogs
+        list_dialogs=list_dialogs, warm_dialogs=warm_dialogs,
+        is_online=lambda _account_id: True
     ):
         status, body = await cab.get(f"/api/chats?account_id={account_id}")
         rep.check(

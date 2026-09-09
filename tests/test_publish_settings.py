@@ -286,3 +286,40 @@ async def test_mode_toggle_refuses_forward_with_topic(
     switched = await client.post(f"/api/tasks/{task['id']}/mode", headers=auth_headers)
     assert switched.status == 200
     assert (await switched.json())["task"]["mode"] == "forward"
+
+async def test_poster_common_send_settings_are_available_on_schedule(
+    client, auth_headers, create_account, login_open, chats_resolved
+):
+    """Общие параметры отправления не должны исчезать у режима «по расписанию»."""
+    task = await _make(
+        client,
+        auth_headers,
+        create_account,
+        {
+            "command": "sender",
+            "send_mode": "schedule",
+            "message": "пост с https://example.com",
+            "targets": ["@ch-1", "@ch-2"],
+            "interval": 5,
+            "typing": True,
+            "random_pick": True,
+            "link_preview": True,
+            "pin_on_send": True,
+            "topic": 4,
+            "autodelete_hours": 2.5,
+            "mention_all": True,
+            "gap_jitter": 12,
+            "daily_cap": 250,
+        },
+    )
+    assert task["kind"] == "poster"
+    edit = task["edit"]
+    assert edit["typing"] is True
+    assert edit["random_pick"] is True
+    assert edit["link_preview"] is True
+    assert edit["pin_on_send"] is True
+    assert edit["topic"] == 4
+    assert edit["autodelete_hours"] == 2.5
+    assert edit["mention_all"] is True
+    assert edit["gap_jitter"] == 12
+    assert edit["daily_cap"] == 250

@@ -165,6 +165,7 @@
         <svg class="ic search__icon" aria-hidden="true"><use href="#i-search"/></svg>
         <input type="text" id="commandSearch" placeholder="Поиск команды"
                autocomplete="off" aria-label="Поиск команды">
+        <button class="search__clear" id="commandSearchClear" type="button" hidden aria-label="Очистить поиск">×</button>
       </div>
       <div class="chips" id="commandTags" role="tablist" aria-label="Группы команд"></div>
       <div id="templateStrip" hidden></div>
@@ -179,6 +180,7 @@
         <svg class="ic search__icon" aria-hidden="true"><use href="#i-search"/></svg>
         <input type="text" id="taskSearch" placeholder="Название, источник или приёмник"
                autocomplete="off" aria-label="Поиск задачи">
+        <button class="search__clear" id="taskSearchClear" type="button" hidden aria-label="Очистить поиск">×</button>
       </div>
       <div class="segmented" id="taskStatus" role="tablist" aria-label="Статус задач">
         <button class="seg is-active" data-status="active" role="tab" aria-selected="true">Активные</button>
@@ -207,6 +209,7 @@
         <svg class="ic search__icon" aria-hidden="true"><use href="#i-search"/></svg>
         <input type="text" id="chatSearch" placeholder="Название, тема или @username"
                autocomplete="off" aria-label="Поиск чата">
+        <button class="search__clear" id="chatSearchClear" type="button" hidden aria-label="Очистить поиск">×</button>
       </div>
       <div class="chips" id="chatTags"></div>
       <div class="folder-chips" id="chatFolders" hidden aria-label="Папки Telegram"></div>
@@ -414,6 +417,7 @@
         <div class="sheet__title">Что создаём?</div>
         <button class="icon-btn" data-close aria-label="Закрыть"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
       </div>
+      <div class="sheet__lead create-lead">Выберите, что нужно автоматизировать. Подробные настройки появятся следующим шагом, а запущенную задачу можно изменить позже.</div>
       <div class="create-grid" id="createGrid"></div>
     </div>
   </div>
@@ -436,12 +440,22 @@
           </div>
         </div>
         <div id="taskFields"></div>
-        <div class="hint" id="taskHint"></div>
+        <details class="task-preview" id="taskPreviewDetails">
+          <summary><span>Что произойдёт после запуска</span><i aria-hidden="true">⌄</i></summary>
+          <div id="taskPreview"></div>
+        </details>
+        <div class="hint task-hint" id="taskHint"></div>
         <!-- Лучшее время для постинга: пик активности ленты за 14 дней.
              Рисует maybeRenderActivityHint — только у постинга по расписанию. -->
-        <div class="hint" id="activityHint" hidden></div>
-        <button class="btn btn--primary btn--block" id="taskSubmit">Запустить задачу</button>
-        <div class="error" id="taskError" role="alert"></div>
+        <div class="hint activity-hint" id="activityHint" hidden></div>
+        <div class="task-submitbar">
+          <div class="task-submitbar__copy">
+            <b id="taskSubmitSummary">Проверьте поля перед запуском.</b>
+            <span>После запуска всё можно изменить в настройках задачи.</span>
+          </div>
+          <button class="btn btn--primary btn--block" id="taskSubmit">Запустить задачу</button>
+          <div class="error" id="taskError" role="alert"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -514,9 +528,11 @@
           <svg class="ic search__icon" aria-hidden="true"><use href="#i-search"/></svg>
           <input type="text" id="pickerSearch" placeholder="Название или @username"
                  autocomplete="off" aria-label="Поиск чата">
+          <button class="search__clear" id="pickerSearchClear" type="button" hidden aria-label="Очистить поиск">×</button>
         </div>
         <div class="folder-chips" id="pickerFolders" hidden aria-label="Папки Telegram"></div>
         <div class="sheet__lead" id="pickerLead"></div>
+        <div class="picker-recent" id="pickerRecent" hidden></div>
         <!-- Отметить весь список сразу: постить и рассылать можно в любое число
              чатов, и на сотне чатов «выбрать все» — единственный разумный путь.
              Кнопка знает про поиск: отмечает то, что видно на экране. -->
@@ -558,8 +574,11 @@
         <div class="sheet__lead" id="loginLead"></div>
         <label class="field">
           <span id="loginLabel">Номер телефона</span>
-          <input id="loginInput" type="tel" inputmode="tel" autocomplete="off"
-                 placeholder="+79001234567" aria-describedby="loginError">
+          <div class="login-input-wrap">
+            <input id="loginInput" type="tel" inputmode="tel" autocomplete="off"
+                   placeholder="+79001234567" aria-describedby="loginError">
+            <button class="login-input-reveal" id="loginReveal" type="button" hidden aria-label="Показать пароль">показать</button>
+          </div>
           <i class="field__note" id="loginNote"></i>
         </label>
         <button class="btn btn--primary btn--block" id="loginSubmit">Получить код</button>

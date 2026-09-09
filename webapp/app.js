@@ -10,6 +10,10 @@ const initData = tg ? tg.initData || '' : '';
 const DEMO = new URLSearchParams(location.search).has('demo') || !tg;
 
 let pendingConfirm = null;
+// Условные GET-запросы: чаты часто опрашиваются одновременно из вкладки,
+// picker-а и мастера. ETag оставляет данные в памяти, а серверу можно вернуть
+// 304 вместо повторной сериализации тысяч диалогов.
+const httpGetCache = new Map();
 
 const state = {
   me: null,
@@ -18,7 +22,7 @@ const state = {
   // Шаг, на котором сейчас стоит шторка подключения аккаунта. Настоящее
   // состояние входа помнит сервер (строка в pending_logins), здесь лежит
   // только то, что нужно нарисовать: какой вопрос задать и сколько попыток.
-  login: { stage: 'phone', phone: '', attemptsLeft: null },
+  login: { stage: 'phone', phone: '', attemptsLeft: null, resendUntil: 0 },
   commands: [],
   commandGroups: [],   // порядок и подписи блоков каталога (из /api/commands)
   commandGroup: null,  // выбранный чипс-фильтр каталога (null — все команды)
@@ -51,6 +55,7 @@ const state = {
   // ту же самую первую.
   resultsShown: 0,
   resultsTotal: 0,
+  resultsMode: 'results',
   bankedDays: 0,
   chats: [],                // последний список чатов с бэка
   chatFolderId: 0,
@@ -62,7 +67,7 @@ const state = {
   // сообщения для рассылки (mode 'library'). Одна шторка на оба случая —
   // список с отметками и поиском у них одинаковый.
   pickerGeneration: 0,
-  picker: { mode: 'chats', key: null, multi: false, chosen: [], chats: [], folderId: 0, folders: [], selectedFolders: [], generation: 0 },
+  picker: { mode: 'chats', key: null, multi: false, chosen: [], chats: [], folderId: 0, folders: [], selectedFolders: [], generation: 0, request: 0 },
   library: [],             // сохранённые сообщения (/api/library)
   libraryPick: [],         // id сообщений, выбранных в форме рассылки
   // Запись библиотеки, которую правят прямо сейчас: {id, post}. Правка идёт тем
@@ -187,9 +192,9 @@ const FIELD_SPEC = {
     note: 'синонимы и неотличимые буквы: поиск не опознает исходник',
   },
   alerts: {
-    label: 'Писать о проблемах',
+    label: 'Уведомлять об ошибках',
     control: 'check',
-    note: 'третья ошибка подряд — письмом в личку',
+    note: 'после трёх ошибок подряд отправим сообщение в личку',
   },
   invite_to: {
     label: 'Звать собранных в чат',
@@ -208,17 +213,17 @@ const FIELD_SPEC = {
     note: 'каждый новый пост закрепляется поверх прошлого',
   },
   topic: {
-    label: 'Ветка (топик)',
+    label: 'Тема сообщения',
     control: 'number',
     placeholder: '0',
-    note: 'id темы в группе с топиками. 0 — в общую ленту. Только режим «копия»',
+    note: 'По умолчанию: 0 — общая лента. Для группы с топиками укажите ID темы',
   },
   autodelete_hours: {
-    label: 'Удалять через часов',
+    label: 'Автоудаление',
     control: 'number',
     step: 'any',
     placeholder: '0',
-    note: 'можно дробью: 0.5 — полчаса. 0 — хранить вечно',
+    note: 'По умолчанию: 0 — не удалять. Можно дробью: 0,5 = 30 минут',
   },
   mention_all: {
     label: 'Упоминать всех участников',
@@ -229,10 +234,10 @@ const FIELD_SPEC = {
     label: 'Разброс задержки (сек)',
     control: 'number',
     placeholder: '0',
-    note: 'к задержке добавляется случайных 0–N секунд',
+    note: 'По умолчанию: 0. Добавляет случайные 0–N секунд',
   },
   gap_jitter: {
-    label: 'Разброс паузы между чатами (сек)',
+    label: 'Случайная добавка к паузе между чатами',
     control: 'number',
     placeholder: '10',
     note: '0 — пауза всегда одинаковая, роботов видно',
@@ -243,16 +248,16 @@ const FIELD_SPEC = {
     note: 'один и тот же порядок обхода — машинный след',
   },
   cycle_jitter: {
-    label: 'Разброс паузы между кругами (сек)',
+    label: 'Случайная добавка между кругами',
     control: 'number',
     placeholder: '60',
     note: 'только очередь: круги ходят с плавающим перерывом',
   },
   daily_cap: {
-    label: 'Отправок в сутки, не больше',
+    label: 'Дневной лимит отправок',
     control: 'number',
     placeholder: '0',
-    note: '0 — по прогреву аккаунта. Постинг ждёт полуночи, пересылка пост пропускает',
+    note: '0 или пусто — лимит сервиса. Лимиты аккаунта и ограничения Telegram действуют всегда',
   },
   schedule_only: { label: 'Только по датам (вместо кругов и окна)', control: 'check' },
   scheduled_posts: { label: 'Даты', control: 'schedule' },
@@ -743,6 +748,8 @@ const DEMO_ACCOUNTS = [{
   last_error: null,
   needs_login: false,
   created_at: '2026-08-12T10:00:00',
+  last_seen_at: demoAgo(2),
+  tasks: { active: 3, paused: 1, done: 2 },
 }, {
   // Второй аккаунт нарочно офлайн: иначе не видно ни причины, ни кнопки
   // повтора, а это самое частое состояние, из-за которого стоят задачи.
@@ -753,6 +760,8 @@ const DEMO_ACCOUNTS = [{
   last_error: 'Telegram не отдал данные аккаунта — пробуем снова',
   needs_login: false,
   created_at: '2026-09-01T09:20:00',
+  last_seen_at: demoAgo(48),
+  tasks: { active: 1, paused: 0, done: 0 },
 }];
 const DEMO_LOGIN = { pending: null, nextId: 3, sent: {} };
 const DEMO_MAX_ATTEMPTS = 5;
@@ -1226,11 +1235,21 @@ function demoTaskEdit(body, command, chats, libraryIds) {
     edit.end = body.end || '23:59';
     edit.tz = body.tz === undefined ? browserTz() : windowTz(body.tz);
     edit.gap = Number(body.gap) || 60;
-    edit.cycle = Number(body.cycle) || 600;
+    edit.cycle = Number(body.cycle) || 3600;
     edit.repeats = body.repeats === undefined ? 1 : Number(body.repeats) || 0;
+    edit.repeat_forever = kind === 'poster' ? false : Boolean(body.repeat_forever);
     edit.typing = Boolean(body.typing);
     edit.random_pick = Boolean(body.random_pick);
     edit.link_preview = Boolean(body.link_preview);
+    edit.pin_on_send = Boolean(body.pin_on_send);
+    edit.topic = Number(body.topic) || 0;
+    edit.autodelete_hours = Number(body.autodelete_hours) || 0;
+    edit.mention_all = Boolean(body.mention_all);
+    edit.gap_jitter = Number(body.gap_jitter) || 0;
+    edit.daily_cap = body.daily_cap === undefined || body.daily_cap === null || body.daily_cap === ''
+      ? null
+      : (Number(body.daily_cap) || 0);
+    edit.alerts = body.alerts === undefined ? true : Boolean(body.alerts);
   }
   return edit;
 }
@@ -1398,6 +1417,21 @@ function demoApi(path, options = {}) {
   const method = (options.method || 'GET').toUpperCase();
   const clean = path.split('?')[0];
   const query = new URLSearchParams(path.split('?')[1] || '');
+  if (clean === '/api/tasks' && method === 'POST' && query.get('preview') === '1') {
+    const body = JSON.parse(options.body || '{}');
+    const legacy = ['poster', 'mailing'].includes(body.command);
+    const command = DEMO_COMMANDS.find(item => item.id === (legacy ? 'sender' : body.command)) || {};
+    const kind = body.send_mode === 'queue' || body.command === 'mailing' ? 'mailing' : command.kind || 'forward';
+    const messages = splitMessages(body.message || '');
+    return { preview: { title: command.title || 'Задача', kind, source: body.source || '',
+      chats: (body.targets || (body.target ? [body.target] : [])).map(id => ({ id, title: String(id) })),
+      messages, messages_count: messages.length, window_start: body.start || '09:00',
+      window_end: body.end || '22:00', window_tz: body.tz ?? browserTz(),
+      gap_seconds: Math.max(30, Number(body.gap) || 60), cycle_seconds: Math.max(60, Number(body.cycle) || 3600),
+      interval_min: Number(body.interval) || 2, repeats: Number(body.repeats) || 0,
+      daily_cap: Number(body.daily_cap) || 0, scheduled_dates: [], schedule_only: false,
+      notes: ['Демонстрационный режим: доступ к чатам и преобразования текста проверяются на сервере при реальном запуске.'] } };
+  }
   const taskMatch = clean.match(/^\/api\/tasks\/(\d+)(?:\/(.+))?$/);
 
   if (taskMatch) {
@@ -1442,6 +1476,30 @@ function demoApi(path, options = {}) {
       // Сводку сервер отдаёт полем run (POST /api/tasks/{id}/run → {"run": …}) —
       // в демо было иначе, и кабинет показывал безликое «Готово» вместо итога.
       return { ok: true, run };
+    }
+    if (tail === 'journal') {
+      const items = [];
+      if (task && task.health && task.health.ok_at) {
+        items.push({
+          id: `${id}-ok`, status: 'ok', error: null,
+          source_msg_id: 1000 + Number(id), target_msg_id: 2000 + Number(id),
+          created_at: task.health.ok_at,
+        });
+      }
+      if (task && task.health && task.health.error) {
+        items.push({
+          id: `${id}-error`, status: 'error', error: task.health.error,
+          source_msg_id: 9000 + Number(id), target_msg_id: null,
+          created_at: task.health.error_at || task.health.ok_at,
+        });
+      }
+      const limit = Math.max(1, Math.min(Number(query.get('limit')) || 100, 1000));
+      const offset = Math.max(0, Number(query.get('offset')) || 0);
+      const page = items.slice(offset, offset + limit);
+      return {
+        kind: task ? task.kind : 'forward', total: items.length, offset,
+        has_more: offset + page.length < items.length, items: page,
+      };
     }
     if (tail === 'results') {
       // Страницами, как на сервере: кабинет просит сотню и сдвиг, а не «всё».
@@ -1606,15 +1664,19 @@ async function api(path, options = {}) {
   const controller = signal ? null : new AbortController();
   const timer = controller ? setTimeout(() => controller.abort(), timeout) : null;
   let response;
+  const method = String(fetchOptions.method || 'GET').toUpperCase();
+  const requestHeaders = {
+    'X-Telegram-Init-Data': initData,
+    'Content-Type': 'application/json',
+    ...(fetchOptions.headers || {}),
+  };
+  const cachedGet = method === 'GET' ? httpGetCache.get(path) : null;
+  if (cachedGet && cachedGet.etag) requestHeaders['If-None-Match'] = cachedGet.etag;
   try {
     response = await fetch(path, {
       ...fetchOptions,
       signal: signal || controller.signal,
-      headers: {
-        'X-Telegram-Init-Data': initData,
-        'Content-Type': 'application/json',
-        ...(fetchOptions.headers || {}),
-      },
+      headers: requestHeaders,
     });
   } catch (requestError) {
     if (requestError && requestError.name === 'AbortError' && controller) {
@@ -1624,6 +1686,7 @@ async function api(path, options = {}) {
   } finally {
     if (timer) clearTimeout(timer);
   }
+  if (response.status === 304 && cachedGet) return cachedGet.data;
   let data = {};
   try {
     data = await response.json();
@@ -1643,6 +1706,10 @@ async function api(path, options = {}) {
       error.message = 'Сессия Telegram устарела. Закройте и снова откройте кабинет.';
     }
     throw error;
+  }
+  if (method === 'GET') {
+    const etag = response.headers.get('ETag');
+    if (etag) httpGetCache.set(path, { etag, data });
   }
   return data;
 }
@@ -1894,7 +1961,8 @@ function renderHomeWizard() {
    откуда пришёл POST: строится обычная пересылка copy_channel. */
 const wizard = {
   step: 1, accountId: 0, source: '', target: '',
-  chats: [], online: true, query: '', generation: 0,
+  chats: [], online: true, query: '', generation: 0, loading: false, error: '',
+  refreshing: false, refreshError: '', loaded: 0,
 };
 
 async function openWizard() {
@@ -1918,7 +1986,8 @@ async function openWizard() {
   }
   Object.assign(wizard, {
     step: 1, accountId: account.id, source: '', target: '',
-    chats: [], online: true, query: '', generation: 0,
+    chats: [], online: true, query: '', generation: 0, loading: false, error: '',
+    refreshing: false, refreshError: '', loaded: 0,
   });
   $('wizardError').textContent = '';
   $('wizardSheet').classList.add('is-open');
@@ -1940,7 +2009,7 @@ function renderWizard() {
   const body = $('wizardBody');
   if (wizard.step === 4) {
     body.innerHTML = `
-      <div class="sheet__lead">🎉 Задача запущена: посты текут из источника в приёмник.</div>
+      <div class="sheet__lead">🎉 Задача создана: новые посты будут пересылаться в настроенное окно отправки.</div>
       <button class="btn btn--primary btn--block" type="button" data-wiz-done>К задачам</button>`;
     return;
   }
@@ -1974,29 +2043,52 @@ function renderWizardReview(body) {
     <div class="sheet__lead">Всё верно?</div>
     <div class="hint">📡 ${esc(wizard.source)} → ${esc(wizard.target)}</div>
     <div class="hint">👁 Глазами: ${esc(account ? (account.phone || ('#' + account.id)) : '—')}</div>
-    <div class="hint">⚡ Заработает сразу и круглосуточно — расписание пересылке ни к чему.</div>
+    <div class="hint">На следующем шаге проверим чаты и покажем окно отправки.</div>
     <div class="row">
       <button class="btn" type="button" data-wiz-back>Назад</button>
       <button class="btn btn--primary" type="button" data-wiz-submit>Запустить задачу</button>
     </div>`;
 }
 
-async function loadWizardChats() {
+async function loadWizardChats(retry = false) {
   const query = wizard.query;
   const generation = ++wizard.generation;
   const accountId = wizard.accountId;
   try {
-    const data = await api(`/api/chats?account_id=${accountId}&q=${encodeURIComponent(query)}`);
+    const retryParam = retry ? '&retry=1' : '';
+    const data = await api(`/api/chats?account_id=${accountId}&q=${encodeURIComponent(query)}${retryParam}`);
     if (generation !== wizard.generation || query !== wizard.query || accountId !== wizard.accountId) return;
-    wizard.chats = data.chats || [];
     wizard.online = data.online !== false;
+    wizard.refreshing = Boolean(data.refreshing);
+    wizard.refreshError = data.refresh_error || '';
+    wizard.loaded = Number(data.loaded || 0);
+    if (data.loading) {
+      wizard.loading = true;
+      wizard.error = '';
+      if (wizard.step === 1 || wizard.step === 2) renderWizardChats();
+      setTimeout(() => {
+        if (generation === wizard.generation && query === wizard.query && accountId === wizard.accountId) {
+          loadWizardChats();
+        }
+      }, 1200);
+      return;
+    }
+    wizard.loading = false;
+    wizard.error = '';
+    wizard.chats = data.chats || [];
     rememberChatNames(wizard.chats);
   } catch (error) {
     if (generation !== wizard.generation || query !== wizard.query || accountId !== wizard.accountId) return;
     wizard.chats = [];
+    wizard.loading = false;
+    wizard.error = error.message || 'Не удалось загрузить чаты из Telegram.';
     wizard.online = true;
   }
   if (generation === wizard.generation && (wizard.step === 1 || wizard.step === 2)) renderWizardChats();
+}
+
+function retryWizardChats() {
+  loadWizardChats(true);
 }
 
 function renderWizardChats() {
@@ -2006,12 +2098,22 @@ function renderWizardChats() {
     holder.innerHTML = emptyHtml('i-off', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте — список чатов читает он.');
     return;
   }
+  if (wizard.loading) {
+    holder.innerHTML = chatsLoadingHtml(wizard.loaded);
+    return;
+  }
+  if (wizard.error) {
+    holder.innerHTML = errorHtml(wizard.error, 'retryWizardChats');
+    return;
+  }
   if (!wizard.chats.length) {
-    holder.innerHTML = emptyHtml('i-search', 'Ничего не найдено', 'Измените запрос — или впишите @username ниже.');
+    const refreshNotice = chatRefreshNoticeHtml(wizard.refreshing, wizard.refreshError, wizard.loaded);
+    holder.innerHTML = refreshNotice + emptyHtml('i-search', 'Ничего не найдено', 'Измените запрос — или впишите @username ниже.');
     return;
   }
   const selected = wizardSelected();
-  holder.innerHTML = wizard.chats.map((chat) => {
+  const refreshNotice = chatRefreshNoticeHtml(wizard.refreshing, wizard.refreshError, wizard.loaded);
+  holder.innerHTML = refreshNotice + wizard.chats.map((chat) => {
     const ref = chatToRef(chat);
     const kind = chatKind(chat);
     const on = selected === ref;
@@ -2063,15 +2165,14 @@ function wizardNext() {
 
 async function submitWizard(button) {
   try {
-    await withLoading(button, () => api('/api/tasks', {
-      method: 'POST',
-      body: JSON.stringify({
-        command: 'copy_channel',
-        account_id: wizard.accountId,
-        source: wizard.source,
-        target: wizard.target,
-      }),
-    }));
+    const body = { command: 'copy_channel', account_id: wizard.accountId,
+      source: wizard.source, target: wizard.target };
+    const created = await withLoading(button, async () => {
+      if (!await reviewTaskBeforeStart(body)) return false;
+      await api('/api/tasks', { method: 'POST', body: JSON.stringify(body) });
+      return true;
+    });
+    if (!created) return;
     wizard.step = 4;
     renderWizard();
   } catch (requestError) {
@@ -2308,6 +2409,7 @@ function runSmartSearch() {
   const hits = smartMatch(query);
   if (!hits.length) {
     $('commandSearch').value = query;
+    syncSearchClearButton('commandSearch', 'commandSearchClear');
     switchTab('commands');
     renderCommands();
     return;
@@ -2341,12 +2443,21 @@ function openCreateSheet() {
   const holder = $('createGrid');
   holder.innerHTML = state.commands
     .map(
-      (command) => `
-      <button class="create-cell${command.status === 'ready' ? '' : ' is-off'}${HIT_COMMANDS.has(command.id) ? ' tile--hit' : ''}" data-command="${command.id}">
+      (command) => {
+        const meta = computeCommandState(command);
+        const locked = command.status !== 'ready';
+        return `
+      <button class="create-cell${locked ? ' is-off' : ''}${HIT_COMMANDS.has(command.id) ? ' tile--hit' : ''}"
+              data-command="${command.id}" aria-label="${esc(command.title)}${locked ? `, ${esc(meta.label)}` : ''}">
         ${HIT_COMMANDS.has(command.id) ? '<span class="tile__hit" aria-hidden="true">ХИТ</span>' : ''}
         <span class="tile__ico ${icoClass(command.kind)}" aria-hidden="true">${icon(kindIcon(command.kind))}</span>
-        <span class="create-cell__name">${esc(command.title)}</span>
-      </button>`
+        <span class="create-cell__body">
+          <span class="create-cell__name">${esc(command.title)}</span>
+          <span class="create-cell__desc">${esc(command.description || '')}</span>
+          <span class="create-cell__state status status--${meta.kind}"><span class="status__dot" aria-hidden="true"></span>${esc(meta.label)}</span>
+        </span>
+      </button>`;
+      }
     )
     .join('');
   $('createSheet').classList.add('is-open');
@@ -2620,6 +2731,18 @@ const BULK_DONE = {
   archive_all: 'Все задачи в архиве.',
 };
 
+function renderTaskStatusTabs() {
+  const labels = { active: 'Активные', paused: 'На паузе', done: 'Завершённые' };
+  document.querySelectorAll('#taskStatus .seg').forEach((seg) => {
+    const status = seg.dataset.status;
+    const count = (state.tasksByStatus[status] || []).length;
+    const active = status === state.taskStatus;
+    seg.classList.toggle('is-active', active);
+    seg.setAttribute('aria-selected', active ? 'true' : 'false');
+    seg.innerHTML = `${labels[status] || status}<b class="seg__count">${count}</b>`;
+  });
+}
+
 function renderBulkButtons() {
   const row = $('bulkRow');
   if (!row) return;
@@ -2652,7 +2775,7 @@ async function maybeRenderActivityHint(task) {
     if (Number.isFinite(parsed)) tz = parsed;
   }
   box.hidden = false;
-  box.textContent = '📊 Считаем активность ленты…';
+  box.innerHTML = '<span class="activity-hint__label">📊 Лучшее время</span><span>Считаем активность ленты…</span>';
   let data;
   try {
     data = await api(`/api/activity/hours?days=14&tz=${tz}`);
@@ -2663,16 +2786,18 @@ async function maybeRenderActivityHint(task) {
   // Шторку могли закрыть, пока считали, — не воскрешаем мёртвое.
   if (!$('taskSheet').classList.contains('is-open')) return;
   if (!data.total) {
-    box.textContent = '📊 Активности пока нет: как лента оживёт — подскажем лучшее окно.';
+    box.innerHTML = '<span class="activity-hint__label">📊 Лучшее время</span><span>Пока мало данных — подскажем окно, когда лента оживёт.</span>';
     return;
   }
   if (!data.peak) {
-    box.textContent = `📊 Событий пока мало (${data.total}) — окно посоветуем, когда наберётся.`;
+    box.innerHTML = `<span class="activity-hint__label">📊 Лучшее время</span><span>Пока мало данных (${data.total} соб.) — окно уточним позже.</span>`;
     return;
   }
   const clock = (hour) => `${String(hour).padStart(2, '0')}:00`;
-  box.innerHTML = `📊 Пик активности: <b>${clock(data.peak.start)}–${clock(data.peak.end)}</b> ` +
-    `(${data.total} соб.) <button type="button" class="btn btn--sm" id="activityApply">Поставить окно</button>`;
+  box.innerHTML = `<span class="activity-hint__label">📊 Лучшее время</span>` +
+    `<b>${clock(data.peak.start)}–${clock(data.peak.end)}</b>` +
+    `<span>по ${data.total} событиям</span>` +
+    `<button type="button" class="btn btn--sm" id="activityApply">Использовать</button>`;
   $('activityApply').addEventListener('click', () => {
     const start = $('task_start');
     const end = $('task_end');
@@ -2748,9 +2873,14 @@ function taskBadge(task) {
   // «работает» ровно тогда, когда сервис молча ничего не делает.
   if (subscriptionStopped()) return { kind: 'error', label: 'нет абонемента' };
   if (task.account_online === false) return { kind: 'error', label: 'нет связи' };
+  if (task.paused_until && Date.parse(task.paused_until) > Date.now()) return { kind: 'paused', label: 'ограничен' };
+  const own = task.mailing || task;
+  if (own.messages_gone && !own.messages_count && !task.schedule_only) return { kind: 'error', label: 'нет сообщений' };
+  if (task.window_opens_at && Date.parse(task.window_opens_at) > Date.now()) return { kind: 'plan', label: 'ждёт окна' };
+  if (task.schedule_only) return { kind: 'plan', label: task.scheduled_pending ? 'по расписанию' : 'расписание выполнено' };
   if (task.health && task.health.failing) return { kind: 'error', label: 'сбой' };
   if (task.oneshot) return { kind: 'plan', label: 'по кнопке' };
-  return { kind: 'live', label: 'работает' };
+  return { kind: 'live', label: 'включена' };
 }
 
 /* «5 минут назад» — по метке времени с сервера (она приходит в UTC с явной
@@ -2844,6 +2974,26 @@ function taskAlertHtml(task) {
         <span>${icon('i-lock')} Абонемент закончился — задача стоит. Продлите на вкладке «Оплата»,
         и она пойдёт сама: настройки на месте.</span>
       </div>`;
+  }
+  if (!task.archived && task.enabled) {
+    let reason = '';
+    let target = '';
+    if (task.account_online === false) {
+      reason = 'Нет связи с аккаунтом. Откройте «Аккаунты» и проверьте подключение.';
+      target = 'accounts';
+    } else if (task.paused_until && Date.parse(task.paused_until) > Date.now()) {
+      reason = `Отправки приостановлены до ${fmtPauseUntil(task.paused_until)} из-за ограничения Telegram. Повторный запуск не снимает ограничение.`;
+      target = 'accounts';
+    } else if ((task.mailing || task).messages_gone && !(task.mailing || task).messages_count && !task.schedule_only) {
+      reason = 'Выбранные сообщения удалены. Нажмите «Настроить» и выберите текст заново.';
+    } else if (task.window_opens_at && Date.parse(task.window_opens_at) > Date.now()) {
+      reason = `Окно отправки откроется ${fmtPauseUntil(task.window_opens_at)}. Задача продолжится автоматически.`;
+    } else if (task.schedule_only) {
+      reason = task.scheduled_pending
+        ? `Ближайшая публикация: ${fmtSchedNext(task.scheduled_next)}.`
+        : 'Все даты расписания обработаны. Добавьте новые через «Настроить».';
+    }
+    if (reason) return `<div class="task__alert task__alert--past"><span>${esc(reason)}</span>${target ? `<button class="btn btn--sm" data-goto="${target}">Аккаунты</button>` : ''}</div>`;
   }
   const health = task.health || {};
   if (!health.error) return '';
@@ -2997,6 +3147,9 @@ function taskActionsHtml(task) {
     // (парсер и ловец чеков). У автоподписки она тоже была, потому что задача
     // разовая, и всегда отвечала «Пока пусто»: вступление в чаты видно в
     // журнале карточки, а собранного у неё нет.
+    // Журнал нужен и обычной пересылке: по нему видно, что ушло, а что
+    // Telegram отклонил. Сборщики дополнительно получают отдельные результаты.
+    acts.push(`<button class="btn" data-action="journal" data-id="${task.id}">${icon('i-receipt')} Журнал</button>`);
     if (RESULTS_TITLES[kind]) {
       acts.push(`<button class="btn" data-action="results" data-id="${task.id}">${icon('i-file')} Результаты</button>`);
     }
@@ -3042,6 +3195,7 @@ function taskCardHtml(task, options) {
 
 function renderTasks(tasks) {
   const holder = $('taskList');
+  renderTaskStatusTabs();
   renderBulkButtons();
   // Подпись экрана честно считает по всем трём спискам, а не по видимому.
   // Без абонемента включённые задачи не работают, а стоят — иначе подпись
@@ -3049,7 +3203,7 @@ function renderTasks(tasks) {
   const counts = state.tasksByStatus;
   const live = (counts.active || []).length;
   $('taskSummary').textContent =
-    `${live} ${subscriptionStopped() ? 'ждут абонемента' : 'работают'} · ` +
+    `${live} ${subscriptionStopped() ? 'ждут абонемента' : 'включены'} · ` +
     `${(counts.paused || []).length} на паузе · ${(counts.done || []).length} в архиве`;
 
   // Поиск режет видимый список по названию, источнику и приёмнику — ищет
@@ -3128,6 +3282,10 @@ async function taskAction(action, id, button) {
       await openResults(id);
       return;
     }
+    if (action === 'journal') {
+      await openJournal(id);
+      return;
+    }
     if (action === 'run') {
       const data = await withLoading(button, () => api(`/api/tasks/${id}/run`, { method: 'POST' }));
       toast(runMessage(data.run), data.run && data.run.ok === false ? 'error' : 'ok');
@@ -3202,6 +3360,7 @@ function resultsMetaHtml(total, shown) {
 }
 
 async function openResults(id) {
+  state.resultsMode = 'results';
   const task = (state.tasks || []).find((item) => item.id === Number(id));
   // Пока ждём ответ, заголовок берём из карточки — чтобы шапка не была пустой.
   $('resultsTitle').textContent = RESULTS_TITLES[task ? task.kind : ''] || 'Результаты';
@@ -3244,22 +3403,72 @@ async function openResults(id) {
   }
 }
 
-/* Следующая страница собранного. Дописываем к тому, что уже на экране: человек
-   листает список сверху вниз, и перерисовка с начала теряла бы место чтения. */
+function journalRowHtml(item) {
+  const ok = item.status === 'ok';
+  const when = timeAgo(item.created_at) || String(item.created_at || '').replace('T', ' ').slice(0, 16);
+  const title = ok ? 'Отправлено' : 'Не отправлено';
+  const detail = ok
+    ? `сообщение ${item.source_msg_id || '—'}${item.target_msg_id ? ` → ${item.target_msg_id}` : ''}`
+    : (item.error || 'Telegram отклонил отправку');
+  return `<div class="journal-row journal-row--${ok ? 'ok' : 'error'}">
+    <div class="journal-row__mark" aria-hidden="true">${ok ? '✓' : '!'}</div>
+    <div class="journal-row__body">
+      <div class="journal-row__title">${title}</div>
+      <div class="journal-row__detail">${esc(String(detail))}</div>
+    </div>
+    <time class="journal-row__time">${esc(when)}</time>
+  </div>`;
+}
+
+async function openJournal(id) {
+  state.resultsMode = 'journal';
+  const task = [...Object.values(state.tasksByStatus).flat(), ...(state.tasks || [])]
+    .find((item) => item.id === Number(id));
+  $('resultsTitle').textContent = task ? `${task.title} · журнал` : 'Журнал задачи';
+  const body = $('resultsBody');
+  state.lastResultsId = id;
+  state.resultsShown = 0;
+  state.resultsTotal = 0;
+  $('resultsMore').hidden = true;
+  $('resultsExport').hidden = true;
+  $('resultsInvite').hidden = true;
+  beginLoad(body, 'plain', 4);
+  $('resultsSheet').classList.add('is-open');
+  try {
+    const data = await api(`/api/tasks/${id}/journal?limit=${RESULTS_PAGE}`);
+    endLoad(body);
+    if (!data.items.length) {
+      body.innerHTML = emptyHtml('i-receipt', 'Журнал пока пуст', 'Отправки появятся после первого срабатывания задачи.');
+      return;
+    }
+    state.resultsShown = data.items.length;
+    state.resultsTotal = data.total;
+    body.innerHTML = resultsMetaHtml(data.total, data.items.length) + data.items.map(journalRowHtml).join('');
+    $('resultsMore').hidden = !data.has_more;
+  } catch (error) {
+    failLoad(body, error, 'openJournal');
+  }
+}
+
+/* Следующая страница собранного или журнала. Дописываем к тому, что уже на
+   экране: человек листает список сверху вниз, и перерисовка с начала теряла бы
+   место чтения. */
 async function loadMoreResults(button) {
   const id = state.lastResultsId;
   if (id == null) return;
   await withLoading(button, async () => {
     try {
+      const endpoint = state.resultsMode === 'journal' ? 'journal' : 'results';
+      const row = state.resultsMode === 'journal' ? journalRowHtml : resultRowHtml;
       const data = await api(
-        `/api/tasks/${id}/results?limit=${RESULTS_PAGE}&offset=${state.resultsShown}`
+        `/api/tasks/${id}/${endpoint}?limit=${RESULTS_PAGE}&offset=${state.resultsShown}`
       );
       const body = $('resultsBody');
       const meta = body.querySelector('.results__meta');
       state.resultsShown += data.items.length;
       state.resultsTotal = data.total;
       if (meta) meta.outerHTML = resultsMetaHtml(data.total, state.resultsShown);
-      body.insertAdjacentHTML('beforeend', data.items.map(resultRowHtml).join(''));
+      body.insertAdjacentHTML('beforeend', data.items.map(row).join(''));
       $('resultsMore').hidden = !data.has_more;
     } catch (error) {
       toast(error.message || 'Не удалось показать ещё', 'error');
@@ -3345,7 +3554,10 @@ function toggleChatSelection(chat) {
   if (!chat || chat.id == null) return;
   const idx = state.selectedChats.findIndex((item) => item.id === chat.id);
   if (idx >= 0) state.selectedChats.splice(idx, 1);
-  else state.selectedChats.push(chat);
+  else {
+    state.selectedChats.push(chat);
+    rememberRecentChat(chatToRef(chat), chatTitle(chat));
+  }
   updateChatBar();
 }
 
@@ -3390,7 +3602,65 @@ function chatKind(chat) {
   return { icon: 'i-user', label: 'диалог' };
 }
 
-async function loadChats() {
+/* Оконный список для больших аккаунтов. Сервер всё равно отдаёт полный
+   массив (он нужен выбору папок и сохранению), но DOM получает только строки
+   вокруг viewport-а. Для маленьких списков оставляем обычную разметку: она
+   проще для клавиатуры и не добавляет лишний скролл. Высота строки фиксирована
+   CSS-ом, заголовки уже обрезаются ellipsis, поэтому окно не «прыгает». */
+const VIRTUAL_CHAT_THRESHOLD = 100;
+const VIRTUAL_ROW_HEIGHT = 76;
+
+function chatRowHtml(chat, picker = false) {
+  const ref = chatToRef(chat);
+  const kind = chatKind(chat);
+  const selected = picker
+    ? state.picker.chosen.includes(ref)
+    : isChatSelected(chat.id);
+  const attribute = picker
+    ? `data-pick-ref="${esc(ref)}"`
+    : `data-chat-id="${chat.id}"`;
+  return `
+    <button type="button" class="chat${selected ? ' is-selected' : ''}" ${attribute}>
+      <div class="chat__ico">${icon(kind.icon)}</div>
+      <div class="chat__body">
+        <div class="chat__title">${esc(chatTitle(chat))}</div>
+        <div class="chat__sub"><code>${esc(picker ? ref : chat.id)}</code>${chat.username && !picker ? ' · @' + esc(chat.username) : ''}</div>
+      </div>
+      <span class="chat__kind">${kind.label}</span>
+      ${picker ? pickerMarkHtml(selected) : `<span class="chat__check" aria-hidden="true">${selected ? '✓' : ''}</span>`}
+    </button>`;
+}
+
+function renderRowsWindowed(holder, rows, rowHtml, notice = '', label = 'Список') {
+  if (rows.length <= VIRTUAL_CHAT_THRESHOLD) {
+    holder.innerHTML = notice + rows.map(rowHtml).join('');
+    return;
+  }
+  holder.innerHTML = `${notice}
+    <div class="virtual-list" data-virtual-list role="list" aria-label="${esc(label)}">
+      <div class="virtual-list__track">
+        <div class="virtual-list__items"></div>
+      </div>
+    </div>`;
+  const viewport = holder.querySelector('[data-virtual-list]');
+  const track = viewport.querySelector('.virtual-list__track');
+  const items = viewport.querySelector('.virtual-list__items');
+  track.style.height = `${rows.length * VIRTUAL_ROW_HEIGHT}px`;
+
+  const draw = () => {
+    const first = Math.max(0, Math.floor(viewport.scrollTop / VIRTUAL_ROW_HEIGHT) - 8);
+    const last = Math.min(
+      rows.length,
+      Math.ceil((viewport.scrollTop + viewport.clientHeight) / VIRTUAL_ROW_HEIGHT) + 8,
+    );
+    items.style.transform = `translateY(${first * VIRTUAL_ROW_HEIGHT}px)`;
+    items.innerHTML = rows.slice(first, last).map(rowHtml).join('');
+  };
+  viewport.addEventListener('scroll', draw, { passive: true });
+  requestAnimationFrame(draw);
+}
+
+async function loadChats(retry = false) {
   const generation = ++state.loadGeneration.chats;
   const holder = $('chatList');
   const account = state.accounts[0];
@@ -3410,44 +3680,46 @@ async function loadChats() {
   const query = encodeURIComponent($('chatSearch').value || '');
   beginLoad(holder, 'plain', 5);
   try {
-    const data = await api(`/api/chats?account_id=${account.id}&q=${query}&folder_id=${state.chatFolderId || 0}`);
+    const retryParam = retry ? '&retry=1' : '';
+    const data = await api(`/api/chats?account_id=${account.id}&q=${query}&folder_id=${state.chatFolderId || 0}${retryParam}`);
     if (generation !== state.loadGeneration.chats) return;
     endLoad(holder);
-    state.chats = data.chats || [];
     state.chatFolders = data.folders || [];
     renderFolderChips('chatFolders', state.chatFolders, state.chatFolderId, false);
+    if (data.loading) {
+      holder.innerHTML = chatsLoadingHtml(data.loaded);
+      setTimeout(() => {
+        if (generation === state.loadGeneration.chats) loadChats();
+      }, 1200);
+      return;
+    }
+    state.chats = data.chats || [];
     rememberChatNames(state.chats);
+    const refreshNotice = chatRefreshNoticeHtml(data.refreshing, data.refresh_error, data.loaded);
     if (!data.online) {
       holder.innerHTML = emptyHtml('i-off', 'Аккаунт не в сети', 'Перезапустите аккаунт в боте.');
       updateChatBar();
       return;
     }
     if (!state.chats.length) {
-      holder.innerHTML = emptyHtml('i-search', 'Ничего не найдено', 'Измените запрос или тег.');
+      holder.innerHTML = refreshNotice + emptyHtml('i-search', 'Ничего не найдено', 'Измените запрос или тег.');
       updateChatBar();
       return;
     }
-    // Рисуем чаты КАК КНОПКИ: теперь их можно выбрать мышкой.
-    // Выделение сохраняется между поисковыми запросами — хранится в state,
-    // поэтому id чата не «теряется» после фильтра поиска.
-    holder.innerHTML = state.chats.map((chat) => {
-      const selected = isChatSelected(chat.id);
-      const kind = chatKind(chat);
-      return `
-        <button class="chat${selected ? ' is-selected' : ''}" data-chat-id="${chat.id}" type="button">
-          <div class="chat__ico">${icon(kind.icon)}</div>
-          <div class="chat__body">
-            <div class="chat__title">${esc(chat.title)}</div>
-            <div class="chat__sub"><code>${chat.id}</code>${chat.username ? ' · @' + esc(chat.username) : ''}</div>
-          </div>
-          <span class="chat__kind">${kind.label}</span>
-          <span class="chat__check" aria-hidden="true">${selected ? '✓' : ''}</span>
-        </button>`;
-    }).join('');
+    // Рисуем чаты КАК КНОПКИ: теперь их можно выбрать мышкой. На больших
+    // аккаунтах в DOM попадает только окно вокруг прокрутки — выбор остаётся
+    // полным в state и не зависит от того, сколько строк сейчас видно.
+    renderRowsWindowed(
+      holder,
+      state.chats,
+      (chat) => chatRowHtml(chat),
+      refreshNotice,
+      'Чаты аккаунта',
+    );
     updateChatBar();
   } catch (error) {
     if (generation === state.loadGeneration.chats) {
-      failLoad(holder, error, 'loadChats');
+      failLoad(holder, error, 'retryChatsLoad');
       updateChatBar();
     }
   }
@@ -3860,6 +4132,12 @@ function accountHtml(account) {
            ${account.needs_login ? 'Подключить заново' : 'Попробовать снова'}
          </button>
        </div>`;
+  const counts = account.tasks || {};
+  const taskTotal = Number(counts.active || 0) + Number(counts.paused || 0) + Number(counts.done || 0);
+  const taskLine = taskTotal
+    ? `${counts.active || 0} активных · ${counts.paused || 0} на паузе${counts.done ? ` · ${counts.done} в архиве` : ''}`
+    : 'задач на аккаунте нет';
+  const seen = account.last_seen_at ? `последняя связь ${timeAgo(account.last_seen_at)}` : '';
   return `
       <div class="account">
         <div class="account__row">
@@ -3874,6 +4152,7 @@ function accountHtml(account) {
           <button class="account__del" data-action="delete-account" data-id="${account.id}"
                   aria-label="Отключить аккаунт ${esc(account.phone)}" title="Отключить аккаунт">${icon('i-trash')}</button>
         </div>
+        <div class="account__meta"><span>${esc(taskLine)}</span>${seen ? `<span>${esc(seen)}</span>` : ''}</div>
         ${trouble}
         ${account.paused_until ? `<div class="account__reason">⏸ Спамблок: отправки стоят до ${esc(fmtPauseUntil(account.paused_until))}. Не запускайте задачи вручную — ограничение спадёт само.</div>` : ''}
       </div>`;
@@ -3921,10 +4200,40 @@ const LOGIN_ORDER = ['phone', 'code', 'password'];
 const LOGIN_PATHS = { phone: 'start', code: 'code', password: 'password' };
 const LOGIN_FIELDS = { phone: 'phone', code: 'code', password: 'password' };
 
+let loginResendTimer = null;
+
+function stopLoginResendTimer() {
+  if (loginResendTimer) clearInterval(loginResendTimer);
+  loginResendTimer = null;
+}
+
+function renderLoginResend() {
+  const button = $('loginResend');
+  if (!button) return;
+  const seconds = Math.max(0, Math.ceil((Number(state.login.resendUntil || 0) - Date.now()) / 1000));
+  const blocked = state.login.stage !== 'code' || seconds > 0;
+  button.disabled = blocked;
+  button.textContent = seconds > 0 ? `Повторить через ${seconds} сек` : 'Прислать ещё раз';
+  if (!seconds && state.login.resendUntil) {
+    state.login.resendUntil = 0;
+    stopLoginResendTimer();
+  }
+}
+
+function startLoginResendCooldown(seconds) {
+  const wait = Math.max(0, Number(seconds || 0));
+  if (!wait) return;
+  stopLoginResendTimer();
+  state.login.resendUntil = Date.now() + wait * 1000;
+  renderLoginResend();
+  loginResendTimer = setInterval(renderLoginResend, 250);
+}
+
 function loginReset() {
   // method: каким путём человек идёт — 'phone' или 'qr'. От него зависит, куда
   // уйдёт облачный пароль: пароль после сканирования принимает другой адрес.
-  state.login = { stage: 'phone', phone: '', attemptsLeft: null, delivery: null, method: 'phone' };
+  stopLoginResendTimer();
+  state.login = { stage: 'phone', phone: '', attemptsLeft: null, delivery: null, method: 'phone', resendUntil: 0 };
 }
 
 /* Куда Telegram положил код — словами. Ключи — delivery.via с сервера. */
@@ -3951,6 +4260,7 @@ function openLoginSheet(phone, keepPendingAction = false) {
       attemptsLeft: pending.attempts_left != null ? pending.attempts_left : null,
       delivery: null,
       method: 'phone',
+      resendUntil: 0,
     };
   } else {
     loginReset();
@@ -3985,12 +4295,19 @@ function renderLoginStage(message) {
   $('loginRestart').hidden = stage === 'phone';
   $('loginCreds').hidden = stage !== 'phone';
   $('loginResend').hidden = stage !== 'code';
+  renderLoginResend();
 
   const input = $('loginInput');
   input.type = spec.type;
   input.inputMode = spec.inputmode;
   input.placeholder = spec.placeholder;
   input.value = stage === 'phone' ? phone : '';
+  const reveal = $('loginReveal');
+  if (reveal) {
+    reveal.hidden = stage !== 'password';
+    reveal.textContent = 'показать';
+    reveal.setAttribute('aria-label', 'Показать пароль');
+  }
 
   const current = LOGIN_ORDER.indexOf(stage);
   document.querySelectorAll('#loginSteps .steps__item').forEach((item) => {
@@ -4080,6 +4397,7 @@ async function applyLoginStep(step) {
     attemptsLeft: step.attempts_left != null ? step.attempts_left : null,
     delivery: step.delivery || null,
     method: state.login.method,
+    resendUntil: 0,
   };
   renderLoginStage();
   if (step.stage === 'code' && wasStage === 'phone') toast(deliveryHint(step.delivery));
@@ -4110,6 +4428,13 @@ async function loginFailed(error) {
     await loadAccounts();
     return;
   }
+  const wait = Number((error.data && (error.data.wait || error.data.retry_after)) || error.retryAfter || 0);
+  if (error.status === 409 && wait > 0 && state.login.stage === 'code') {
+    renderLoginStage(error.message);
+    startLoginResendCooldown(wait);
+    $('loginInput').focus();
+    return;
+  }
   const step = error.data && error.data.stage ? error.data : null;
   if (step) {
     // Сервер знает, где человек теперь стоит: код на номер уже ушёл — значит,
@@ -4120,6 +4445,7 @@ async function loginFailed(error) {
       attemptsLeft: step.attempts_left != null ? step.attempts_left : state.login.attemptsLeft,
       delivery: state.login.delivery,
       method: state.login.method,
+      resendUntil: state.login.resendUntil || 0,
     };
     renderLoginStage(error.message);
     $('loginInput').focus();
@@ -4133,6 +4459,8 @@ async function loginFailed(error) {
 
 /* «Прислать ещё раз» — код не пришёл: повтор следующим способом доставки. */
 async function resendLogin() {
+  renderLoginResend();
+  if (state.login.resendUntil && state.login.resendUntil > Date.now()) return;
   const phone = state.login.phone || (state.pendingLogin && state.pendingLogin.phone) || '';
   if (!phone) {
     renderLoginStage('Сначала введите номер телефона.');
@@ -4295,6 +4623,7 @@ function openQrPassword(phone) {
     attemptsLeft: null,
     delivery: null,
     method: 'qr',
+    resendUntil: 0,
   };
   renderLoginStage();
   $('loginSheet').classList.add('is-open');
@@ -4368,7 +4697,7 @@ function resolveConfirm(value) {
 /* Свой confirm вместо window.confirm/Tg.showConfirm: он одинаково работает в
    Telegram, в обычном браузере и в preview, не теряется за клавиатурой и не
    выглядит как чужое системное окно. */
-function confirmAction(question) {
+function confirmAction(question, options = {}) {
   if (pendingConfirm) resolveConfirm(false);
   const sheet = $('confirmSheet');
   const text = $('confirmText');
@@ -4377,7 +4706,9 @@ function confirmAction(question) {
     try { return Promise.resolve(window.confirm(question)); } catch (_) { return Promise.resolve(false); }
   }
   text.textContent = question;
-  ok.textContent = question.startsWith('Отключить аккаунт') ? 'Отключить' : 'Удалить';
+  $('confirmTitle').textContent = options.title || 'Подтвердите действие';
+  ok.textContent = options.label || (question.startsWith('Отключить аккаунт') ? 'Отключить' : 'Удалить');
+  ok.className = options.label ? 'btn btn--primary' : 'btn btn--danger';
   sheet.classList.add('is-open');
   return new Promise((resolve) => { pendingConfirm = resolve; });
 }
@@ -4400,6 +4731,23 @@ function fillTaskAccounts() {
     .join('');
   const firstActive = state.accounts.find((account) => account.online);
   if (firstActive) select.value = String(firstActive.id);
+  renderTaskAccountNote();
+}
+
+function renderTaskAccountNote() {
+  const select = $('taskAccount');
+  const note = $('taskAccountNote');
+  if (!select || !note) return;
+  const account = state.accounts.find((item) => item.id === Number(select.value));
+  if (!account) {
+    note.textContent = 'Выберите аккаунт — он будет читать источник и отправлять сообщения.';
+    note.className = 'field__note task-account-note';
+    return;
+  }
+  note.textContent = account.online
+    ? 'На связи — можно загружать чаты и запускать задачу.'
+    : 'Офлайн — сначала восстановите подключение аккаунта.';
+  note.className = `field__note task-account-note${account.online ? ' is-online' : ' is-offline'}`;
 }
 
 /* Разметка одного поля шторки по ключу из needs/optional команды. */
@@ -4408,10 +4756,10 @@ function fieldHtml(key) {
   if (!spec) return '';
 
   if (spec.control === 'select') {
-    return `<label class="field"><span>${spec.label}</span><select id="taskAccount"></select></label>`;
+    return `<label class="field"><span class="field__label">${spec.label}</span><select id="taskAccount" aria-label="${esc(spec.label)}"></select><i class="field__note task-account-note" id="taskAccountNote"></i></label>`;
   }
   if (spec.control === 'mode') {
-    return `<div class="field"><span>${spec.label}</span>
+    return `<div class="field"><span class="field__label">${spec.label}</span>
       <div class="segmented segmented--sm" id="taskMode">
         <button type="button" class="seg is-active" data-mode="copy">Копия (без метки)</button>
         <button type="button" class="seg" data-mode="forward">Форвард</button>
@@ -4421,16 +4769,18 @@ function fieldHtml(key) {
     // Единый слот своих сообщений: механика — переключателем, а поля ниже
     // подстраиваются (см. applySendModeVisibility): расписанию — интервал и
     // окно, очереди — паузы и круги.
-    return `<div class="field"><span>${spec.label}</span>
+    return `<div class="field"><span class="field__label">${spec.label}</span>
       <div class="segmented segmented--sm" id="taskSendMode">
         <button type="button" class="seg is-active" data-send-mode="schedule">По расписанию</button>
         <button type="button" class="seg" data-send-mode="queue">По очереди</button>
-      </div></div>`;
+      </div>
+      <div class="send-mode-note" id="sendModeNote" aria-live="polite"></div>
+    </div>`;
   }
   if (spec.control === 'schedule') {
     // Редактор дат: строки «дата + текст» и кнопка. Даты уходят на сервер
     // UTC-строками: datetime-local отдаёт местное время устройства.
-    return `<div class="field"><span>${spec.label}</span>
+    return `<div class="field"><span class="field__label">${spec.label}</span>
       <div class="sched" id="scheduleList"></div>
       <button type="button" class="btn btn--pick" id="scheduleAdd">${icon('i-plus')} Добавить дату</button>
       <i class="field__note">прошедшие даты уйдут на ближайшем проходе</i>
@@ -4439,7 +4789,7 @@ function fieldHtml(key) {
   if (spec.control === 'parser_mode') {
     // Парсер: состав чата — это все, включая мёртвые души; авторы сообщений —
     // только те, кто пишет, то есть живая аудитория.
-    return `<div class="field"><span>${spec.label}</span>
+    return `<div class="field"><span class="field__label">${spec.label}</span>
       <div class="segmented segmented--sm" id="taskParserMode">
         <button type="button" class="seg is-active" data-parser-mode="participants">Участники</button>
         <button type="button" class="seg" data-parser-mode="history">Авторы сообщений</button>
@@ -4458,13 +4808,14 @@ function fieldHtml(key) {
     // ошибка дорогая: набранный прайс уходил десятком отдельных отправок.
     const counter = key === 'message'
       ? `<div class="field__count" id="count_${key}" hidden></div>` : '';
-    return `<label class="field"><span>${spec.label}</span>
+    return `<label class="field"><span class="field__label">${spec.label}</span>
       <textarea id="task_${key}" rows="4" placeholder="${esc(spec.placeholder || '')}"></textarea>
       ${counter}
       ${spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : ''}
       ${key === 'message' ? '<div class="preflight" id="messagePreflight" hidden aria-live="polite"></div>' : ''}
-      ${fromLibrary ? `<div class="field__aside">
-        <button type="button" class="btn btn--pick" data-pick-library="1">${icon('i-book')} из библиотеки</button>
+      ${fromLibrary ? `<div class="field__aside field__aside--library">
+        <button type="button" class="btn btn--pick" data-add-library="1">${icon('i-book')} из библиотеки</button>
+        <button type="button" class="btn btn--pick btn--library-select" data-pick-library="1" title="Выбрать отдельные записи">выбрать отдельно</button>
       </div>
       <div class="picks" id="libraryPicks"></div>` : ''}
     </label>`;
@@ -4474,7 +4825,7 @@ function fieldHtml(key) {
     // новая форма показывает то же, что сервер подставит сам.
     return `<label class="field field--check">
       <input type="checkbox" id="task_${key}"${spec.checked ? ' checked' : ''}>
-      <span>${spec.label}</span>
+      <span class="field__label">${spec.label}</span>
       ${spec.note ? `<i class="field__note">${esc(spec.note)}</i>` : ''}
     </label>`;
   }
@@ -4490,7 +4841,7 @@ function fieldHtml(key) {
     // ввода не читается — под полем показываем счёт, первые имена и «очистить».
     const counter = spec.pick === 'many'
       ? `<div class="field__count" id="count_${key}" hidden></div>` : '';
-    return `<label class="field"><span>${spec.label}</span>
+    return `<label class="field"><span class="field__label">${spec.label}</span>
       <div class="field__row">
         ${input}
         <button type="button" class="btn btn--pick" data-pick="${key}"
@@ -4500,7 +4851,7 @@ function fieldHtml(key) {
       ${note}
     </label>`;
   }
-  return `<label class="field"><span>${spec.label}</span>
+  return `<label class="field"><span class="field__label">${spec.label}</span>
     ${input}
     ${note}
   </label>`;
@@ -4591,6 +4942,41 @@ function chatRefName(ref) {
 
 /* Названия чатов из списка — в память кабинета. Список приходит с именами, и
    второй раз спрашивать сервер ради подписи под полем незачем. */
+const RECENT_CHATS_KEY = 'docha.recent-chats.v1';
+
+function readRecentChats() {
+  try {
+    const raw = localStorage.getItem(RECENT_CHATS_KEY);
+    const data = raw ? JSON.parse(raw) : [];
+    return Array.isArray(data) ? data.filter((item) => item && item.ref) : [];
+  } catch (_) { return []; }
+}
+
+function rememberRecentChat(ref, title) {
+  if (!ref) return;
+  const list = readRecentChats().filter((item) => item.ref !== String(ref));
+  list.unshift({ ref: String(ref), title: String(title || state.chatNames[String(ref)] || ref).slice(0, 80) });
+  try { localStorage.setItem(RECENT_CHATS_KEY, JSON.stringify(list.slice(0, 12))); } catch (_) { /* storage may be disabled */ }
+}
+
+function renderPickerRecent() {
+  const holder = $('pickerRecent');
+  if (!holder) return;
+  const query = ($('pickerSearch').value || '').trim();
+  const picker = state.picker;
+  const recent = readRecentChats().filter((item) => !query && !picker.folderId);
+  if (picker.mode !== 'chats' || !recent.length) {
+    holder.hidden = true;
+    holder.innerHTML = '';
+    return;
+  }
+  holder.hidden = false;
+  holder.innerHTML = `<div class="picker-recent__title">Недавно выбирали</div><div class="picker-recent__list">${recent.slice(0, 6).map((item) => `
+    <button type="button" class="picker-recent__chip${picker.chosen.includes(item.ref) ? ' is-selected' : ''}" data-recent-ref="${esc(item.ref)}">
+      <span>${esc(item.title)}</span><b>${picker.chosen.includes(item.ref) ? '✓' : '+'}</b>
+    </button>`).join('')}</div>`;
+}
+
 function rememberChatNames(chats) {
   (chats || []).forEach((chat) => {
     const title = chatTitle(chat);
@@ -4767,11 +5153,18 @@ function openTaskSheet(command, prefill, task) {
   state.pickerFolders = [];
 
   const editing = Boolean(state.editTask);
-  $('taskSheetTitle').innerHTML = editing
-    ? `${icon('i-sliders')} Настройка задачи`
+  const titleIcon = editing
+    ? 'i-sliders'
     : (state.activeCommand.id === 'sender' && state.sendMode === 'queue'
-      ? `${icon('i-send')} Рассылка по чатам`
-      : `${icon(kindIcon(state.activeCommand.kind))} ${esc(state.activeCommand.title)}`);
+      ? 'i-send'
+      : kindIcon(state.activeCommand.kind));
+  const titleText = editing
+    ? 'Настройка задачи'
+    : (state.activeCommand.id === 'sender' && state.sendMode === 'queue'
+      ? 'Рассылка по чатам'
+      : state.activeCommand.title);
+  $('taskSheetTitle').innerHTML = `${icon(titleIcon)}
+    <span class="task-title__copy"><small>ДОЧА</small><strong>${esc(titleText)}</strong></span>`;
   $('taskSheet').setAttribute('aria-label', editing ? 'Настройка задачи' : 'Новая задача');
   const canSwitchMode = editing && state.activeCommand.id === 'sender';
   $('taskSheetLead').textContent = editing
@@ -4780,14 +5173,51 @@ function openTaskSheet(command, prefill, task) {
         ? 'переключатель режима меняет механику, остальное — на месте.'
         : 'счётчики, номер задачи и место в круге рассылки останутся на месте.')
     : state.activeCommand.description || '';
-  const fieldKeys = [
-    ...state.activeCommand.needs,
-    ...(state.activeCommand.optional || []),
-  ];
-  $('taskFields').innerHTML = fieldKeys.map(fieldHtml).join('');
-  // Каждому полю — его ключ: по нему переключатель режима прячет чужое
-  // (расписанию не нужны паузы, очереди — окно времени).
-  [...$('taskFields').children].forEach((node, index) => {
+  const requiredKeys = [...(state.activeCommand.needs || [])];
+  const optionalKeys = [...(state.activeCommand.optional || [])];
+  const modeKeys = optionalKeys.filter((key) =>
+    [...SEND_MODE_FIELDS.schedule, ...SEND_MODE_FIELDS.queue].includes(key)
+  );
+  const commonKeys = optionalKeys.filter((key) => SEND_COMMON_FIELDS.includes(key));
+  const otherKeys = optionalKeys.filter((key) => !modeKeys.includes(key) && !commonKeys.includes(key));
+  const group = (label, keys, className) => keys.length
+    ? `<section class="task-subsection task-subsection--${className}">
+        <div class="task-subsection-label">${label}</div>
+        <div class="task-subsection-fields">${keys.map(fieldHtml).join('')}</div>
+      </section>`
+    : '';
+  const compactSender = state.activeCommand.id === 'sender';
+  const optionsTitle = compactSender ? 'Настройки отправки' : 'Дополнительные настройки';
+  const optionsSub = compactSender
+    ? 'Общие параметры и дополнительные опции'
+    : 'Общие параметры не зависят от режима отправки';
+  // У постинга режим — главный выбор, поэтому он остаётся на виду, а длинный
+  // список общих опций прячется в закрываемом блоке. Так форма не выглядит
+  // анкетой, но способ отправки нельзя случайно не заметить.
+  const visibleModeBlock = compactSender ? group('Способ отправки', modeKeys, 'mode') : '';
+  const optionsModeBlock = compactSender ? '' : group('Режим и расписание', modeKeys, 'mode');
+  const optionsBody = `<div class="task-options__body">
+          ${optionsModeBlock}
+          ${group('Общие настройки отправки', commonKeys, 'common')}
+          ${group('Другие параметры', otherKeys, 'other')}
+        </div>`;
+  const optionalBlock = optionalKeys.length
+    ? `<details class="task-options${compactSender ? ' task-options--compact' : ''}"${state.editTask ? ' open' : ''}>
+        <summary><span><b>${optionsTitle}</b><small>${optionsSub}</small></span><i aria-hidden="true">⌄</i></summary>
+        ${optionsBody}
+      </details>`
+    : '';
+  const fieldKeys = compactSender
+    ? [...modeKeys, ...requiredKeys, ...commonKeys, ...otherKeys]
+    : [...requiredKeys, ...modeKeys, ...commonKeys, ...otherKeys];
+  const primaryBlock = (requiredKeys.length ? '<div class="task-section-label">Основные настройки</div>' : '')
+    + requiredKeys.map(fieldHtml).join('');
+  $('taskFields').innerHTML = compactSender
+    ? visibleModeBlock + primaryBlock + optionalBlock
+    : primaryBlock + optionalBlock;
+  // Ключ хранится на реальном .field, поэтому режимы и сборщик запроса работают
+  // одинаково и для обычных, и для вложенных дополнительных полей.
+  [...$('taskFields').querySelectorAll('.field')].forEach((node, index) => {
     node.dataset.field = fieldKeys[index] || '';
   });
   $('taskHint').textContent = editing
@@ -4796,12 +5226,17 @@ function openTaskSheet(command, prefill, task) {
       windowMigrationHint(task)
     : state.activeCommand.hint
       || 'Аккаунт должен быть подписан на источник и иметь право писать в приёмник.';
-  $('taskSubmit').innerHTML = editing ? `${icon('i-check')} Сохранить` : `${icon('i-bolt')} Запустить задачу`;
+  $('taskSubmit').innerHTML = editing ? `${icon('i-check')} Сохранить` : `${icon('i-bolt')} Проверить перед запуском`;
+  const submitSummary = $('taskSubmitSummary');
+  if (submitSummary) submitSummary.textContent = editing
+    ? 'Изменения сохранятся в этой задаче — счётчики и прогресс не сбросятся.'
+    : 'Проверьте аккаунт, чаты и сообщение перед запуском.';
   $('taskError').textContent = '';
 
   fillTaskAccounts();
   bindSheetFields();
   applyTaskPrefill(prefill || {});
+  renderTaskSubmitSummary();
   const hasIncomingData = Boolean(
     prefill && (prefill.message || prefill.targets || prefill.subscribe_links || prefill.library_ids)
   );
@@ -4923,6 +5358,7 @@ function applyTaskPrefill(prefill) {
   } else if (account) {
     account.disabled = false;
   }
+  renderTaskAccountNote();
   if (Array.isArray(prefill.folder_ids)) {
     state.pickerFolderSelection = prefill.folder_ids.map(Number).filter((value) => Number.isFinite(value) && value >= 0);
     state.pickerFolders = Object.entries(prefill.folder_titles || {}).map(([id, title]) => ({ id: Number(id), title }));
@@ -4938,13 +5374,22 @@ function applyTaskPrefill(prefill) {
   preflightMessage();
 }
 
-/* Какие поля какому режиму единого слота: расписание живёт интервалом и
-   окном, очередь — паузами и кругами. Чужое прячем: спрятанное поле в запрос
-   не попадает (см. collectTaskPayload), а его значение лежит в задаче и ждёт
-   переключения режима обратно. */
+/* Общие настройки относятся к отправлению, а не к способу запуска. Они
+   одинаково работают у постинга «по расписанию» и у рассылки «по очереди»:
+   общий worker mailing_send поддерживает typing, случайный выбор, предпросмотр,
+   закреп, тему, автоудаление, упоминания и дневной лимит. */
+const SEND_COMMON_FIELDS = [
+  'typing', 'random_pick', 'link_preview', 'pin_on_send', 'topic',
+  'autodelete_hours', 'mention_all', 'daily_cap', 'alerts', 'gap_jitter',
+];
+
+/* Какие поля специфичны для режима единого слота. Скрываем только механику
+   запуска; общие настройки всегда остаются доступными и не теряются при
+   переключении. Поля, которых нет у конкретной команды, просто игнорируются.
+*/
 const SEND_MODE_FIELDS = {
-  schedule: ['schedule_only', 'interval', 'start', 'end', 'translate_to', 'uniquify'],
-  queue: ['gap', 'cycle', 'repeats', 'repeat_forever', 'typing', 'random_pick', 'link_preview', 'translate_to', 'uniquify', 'cycle_jitter', 'shuffle_chats', 'subscribe_links', 'join_gap', 'daily_join_limit'],
+  schedule: ['send_mode', 'schedule_only', 'scheduled_posts', 'interval', 'start', 'end', 'translate_to', 'uniquify'],
+  queue: ['send_mode', 'gap', 'cycle', 'repeats', 'repeat_forever', 'translate_to', 'uniquify', 'cycle_jitter', 'shuffle_chats', 'subscribe_links', 'join_gap', 'daily_join_limit'],
 };
 
 /* ─────────────── Редактор дат постинга ─────────────── */
@@ -5044,10 +5489,18 @@ function applySendModeVisibility() {
   const mode = state.sendMode || 'schedule';
   const visible = new Set(SEND_MODE_FIELDS[mode] || []);
   const either = new Set([...SEND_MODE_FIELDS.schedule, ...SEND_MODE_FIELDS.queue]);
+  const common = new Set(SEND_COMMON_FIELDS);
   holder.querySelectorAll('[data-field]').forEach((node) => {
     const key = node.dataset.field || '';
     if (either.has(key)) node.hidden = !visible.has(key);
+    else if (common.has(key)) node.hidden = false;
   });
+  const note = $('sendModeNote');
+  if (note) {
+    note.textContent = mode === 'schedule'
+      ? 'Работает до остановки: интервал и окно задаются выше. Общие параметры применяются к каждому посту.'
+      : 'Можно задать число кругов или включить «до остановки». Общие параметры применяются к каждому сообщению.';
+  }
 }
 
 function renderMessagePreflight(data) {
@@ -5084,7 +5537,64 @@ async function preflightMessage() {
   } catch (_) { /* диагностика не должна мешать сохранить задачу */ }
 }
 
+function renderTaskPreview() {
+  const holder = $('taskPreview');
+  const command = state.activeCommand;
+  if (!holder || !command) return;
+  const account = state.accounts.find((item) => item.id === Number(fieldValue('account')));
+  const rows = [];
+  const add = (label, value) => { if (value) rows.push(`<div class="task-preview__row"><span>${esc(label)}</span><b>${esc(String(value))}</b></div>`); };
+  add('Аккаунт', account ? account.phone : fieldValue('account'));
+  const source = fieldValue('source');
+  const target = fieldValue('targets') || fieldValue('target');
+  add('Источник', source);
+  if (target) {
+    const count = splitList(target).length;
+    add('Получатели', `${count} ${chatWord(count)}${count > 2 ? ' · список выбран' : ` · ${target}`}`);
+  }
+  if (fieldValue('message') || (state.libraryPick || []).length) {
+    const count = splitMessages(fieldValue('message')).length + (state.libraryPick || []).length;
+    add('Сообщение', `${count} ${messageWord(count)}`);
+  }
+  if (state.mode) add('Режим', state.mode === 'copy' ? 'копия без метки' : 'форвард');
+  if (state.sendMode) add('Отправка', state.sendMode === 'queue' ? 'по очереди' : 'по расписанию');
+  if (fieldValue('start') || fieldValue('end')) add('Окно', `${fieldValue('start') || '00:00'}–${fieldValue('end') || '23:59'}`);
+  holder.innerHTML = rows.length
+    ? rows.join('')
+    : '<div class="task-preview__empty">Заполните основные поля — здесь появится итог перед запуском.</div>';
+}
+
+function renderTaskSubmitSummary() {
+  const output = $('taskSubmitSummary');
+  const command = state.activeCommand;
+  if (!output || !command) return;
+  const labels = {
+    account: 'аккаунт', source: 'источник', target: 'приёмник', targets: 'чаты',
+    message: 'сообщение', subscribe_links: 'ссылки',
+  };
+  const missing = (command.needs || []).filter((key) => {
+    if (key === 'message' && (state.libraryPick || []).length) return false;
+    return !String(fieldValue(key) || '').trim();
+  });
+  if (missing.length) {
+    output.textContent = `Осталось указать: ${missing.map((key) => labels[key] || key).join(', ')}.`;
+    output.classList.add('is-warning');
+    renderTaskPreview();
+    return;
+  }
+  output.classList.remove('is-warning');
+  const targets = fieldValue('targets') || fieldValue('target');
+  const count = targets ? splitList(targets).length : 0;
+  const bits = [];
+  if (count) bits.push(`${count} ${chatWord(count)}`);
+  if (fieldValue('message') || (state.libraryPick || []).length) bits.push('сообщение готово');
+  output.textContent = `${state.editTask ? 'Готово к сохранению' : 'Готово к запуску'}${bits.length ? ` · ${bits.join(' · ')}` : ''}`;
+  renderTaskPreview();
+}
+
 function bindSheetFields() {
+  const account = $('taskAccount');
+  if (account) account.addEventListener('change', renderTaskAccountNote);
   const message = $('task_message');
   if (message) {
     let timer = null;
@@ -5100,6 +5610,7 @@ function bindSheetFields() {
       document.querySelectorAll('#taskMode .seg').forEach((item) => {
         item.classList.toggle('is-active', item === seg);
       });
+      renderTaskSubmitSummary();
     });
   });
   document.querySelectorAll('#taskSendMode .seg').forEach((seg) => {
@@ -5113,6 +5624,7 @@ function bindSheetFields() {
       applyRepeatForeverVisibility();
       scheduleTaskDraftSave();
       maybeRenderActivityHint(state.editTask || null);
+      renderTaskSubmitSummary();
     });
   });
   const schedBox = $('task_schedule_only');
@@ -5120,6 +5632,7 @@ function bindSheetFields() {
     schedBox.addEventListener('change', () => {
       buzz('light');
       applyScheduleVisibility();
+      renderTaskSubmitSummary();
     });
   }
   const repeatForever = $('task_repeat_forever');
@@ -5127,6 +5640,7 @@ function bindSheetFields() {
     repeatForever.addEventListener('change', () => {
       buzz('light');
       applyRepeatForeverVisibility();
+      renderTaskSubmitSummary();
     });
   }
   const schedAdd = $('scheduleAdd');
@@ -5222,10 +5736,11 @@ function openFieldPicker(key, multi) {
     chats: [], folderId: (key === 'targets' && state.pickerFolderSelection && state.pickerFolderSelection.length)
       ? Number(state.pickerFolderSelection[0]) : 0, folders: [],
     selectedFolders: key === 'targets' ? [...(state.pickerFolderSelection || [])] : [],
-    generation,
+    generation, request: 0,
   };
   $('pickerTitle').textContent = multi ? 'Выбор чатов' : 'Выбор чата';
   $('pickerSearch').value = '';
+  syncSearchClearButton('pickerSearch', 'pickerSearchClear');
   renderPickerFooter();
   $('pickerSheet').classList.add('is-open');
   loadPickerChats();
@@ -5234,6 +5749,33 @@ function openFieldPicker(key, multi) {
 /* Сообщения для рассылки. Текст отмеченной записи встаёт прямо в поле — его
    видно и можно поправить, — а готовый пост уходит в задачу ссылкой: своего
    текста у него нет. */
+async function addAllLibraryItems(button) {
+  try {
+    // Библиотека могла ещё ни разу не открываться в этой сессии: подгружаем её
+    // именно по нажатию, а не заставляем пользователя сначала идти во вкладку
+    // «Библиотека». Повторно выбранные тексты и посты дедуплицируются ниже.
+    if (!state.library.length) {
+      const data = await withLoading(button, () => api('/api/library'));
+      state.library = data.items || [];
+    }
+    if (!state.library.length) {
+      toast('Библиотека пуста. Сначала сохраните сообщение.');
+      return;
+    }
+    const ids = state.library.map((item) => Number(item.id)).filter(Boolean);
+    applyLibraryPick(ids);
+    scheduleTaskDraftSave();
+    const textCount = state.library.filter((item) => libraryText(item)).length;
+    const postCount = state.library.length - textCount;
+    const parts = [];
+    if (textCount) parts.push(`${textCount} ${messageWord(textCount)}`);
+    if (postCount) parts.push(`${postCount} ${postCount === 1 ? 'пост' : 'поста'}`);
+    toast(`Добавлено из библиотеки: ${parts.join(' и ')}`, 'ok');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
 function openLibraryPicker() {
   const generation = ++state.pickerGeneration;
   state.picker = {
@@ -5241,10 +5783,11 @@ function openLibraryPicker() {
     key: 'message',
     multi: true,
     chosen: state.libraryPick.map(String),
-    chats: [], folderId: 0, folders: [], selectedFolders: [], generation,
+    chats: [], folderId: 0, folders: [], selectedFolders: [], generation, request: 0,
   };
   $('pickerTitle').textContent = 'Сообщения из библиотеки';
   $('pickerSearch').value = '';
+  syncSearchClearButton('pickerSearch', 'pickerSearchClear');
   renderPickerFooter();
   $('pickerSheet').classList.add('is-open');
   loadPickerLibrary();
@@ -5300,6 +5843,7 @@ function pickerSelectVisible(select) {
     const mark = row.querySelector('.chat__check');
     if (mark) mark.textContent = on ? '✓' : '';
   });
+  renderPickerRecent();
   renderPickerFooter();
 }
 
@@ -5310,8 +5854,9 @@ function pickerReload() {
   else loadPickerChats();
 }
 
-async function loadPickerChats() {
+async function loadPickerChats(retry = false) {
   const generation = state.picker.generation;
+  const request = ++state.picker.request;
   const holder = $('pickerList');
   const account = pickerAccount();
   if (!account) {
@@ -5321,12 +5866,25 @@ async function loadPickerChats() {
   const query = encodeURIComponent($('pickerSearch').value || '');
   beginLoad(holder, 'plain', 4);
   try {
-    const data = await api(`/api/chats?account_id=${account.id}&q=${query}&folder_id=${state.picker.folderId || 0}`);
-    if (generation !== state.picker.generation || state.picker.mode !== 'chats') return;
+    const retryParam = retry ? '&retry=1' : '';
+    const data = await api(`/api/chats?account_id=${account.id}&q=${query}&folder_id=${state.picker.folderId || 0}${retryParam}`);
+    if (generation !== state.picker.generation || request !== state.picker.request || state.picker.mode !== 'chats') return;
     endLoad(holder);
-    state.picker.chats = data.chats || [];
     state.picker.folders = data.folders || [];
+    state.picker.refreshing = Boolean(data.refreshing);
+    state.picker.refreshError = data.refresh_error || '';
+    state.picker.loaded = Number(data.loaded || 0);
     renderFolderChips('pickerFolders', state.picker.folders, state.picker.folderId, true);
+    if (data.loading) {
+      holder.innerHTML = chatsLoadingHtml(data.loaded);
+      setTimeout(() => {
+        if (generation === state.picker.generation && request === state.picker.request && state.picker.mode === 'chats') {
+          loadPickerChats();
+        }
+      }, 1200);
+      return;
+    }
+    state.picker.chats = data.chats || [];
     rememberChatNames(state.picker.chats);
     if (state.picker.selectedFolders.length && state.picker.multi) {
       state.picker.chats.forEach((chat) => {
@@ -5341,10 +5899,18 @@ async function loadPickerChats() {
     }
     renderPickerList();
   } catch (error) {
-    if (generation === state.picker.generation && state.picker.mode === 'chats') {
-      failLoad(holder, error, 'loadPickerChats');
+    if (generation === state.picker.generation && request === state.picker.request && state.picker.mode === 'chats') {
+      failLoad(holder, error, 'retryPickerChatsLoad');
     }
   }
+}
+
+function retryChatsLoad() {
+  loadChats(true);
+}
+
+function retryPickerChatsLoad() {
+  loadPickerChats(true);
 }
 
 async function loadPickerLibrary() {
@@ -5373,25 +5939,19 @@ function renderPickerList() {
   }
   const holder = $('pickerList');
   const chats = state.picker.chats;
+  renderPickerRecent();
+  const refreshNotice = chatRefreshNoticeHtml(state.picker.refreshing, state.picker.refreshError, state.picker.loaded);
   if (!chats.length) {
-    holder.innerHTML = emptyHtml('i-search', 'Ничего не найдено', 'Измените запрос — или впишите @username прямо в поле.');
+    holder.innerHTML = refreshNotice + emptyHtml('i-search', 'Ничего не найдено', 'Измените запрос — или впишите @username прямо в поле.');
     return;
   }
-  holder.innerHTML = chats.map((chat) => {
-    const ref = chatToRef(chat);
-    const kind = chatKind(chat);
-    const on = state.picker.chosen.includes(ref);
-    return `
-      <button type="button" class="chat${on ? ' is-selected' : ''}" data-pick-ref="${esc(ref)}">
-        <div class="chat__ico">${icon(kind.icon)}</div>
-        <div class="chat__body">
-          <div class="chat__title">${esc(chatTitle(chat))}</div>
-          <div class="chat__sub"><code>${esc(ref)}</code></div>
-        </div>
-        <span class="chat__kind">${kind.label}</span>
-        ${pickerMarkHtml(on)}
-      </button>`;
-  }).join('');
+  renderRowsWindowed(
+    holder,
+    chats,
+    (chat) => chatRowHtml(chat, true),
+    refreshNotice,
+    'Выбор чатов',
+  );
 }
 
 /* Отметка справа. Когда чат нужен один, пустая рамка врёт: она обещает выбор
@@ -5438,8 +5998,12 @@ function togglePickerRef(ref) {
   }
   const idx = picker.chosen.indexOf(ref);
   if (idx >= 0) picker.chosen.splice(idx, 1);
-  else picker.chosen.push(ref);
+  else {
+    picker.chosen.push(ref);
+    rememberRecentChat(ref, state.chatNames[String(ref)] || ref);
+  }
   markPickerRow(ref, idx < 0);
+  renderPickerRecent();
   renderPickerFooter();
 }
 
@@ -5469,9 +6033,11 @@ function applyPicker() {
     state.pickerFolderSelection = [...(state.picker.selectedFolders || [])];
     state.pickerFolders = [...(state.picker.folders || [])];
   }
+  chosen.forEach((ref) => rememberRecentChat(ref, state.chatNames[String(ref)] || ref));
   const node = key ? $(`task_${key}`) : null;
   if (node) node.value = chosen.join(', ');
   renderFieldCount(key);
+  renderTaskSubmitSummary();
   closePicker();
 }
 
@@ -5501,6 +6067,7 @@ function applyLibraryPick(ids) {
   }
   renderLibraryPicks();
   renderFieldCount('message');
+  renderTaskSubmitSummary();
 }
 
 /* Текст записи библиотеки — тем же правилом, каким его сравнивает сервер. У
@@ -5546,10 +6113,11 @@ function renderLibraryPicks() {
 function closePicker() {
   $('pickerSheet').classList.remove('is-open');
   state.pickerGeneration += 1;
-  state.picker = { mode: 'chats', key: null, multi: false, chosen: [], chats: [], folderId: 0, folders: [], selectedFolders: [], generation: state.pickerGeneration };
+  state.picker = { mode: 'chats', key: null, multi: false, chosen: [], chats: [], folderId: 0, folders: [], selectedFolders: [], generation: state.pickerGeneration, request: 0 };
 }
 
 function closeSheets() {
+  stopLoginResendTimer();
   if ($('confirmSheet') && $('confirmSheet').classList.contains('is-open')) resolveConfirm(false);
   const loginWasOpen = $('loginSheet').classList.contains('is-open');
   const qrWasOpen = $('qrSheet').classList.contains('is-open');
@@ -5558,7 +6126,7 @@ function closeSheets() {
   state.activeCommand = null;
   state.editTask = null;
   state.pickerGeneration += 1;
-  state.picker = { mode: 'chats', key: null, multi: false, chosen: [], chats: [], folderId: 0, folders: [], selectedFolders: [], generation: state.pickerGeneration };
+  state.picker = { mode: 'chats', key: null, multi: false, chosen: [], chats: [], folderId: 0, folders: [], selectedFolders: [], generation: state.pickerGeneration, request: 0 };
   // Закрыли шторку на середине входа — в списке должна появиться карточка
   // «Продолжить вход»: шаг никуда не делся, он лежит в БД на сервере.
   if (loginWasOpen && state.login.stage !== 'phone') loadAccounts();
@@ -5681,7 +6249,8 @@ function collectTaskPayload() {
   number('delay_jitter', values.delay_jitter);
   number('gap_jitter', values.gap_jitter);
   number('cycle_jitter', values.cycle_jitter);
-  number('daily_cap', values.daily_cap);
+  if (values.daily_cap === '' && editing) body.daily_cap = null;
+  else number('daily_cap', values.daily_cap);
   number('max_warns', values.max_warns);
   number('mute_hours', values.mute_hours);
   flag('schedule_only', values.schedule_only);
@@ -5710,6 +6279,32 @@ function collectTaskPayload() {
   return { body };
 }
 
+function previewSummary(info) {
+  const lines = [info.title];
+  if (info.source) lines.push(`Источник: ${info.source}`);
+  if (info.chats.length) lines.push(`Получатели (${info.chats.length}):\n${info.chats.map(chat => chat.title || chat.id).join('\n')}`);
+  if (['forward', 'broadcast', 'clone', 'poster', 'mailing'].includes(info.kind) && !info.schedule_only) {
+    lines.push(windowLine(info));
+  }
+  if (info.kind === 'mailing') {
+    lines.push(`Пауза между чатами: не менее ${info.gap_seconds} сек; между кругами: ${info.cycle_seconds} сек.`);
+    lines.push(info.repeats ? `Кругов: ${info.repeats}` : 'Круги повторяются до остановки.');
+  }
+  if (info.kind === 'poster' && !info.schedule_only) lines.push(`Интервал: ${info.interval_min} мин.`);
+  if (info.scheduled_dates.length) lines.push(`Даты публикаций:\n${info.scheduled_dates.map(fmtSchedNext).join('\n')}`);
+  if (info.daily_cap) lines.push(`Лимит задачи: ${info.daily_cap} отправок в сутки. Общие ограничения аккаунта могут уменьшить число отправок.`);
+  if (info.messages_count) lines.push(`Сообщений: ${info.messages_count}. Показаны первые ${info.messages.length} текстовых примеров.`);
+  info.messages.forEach((text, index) => lines.push(`Сообщение ${index + 1}:\n${text}`));
+  lines.push(...info.notes);
+  lines.push('Проверка ничего не отправляет. Задача будет создана после нажатия «Запустить».');
+  return lines.join('\n\n');
+}
+
+async function reviewTaskBeforeStart(body) {
+  const data = await api('/api/tasks?preview=1', { method: 'POST', body: JSON.stringify(body) });
+  return confirmAction(previewSummary(data.preview), { title: 'Проверка перед запуском', label: 'Запустить' });
+}
+
 async function submitTask() {
   if (!state.activeCommand) return;
 
@@ -5723,9 +6318,13 @@ async function submitTask() {
   const submittedKind = state.activeCommand.kind;
   const button = $('taskSubmit');
   try {
-    const data = await withLoading(button, () => (editing
-      ? api(`/api/tasks/${editing.id}`, { method: 'PATCH', body: JSON.stringify(body) })
-      : api('/api/tasks', { method: 'POST', body: JSON.stringify(body) })));
+    const data = await withLoading(button, async () => {
+      if (!editing && !await reviewTaskBeforeStart(body)) return null;
+      return editing
+        ? api(`/api/tasks/${editing.id}`, { method: 'PATCH', body: JSON.stringify(body) })
+        : api('/api/tasks', { method: 'POST', body: JSON.stringify(body) });
+    });
+    if (!data) return;
     if (!editing) discardTaskDraft(state.activeCommand);
     closeSheets();
 
@@ -6171,6 +6770,28 @@ function renderMore() {
 
 /* ────────────────────────────── Пустое состояние ─────────────────────── */
 
+function chatsLoadingHtml(loaded = 0) {
+  const progress = Number(loaded) > 0
+    ? `Уже получено диалогов: ${Number(loaded).toLocaleString('ru-RU')}.`
+    : 'Первый обход может занять время у большого аккаунта.';
+  return `<div class="state state--loading" aria-live="polite">
+    <div class="state__title">Загружаем чаты из Telegram…</div>
+    <div class="state__text">${progress} Окно можно не держать открытым.</div>
+    <div class="state__spinner" aria-hidden="true"></div>
+  </div>`;
+}
+
+function chatRefreshNoticeHtml(refreshing, refreshError, loaded = 0) {
+  if (refreshError) {
+    return `<div class="chat-refresh chat-refresh--error" role="status">Список показан из кэша. ${esc(refreshError)}</div>`;
+  }
+  if (refreshing) {
+    const count = Number(loaded) > 0 ? ` Уже обработано: ${Number(loaded).toLocaleString('ru-RU')}.` : '';
+    return `<div class="chat-refresh" role="status">Обновляем список чатов в фоне…${count}</div>`;
+  }
+  return '';
+}
+
 function emptyHtml(iconId, title, text, pic = null) {
   const head = pic
     ? `<img class="empty__pic" src="${pic}" alt="" loading="lazy">`
@@ -6236,21 +6857,110 @@ function failLoad(holder, error, retryFn) {
 /* Пока идёт запрос, кнопка показывает спиннер: повторный тап ничего не сломает. */
 async function withLoading(button, action) {
   if (!button) return action();
-  const label = button.textContent;
+  // Сохраняем innerHTML, а не только textContent: иначе после первого запроса
+  // у кнопок с иконкой пропадал SVG и при повторном нажатии интерфейс выглядел
+  // иначе. aria-busy помогает скринридерам и не меняет визуальный spinner.
+  const content = button.innerHTML;
   button.classList.add('is-loading');
+  button.setAttribute('aria-busy', 'true');
   button.disabled = true;
   try {
     return await action();
   } finally {
     button.classList.remove('is-loading');
+    button.removeAttribute('aria-busy');
     button.disabled = false;
-    button.textContent = label;
+    button.innerHTML = content;
   }
 }
 
 /* ───────────────────────────────── Старт ─────────────────────────────── */
 
+function bindSearchClear(inputId, buttonId, onClear) {
+  const input = $(inputId);
+  const clear = $(buttonId);
+  if (!input || !clear) return;
+  const sync = () => { clear.hidden = !(input.value || '').trim(); };
+  input.addEventListener('input', sync);
+  clear.addEventListener('click', () => {
+    input.value = '';
+    sync();
+    onClear();
+    input.focus();
+  });
+  sync();
+}
+
+function syncSearchClearButton(inputId, buttonId) {
+  const input = $(inputId);
+  const clear = $(buttonId);
+  if (input && clear) clear.hidden = !(input.value || '').trim();
+}
+
+let sheetOpener = null;
+
+function sheetFocusable(sheet) {
+  return [...sheet.querySelectorAll(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [href], [tabindex]:not([tabindex="-1"])'
+  )].filter((node) => {
+    const style = window.getComputedStyle(node);
+    return !node.hidden && style.display !== 'none' && style.visibility !== 'hidden';
+  });
+}
+
+function installSheetAccessibility() {
+  if (installSheetAccessibility.done) return;
+  installSheetAccessibility.done = true;
+  document.addEventListener('keydown', (event) => {
+    const sheets = [...document.querySelectorAll('.sheet.is-open')];
+    const sheet = sheets[sheets.length - 1];
+    if (!sheet) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (sheet.id === 'pickerSheet') closePicker();
+      else closeSheets();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const nodes = sheetFocusable(sheet);
+    if (!nodes.length) return;
+    const first = nodes[0];
+    const last = nodes[nodes.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+
+  let hadOpen = false;
+  const observer = new MutationObserver(() => {
+    const open = [...document.querySelectorAll('.sheet.is-open')];
+    if (open.length) {
+      if (!hadOpen) sheetOpener = document.activeElement;
+      hadOpen = true;
+      const active = open[open.length - 1];
+      // Дать браузеру закончить animation/display: ручной focus() в login и
+      // picker после этого всё равно переиграет первый элемент.
+      setTimeout(() => {
+        if (!active.classList.contains('is-open')) return;
+        const nodes = sheetFocusable(active);
+        if (nodes.length && !active.contains(document.activeElement)) nodes[0].focus();
+      }, 0);
+    } else if (hadOpen) {
+      hadOpen = false;
+      const opener = sheetOpener;
+      sheetOpener = null;
+      if (opener && document.contains(opener) && !opener.disabled) opener.focus();
+    }
+  });
+  observer.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class'] });
+}
+
 function bindEvents() {
+  installSheetAccessibility();
   // Последние символы могли попасть в форму меньше чем за debounce-таймер до
   // сворачивания Mini App. Сохраняем их при уходе со страницы, не отправляя
   // ничего на сервер.
@@ -6279,6 +6989,10 @@ function bindEvents() {
   // Поиск по задачам: фильтрует уже загруженный список, без запросов.
   $('taskSearch').addEventListener('input', (event) => {
     state.taskQuery = event.target.value;
+    renderTasks(state.tasksByStatus[state.taskStatus]);
+  });
+  bindSearchClear('taskSearch', 'taskSearchClear', () => {
+    state.taskQuery = '';
     renderTasks(state.tasksByStatus[state.taskStatus]);
   });
 
@@ -6352,6 +7066,7 @@ function bindEvents() {
 
   // команды
   $('commandSearch').addEventListener('input', renderCommands);
+  bindSearchClear('commandSearch', 'commandSearchClear', renderCommands);
   $('commandTags').addEventListener('click', (event) => {
     const chip = event.target.closest('.chip');
     if (!chip) return;
@@ -6402,6 +7117,11 @@ function bindEvents() {
   $('chatSearch').addEventListener('input', () => {
     clearTimeout(chatTimer);
     chatTimer = setTimeout(loadChats, 350);
+  });
+  bindSearchClear('chatSearch', 'chatSearchClear', () => {
+    state.chatTag = null;
+    document.querySelectorAll('#chatTags .chip').forEach((item) => item.classList.remove('is-active'));
+    loadChats();
   });
   $('chatFolders').addEventListener('click', (event) => {
     const chip = event.target.closest('[data-folder-id]');
@@ -6465,6 +7185,7 @@ function bindEvents() {
       state.chatTag = tag;
       $('chatSearch').value = tag;
     }
+    syncSearchClearButton('chatSearch', 'chatSearchClear');
     loadChats();
   });
 
@@ -6497,6 +7218,15 @@ function bindEvents() {
       event.preventDefault();
       submitLogin();
     }
+  });
+  $('loginReveal').addEventListener('click', () => {
+    const input = $('loginInput');
+    const reveal = $('loginReveal');
+    if (!input || !reveal || state.login.stage !== 'password') return;
+    const visible = input.type === 'text';
+    input.type = visible ? 'password' : 'text';
+    reveal.textContent = visible ? 'показать' : 'скрыть';
+    reveal.setAttribute('aria-label', visible ? 'Показать пароль' : 'Скрыть пароль');
   });
   $('loginRestart').addEventListener('click', restartLogin);
   $('loginResend').addEventListener('click', resendLogin);
@@ -6604,6 +7334,12 @@ function bindEvents() {
   $('taskFields').addEventListener('click', (event) => {
     // Кнопки лежат внутри <label>: без preventDefault клик заодно уходит в
     // поле и на телефоне выскакивает клавиатура поверх списка.
+    const addLibrary = event.target.closest('[data-add-library]');
+    if (addLibrary) {
+      event.preventDefault();
+      addAllLibraryItems(addLibrary);
+      return;
+    }
     const library = event.target.closest('[data-pick-library]');
     if (library) {
       event.preventDefault();
@@ -6645,9 +7381,13 @@ function bindEvents() {
   $('taskFields').addEventListener('input', (event) => {
     const key = String(event.target.id || '').replace(/^task_/, '');
     if (key && $(`count_${key}`)) renderFieldCount(key);
+    renderTaskSubmitSummary();
     scheduleTaskDraftSave();
   });
-  $('taskFields').addEventListener('change', scheduleTaskDraftSave);
+  $('taskFields').addEventListener('change', () => {
+    renderTaskSubmitSummary();
+    scheduleTaskDraftSave();
+  });
   $('pickerFolders').addEventListener('click', (event) => {
     const chip = event.target.closest('[data-folder-id]');
     if (chip) selectFolder(chip.dataset.folderId, true);
@@ -6657,6 +7397,11 @@ function bindEvents() {
     if (!item) return;
     togglePickerRef(item.dataset.pickRef);
   });
+  $('pickerRecent').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-recent-ref]');
+    if (!item) return;
+    togglePickerRef(item.dataset.recentRef);
+  });
   $('pickerApply').addEventListener('click', applyPicker);
   $('pickerAll').addEventListener('click', () => pickerSelectVisible(true));
   $('pickerNone').addEventListener('click', () => pickerSelectVisible(false));
@@ -6664,6 +7409,9 @@ function bindEvents() {
   $('pickerSearch').addEventListener('input', () => {
     clearTimeout(pickerTimer);
     pickerTimer = setTimeout(pickerReload, 350);
+  });
+  bindSearchClear('pickerSearch', 'pickerSearchClear', () => {
+    pickerReload();
   });
   document.querySelectorAll('[data-picker-close]').forEach((node) => {
     node.addEventListener('click', closePicker);
@@ -6690,6 +7438,7 @@ function bindEvents() {
     if (!button) return;
     const name = button.dataset.retry;
     if (name === 'openResults') openResults(state.lastResultsId);
+    else if (name === 'openJournal') openJournal(state.lastResultsId);
     else if (typeof window[name] === 'function') window[name]();
   });
 }
