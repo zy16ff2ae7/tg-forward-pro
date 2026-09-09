@@ -40,7 +40,9 @@ echo "==> Синхронизирую файлы в $TARGET_HOST:$APP_DIR"
 # - scripts/gen_initdata.py подписывает валидный initData на любой user_id —
 #   готовый ключ от чужого кабинета при доступе к серверу. Остальные скрипты
 #   (import/export_session, gen_secret) на сервере используются, их оставляем.
-rsync -av --delete \
+# A local umask of 077 must not make Python sources unreadable to tgforward.
+# Private data and .env remain excluded and are restricted separately below.
+rsync -av --delete --chmod=Du=rwx,Dgo=rx,Fu+rw,Fgo+r \
   --exclude '.git' \
   --exclude 'venv' \
   --exclude '__pycache__' \
